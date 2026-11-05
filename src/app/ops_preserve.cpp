@@ -49,7 +49,11 @@ namespace sysrecover {
 
 
 // PIT-216：把目标分区的**现有内容整体移到 <root>~old**（旧系统保留，可回退）。
-// 同卷改名，秒级完成；返回移动的顶层条目数（<0 = 失败，未动数据）。
+// 同卷改名，秒级完成。
+// 返回值：>0 = 移动的顶层条目数；<0 = 失败。
+// 1.0 整改 H3：只要有任意一项移动失败（failed>0）或 Windows 目录没搬成功，
+// 就**先把已搬走的项回滚搬回根**再返回失败 —— 绝不留"半个旧系统"。原注释
+// "未动数据"与实现不符（部分移动失败时旧数据会一半在 ~old、一半在根）。
 int PreserveOldSystem(const std::wstring& root, std::string& log) {
     const std::wstring oldDir = root + L"~old";
     if (GetFileAttributesW(oldDir.c_str()) != INVALID_FILE_ATTRIBUTES) {
@@ -88,8 +92,13 @@ int PreserveOldSystem(const std::wstring& root, std::string& log) {
     log = "preserve-old: moved=" + std::to_string(moved) +
           " failed=" + std::to_string(failed) +
           " windows=" + std::to_string((int)winMoved);
-    if (!winMoved) {
-        log += " (Windows did not move -> abort)";
+    if (!winMoved || failed > 0) {
+        log += (!winMoved ? " (Windows did not move -> abort)"
+                          : " (partial move -> rollback)");
+        // H3：先回滚再返回失败，保证旧系统仍是完整可启动的一棵树。
+        std::string rlog;
+        RollbackPreservedOld(root, rlog);
+        log += "; " + rlog;
         return -1;
     }
     return moved;
