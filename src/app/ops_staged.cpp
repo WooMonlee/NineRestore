@@ -1,3 +1,6 @@
+// 九转还原：ops_staged（阶段 2 从 src/app/ops.cpp 机械拆分而来，逻辑未改）。
+// 拆分动机：0.9.96 的 ops.cpp 约 4700 行，备份/暂存/就地/引导/卷操作全部
+// 混在一个翻译单元里，无法按职责 review 或单测。本文件只搬代码，不改行为。
 // 备份/还原共享操作层实现。语义对齐 CLI（Phase 2-4 已验证）与旧 C# 编排器。
 #include "../common/i18n.h"
 #include "../common/xpress.h"  // PIT-213：单文件载荷压缩
@@ -41,9 +44,9 @@
 #include "imgsrc.h"
 
 #include "ops_internal.h"
+
 namespace sysrecover {
-namespace {
-}  // namespace
+
 
 // 还原的两条"安装"模式（共用同一套检查与契约，只有"是否立即重启"不同）：
 //   menuEntry=false：StageRestore —— 判定就地/暂存，暂存则设**单次启动**（BootNext/
@@ -1441,6 +1444,7 @@ int StageRestoreMenu(const RestoreRequest& req, std::string& err,
     return StageRestoreImpl(req, err, &needReboot, progress, adv,
                             /*menuEntry=*/true);
 }
+
 namespace {
 
 bool ReadWholeSmall(const std::wstring& path, std::string& out) {
@@ -1487,6 +1491,7 @@ unsigned long long DoneMarkerBytes(const std::wstring& dir) {
 }
 
 }  // namespace
+
 StagedTaskState CheckStagedTaskState(std::string* detailOut) {
     auto setD = [&](const std::string& d) {
         if (detailOut) *detailOut = d;
@@ -1602,6 +1607,7 @@ int CleanupStaleStagedTask() {
         LogWarn("stale staged task cleaned (" + std::to_string(n) + " item(s))");
     return n;
 }
+
 // 读"已安装菜单项"绑定的镜像/目标：<ContractDir()>\restore-task.conf（UTF-8，key=value）。
 bool ReadMenuBinding(std::wstring* imagePath, int* imageIndex,
                      unsigned long long* targetOffset,
@@ -1656,6 +1662,7 @@ void DeleteMenuBinding() {
     SetFileAttributesW(pend.c_str(), FILE_ATTRIBUTE_NORMAL);
     DeleteFileW(pend.c_str());
 }
+
 // 一键重试（P3 / PIT-148）：从 <ContractDir()>\restore-task.conf 重建请求并
 // StageRestore。仅 A/B 类失败可走此路（调用方已用 RescueStepRetryable 把关）；
 // keepOld 恒 false（重试要备返请走正常流程，见 ops.h）。
