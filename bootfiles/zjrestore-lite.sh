@@ -1325,11 +1325,25 @@ if [ "$TARGET_MODE" = "keep" ] && [ "$TARGET_FS" = "ntfs" ]; then
     fi
     if [ "$_wiped" = "1" ]; then
         say "wiped target; remaining root: [$_left] (elapsed $(($(date +%s) - _w0))s)"
-        # 残留 = wimlib NTFS 卷模式必失败（rc=46）。这是关键前置条件，必须显眼。
-        [ -n "$_left" ] && say "WARN: target root NOT empty -> wimlib NTFS mode will likely fail (rc=46)!"
+        # M2（1.0）：keep 模式下根目录不干净 = wimlib NTFS 卷模式必失败（rc=46）。
+        # 0.9.96 只 WARN 然后继续 apply：旧系统已清空、apply 必失败，目标盘变成
+        # "没有系统"的中间态。这里在**任何写入之前**中止，局面停在"目标盘已清空
+        # 但未写坏"，用户可回到菜单换模式重试。
+        if [ -n "$_left" ]; then
+            say "ERROR: target root NOT empty after wipe -> abort before apply"
+            say "left(<=20): $(ls -A /tmp/zj_wipe 2>/dev/null | head -n 20 | tr '\n' ' ')"
+            RESULT=FAILED
+            STEP=wipe-incomplete
+            exit 1
+        fi
         KEPT_FS=1
     else
-        say "warn: cannot mount target for wiping: $(cat /tmp/zjwipe.err 2>/dev/null | tr '\n' ' ')"
+        # M2：keep 模式却挂不上目标卷 = 无法保证"保留原文件系统"，继续 mkntfs
+        # 会直接格式化（与 keep 语义相反）。这里同样中止。
+        say "ERROR: cannot mount target for wiping: $(cat /tmp/zjwipe.err 2>/dev/null | tr '\n' ' ')"
+        RESULT=FAILED
+        STEP=wipe-not-mountable
+        exit 1
     fi
 fi
 if [ "$KEPT_FS" = "0" ]; then
@@ -1741,7 +1755,28 @@ fi
 #       捕获时已排除，见 ops.cpp EnsureEspExclusionConfig）；
 #   · 失败只报错**不中断**（bootfix 同款先例）：主系统已还原成功，ESP 没修好
 #     至少系统文件都在，现场还能排错/重试。
+# M4（1.0）：ESP 必须与目标分区在**同一块物理盘**上。
+# 返回值：0=同盘；1=不同盘；2=无法判断（虚拟盘/无 sysfs 信息）。
+# 依据 sysfs：分区目录 readlink -f 后的父目录就是物理盘（如 nvme0n1p1 → nvme0n1）。
+esp_same_disk(){
+    _rp=$(readlink -f "/sys/class/block/$(basename "$1")" 2>/dev/null) || return 2
+    _rpd=$(readlink -f "/sys/class/block/$(basename "$TARGET_DEV")" 2>/dev/null) || return 2
+    _pp=$(dirname "$_rp")
+    _ppd=$(dirname "$_rpd")
+    [ "$_pp" = "$_ppd" ] || return 1
+    # 有契约序列号时再核对一次（同名/同布局的多盘机尤其重要）
+    if [ -n "${TARGET_DISK_SERIAL:-}" ]; then
+        _sn=$(cat "/sys/block/$(basename "$_ppd")/device/serial" 2>/dev/null | tr -d '[:space:]')
+        if [ -n "$_sn" ] && [ "$_sn" != "$TARGET_DISK_SERIAL" ]; then
+            return 1
+        fi
+    fi
+    return 0
+}
 find_esp_dev(){
+    _cand=""
+    _cand_same=""
+    _unknown=0
     for _d in $(list_parts); do
         [ -b "$_d" ] || continue
         case "$_d" in *loop*|*ram*) continue ;; esac
@@ -1749,7 +1784,13 @@ find_esp_dev(){
         # ESP 一定在内置盘：U 盘上恰有 ESP 类型的 FAT 不该被当成目标机 ESP
         is_removable "$(basename "$_d")" && continue
         _t=$(timeout 30 blkid -s PART_ENTRY_TYPE -o value "$_d" 2>/dev/null | tr 'A-Z' 'a-z')
-        [ "$_t" = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" ] && { echo "$_d"; return 0; }
+        [ "$_t" = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" ] || continue
+        _cand="$_cand $_d"
+        esp_same_disk "$_d"
+        case $? in
+            0) _cand_same="$_cand_same $_d" ;;
+            2) _unknown=1 ;;
+        esac
     done
     for _d in $(list_parts); do
         [ -b "$_d" ] || continue
@@ -1760,18 +1801,40 @@ find_esp_dev(){
         # 已挂着的（如被认领为兜底日志窝的 ESP）直接用现挂载点判定
         _mp=$(awk -v d="$_d" '$1==d{print $2; exit}' /proc/mounts 2>/dev/null)
         if [ -n "$_mp" ]; then
-            [ -d "$_mp/EFI" ] && { echo "$_d"; return 0; }
-            continue
-        fi
-        mkdir -p /tmp/zj_esp_probe
-        if mnt_dev "$_d" /tmp/zj_esp_probe; then
-            if [ -d /tmp/zj_esp_probe/EFI ]; then
+            [ -d "$_mp/EFI" ] || continue
+        else
+            mkdir -p /tmp/zj_esp_probe
+            mnt_dev "$_d" /tmp/zj_esp_probe || continue
+            if [ ! -d /tmp/zj_esp_probe/EFI ]; then
                 umount /tmp/zj_esp_probe 2>/dev/null
-                echo "$_d"; return 0
+                continue
             fi
             umount /tmp/zj_esp_probe 2>/dev/null
         fi
+        _cand="$_cand $_d"
+        esp_same_disk "$_d"
+        case $? in
+            0) _cand_same="$_cand_same $_d" ;;
+            2) _unknown=1 ;;
+        esac
     done
+    # 优先同盘 ESP（多盘机绝不能把引导写到另一块盘的 ESP）
+    set -- $_cand_same
+    if [ $# -ge 1 ]; then
+        [ $# -gt 1 ] && say "WARN: multiple ESPs on target disk -> use $1"
+        echo "$1"
+        return 0
+    fi
+    # 无法判断磁盘归属（部分虚拟盘无 sysfs 型号信息）：只有**唯一**候选才接受
+    if [ "$_unknown" = "1" ]; then
+        set -- $_cand
+        if [ $# -eq 1 ]; then
+            say "WARN: ESP disk affinity unknown; single candidate $1"
+            echo "$1"
+            return 0
+        fi
+    fi
+    [ -n "$_cand" ] && say "ERROR: no ESP on target disk (candidates:$_cand) -> refuse to guess"
     return 1
 }
 # PIT-195（2026-10-31）：Windows 侧暂存时会把我们的启动项**置顶**到 BootOrder，
@@ -2066,7 +2129,8 @@ say "========================================="
 # 目标分区（C:）不再写任何日志；其它分区上的还原环境（ZJRESTORE/grldr/
 # grldr.mbr/menu.lst）与日志一并清掉。**只在成功路径执行**：失败时脚本提前
 # 退出，靠 trap persist_log 把日志留在非目标分区，便于排查/重试。
-# 只清「我们铺的」分区（有 grldr.mbr 或 ZJRESTORE 才动），绝不碰用户的镜像文件。
+# 只清「我们铺的」分区：必须有 $ZJRDIR 救援目录，或 grldr.mbr 内容带 ZJRESTORE
+# 特征（M3 修正了旧注释——0.9.96 实际只按文件名删，会误删用户自己的引导器）。
 cleanup_after_success(){
     for _d in $(list_parts); do
         [ -b "$_d" ] || continue
@@ -2076,12 +2140,26 @@ cleanup_after_success(){
         mkdir -p /tmp/zj_cl
         if mnt_dev "$_d" /tmp/zj_cl; then
             _did=0
-            # 旧版本遗留在数据盘根目录的引导文件（新布局下不会再有）
-            if [ -f /tmp/zj_cl/grldr ] || [ -f /tmp/zj_cl/grldr.mbr ] || \
-               [ -f /tmp/zj_cl/menu.lst ]; then
+            # M3（1.0）：只删「确认是本项目铺设」的引导文件。0.9.96 只看文件名，
+            # 数据盘根目录里用户自己的 Grub4DOS（grldr/menu.lst）也会被删。
+            # 归属判定（满足其一才动）：
+            #   a) 卷上有本项目的救援目录 $ZJRDIR（证明我们确实在这块盘铺过）；
+            #   b) grldr.mbr 内容带本项目特征串 ZJRESTORE。
+            _ours=0
+            [ -d "/tmp/zj_cl/$ZJRDIR" ] && _ours=1
+            if [ "$_ours" = "0" ] && [ -f /tmp/zj_cl/grldr.mbr ]; then
+                grep -a -q "ZJRESTORE" /tmp/zj_cl/grldr.mbr 2>/dev/null && _ours=1
+            fi
+            if [ "$_ours" = "1" ] && { [ -f /tmp/zj_cl/grldr ] || \
+               [ -f /tmp/zj_cl/grldr.mbr ] || [ -f /tmp/zj_cl/menu.lst ]; }; then
+                say "cleanup: removing project boot files on $_d: $(ls /tmp/zj_cl/grldr /tmp/zj_cl/grldr.mbr /tmp/zj_cl/menu.lst 2>/dev/null | sed 's#/tmp/zj_cl/##' | tr '\n' ' ')"
                 rm -f /tmp/zj_cl/grldr /tmp/zj_cl/grldr.mbr \
                       /tmp/zj_cl/menu.lst 2>/dev/null
                 _did=1
+            elif [ -f /tmp/zj_cl/grldr ] || [ -f /tmp/zj_cl/grldr.mbr ] || \
+                 [ -f /tmp/zj_cl/menu.lst ]; then
+                # 有同名文件但不是我们的 → 保留（用户自有引导器）
+                say "cleanup: skip foreign boot files on $_d (not ours, left untouched)"
             fi
             # 旧版本遗留的救援目录（含 boot/vmlinuz）；日志目录不含它，不会误删
             if [ -f "/tmp/zj_cl/$ZJRDIR/boot/vmlinuz-zjrestore" ]; then
@@ -2094,7 +2172,11 @@ cleanup_after_success(){
             # 蓝屏/引导损坏时也能用）。要清只能由 Windows 侧「删除启动还原」执行。
             # 注意：这说明 ~50MB 内核+initramfs 会长期占 ESP（ESP 一般 ≥100MB）。
             umount /tmp/zj_cl 2>/dev/null
-            command -v ntfsfix >/dev/null 2>&1 && timeout 60 ntfsfix -d "$_d" >> "$LOG" 2>&1
+            # M3：ntfsfix -d 只对**本次真的写过**（_did=1）的分区执行；其它分区
+            # 只是被我们读了一下，不该改它们的脏标志/元数据。
+            if [ "$_did" = "1" ]; then
+                command -v ntfsfix >/dev/null 2>&1 && timeout 60 ntfsfix -d "$_d" >> "$LOG" 2>&1
+            fi
         fi
     done
 }
