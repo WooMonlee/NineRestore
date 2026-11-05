@@ -6,7 +6,7 @@
 [![ci](https://github.com/WooMonlee/SysRecover-Windows-System-Restore-Backup/actions/workflows/ci.yml/badge.svg)](https://github.com/WooMonlee/SysRecover-Windows-System-Restore-Backup/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/WooMonlee/SysRecover-Windows-System-Restore-Backup)](https://github.com/WooMonlee/SysRecover-Windows-System-Restore-Backup/releases/latest)
 
-**不到 50MB · 启动比 WinPE 快 · 支持 CA2023 · 可备份 ESP · 可返回安装前的系统 · 可安装启动菜单兜底 · 中英双语 · 完整命令行**
+**启动比 WinPE 快 · 支持 Secure Boot CA2011/CA2023 · 可备份 ESP · 可返回安装前的系统 · 可安装启动菜单兜底 · 中英双语 · 完整命令行**
 
 > **下载（单文件版）**：[Releases](https://github.com/WooMonlee/SysRecover-Windows-System-Restore-Backup/releases/latest) →
 > `SysRecover-Portable-<版本>.exe`。双击开界面；带参数就是命令行（`... version` / `... list` / `... restore ...`）。
@@ -19,7 +19,7 @@
 
 ## 优点
 
-- 体积不到 **50MB**，启动比多数 WinPE 快
+- **解压目录约 52 MB**（单文件版压缩后更小）；救援层内置，不需要另做 WinPE 启动盘
 - 支持 **Secure Boot CA2011 / CA2023**，不用关安全启动，也不用注册密钥
 - 可把 **ESP 分区**并入同一镜像，还原系统时自动恢复
 - 可选保留旧系统，之后**返回安装前的系统**
@@ -27,11 +27,14 @@
 - 中 / 英双语，支持 **完整命令行**
 - 支持 **ESD、WIM**，兼顾体积与兼容性
 
-## 缺点
+## 限制
 
-- 只支持 **64 位 CPU**，不再支持 32 位 CPU
-- 只支持 **Windows 7 x64 及以后**，不再支持 Windows Vista、2003、XP 及更早版本
-- 目前只支持 **ESD / WIM** 格式
+- 系统还原的 **Linux 救援层固定 x86_64**：要求目标机器是 **64 位 CPU**（绝大多数 Win7 以后机器都满足）
+- Windows 侧提供 **x64 与 x86 两个入口**：32 位 Windows（Win7 x86 / Win10 x86）用 `*_x86.exe`
+- 只支持 **Windows 7 及以后**（Win7 需 UCRT，随包提供）；Vista、2003、XP 及更早版本不支持
+- 目前只支持 **ESD / WIM**（以及本产品的加密镜像 `.zje`）
+- 发布物**未签名**，首次运行可能触发 SmartScreen；校验与处理见
+  [`docs/33-已知问题与限制（1.0）`](docs/33-已知问题与限制（1.0）.md)
 
 ---
 
@@ -40,7 +43,7 @@
 1. **核心使用 wimlib**：Windows 下做热备份和还原，Linux 侧主要做目录交换和修引导；支持 ESD、WIM，以尽可能小的体积实现完整功能。
 2. **启动速度比多数 PE 快**：读写盘速度与 PE 相当，支持 **CA2011 / CA2023 双启动链**。
 3. **支持全系列命令行参数**，适合批处理、机房和自动化场景。
-4. **体积控制到 50MB 以内**，同时保持足够兼容性。
+4. **体积可控**：解压目录约 52 MB；单文件版经压缩后通常更小。
 5. **中英双语**。
 6. **支持备份 ESP 分区**。
 7. **支持安装启动菜单**：
@@ -58,10 +61,13 @@
      或 `pnputil /export-driver * D:\Drivers`。然后把导出的 `Drivers` 文件夹内容合并到程序目录的 `Drivers\`；软件会递归查找其中的 `.inf`。
    - 导出的只是本机第三方驱动，Windows 自带驱动无需导出；目标机已无法启动时，可从同型号正常机导出。OEM 驱动请只在本机使用，不要公开分发。
 
-## 二、失去的功能
+## 二、架构与位数
 
-1. 只支持 **64 位 CPU**，不再支持 32 位 CPU。
-2. 只支持 **Windows 7 x64 及以后**；Windows Vista、2003、XP 及更早版本不再支持。早期系统可以寻找网上其他作者的作品。
+1. **Windows 侧双入口**：64 位系统用根目录 `SysRecoverUI.exe`（调用 `x64\SysRecoverUI.exe`）；
+   32 位系统用 `SysRecoverUI_x86.exe`（命令行同理，`SysRecover_x86.exe` / `SysRecoverCheck_x86.exe`）。
+2. **Linux 救援层固定 x86_64**：不做 32 位救援层（Debian 13 已取消 i386 内核）；
+   32 位 Windows 的机器 CPU 也是 64 位，救援层照常启动。
+3. 纯 x64 PE（无 WOW64）请直接运行 `x64\SysRecoverUI.exe`；该 PE 若没有 `dism.exe`，异机驱动注入不可用。
 
 ## 三、为什么还要再写一个
 
@@ -84,10 +90,12 @@ SysRecover.exe help
 
 ```bat
 SysRecover.exe list
+SysRecover.exe list --include-usb
 SysRecover.exe diag --zip
 ```
 
 - `list`：列磁盘 / 分区 / 盘符 / ESP
+- `list --include-usb`：同时列出默认隐藏的 USB 设备（标注「USB 设备」，选择前请确认）
 - `diag --zip`：查固件 / Secure Boot / 启动项，并导出诊断包
 
 ### 备份当前系统
@@ -102,6 +110,7 @@ SysRecover.exe backup --dest D:\backup\win10.esd --source C: --compress recovery
 - `--esp`：把 ESP 分区并入同一镜像，还原时自动恢复回 ESP
 - 目标已存在：加 `--yes` 覆盖（与 `--append` 互斥）
 - `--append`：追加子镜像（与 `--yes` 互斥）
+- `--allow-skipped`：有文件读不到时仍以退出码 0 结束（默认返回 **7 = 备份不完整**）
 
 ### 从镜像取单个文件
 
@@ -121,12 +130,14 @@ SysRecover.exe restore --image D:\backup\win10.esd --disk 0 --part 3 --index 1 -
 - `--yes` 必填，确认覆盖目标分区
 - `--index N`：指定子镜像，默认 1
 - `--no-repair-boot`：不自动修引导（只允许就地还原）
+- `--verify-image`：还原前做全量校验（**默认关**；默认只做毫秒级结构预检，跳过时日志会写明"镜像未校验"）
 - **是否"重启后再还原"：自动判定**
   - 目标是正在运行的系统盘 → 暂存，重启进救援层自动完成替换和修引导；
   - 目标未被占用（PE 里 / 非系统盘）→ 就地还原，不重启。
 - **旧系统保不保留**（仅"重启后还原"路径有效）
-  - `--no-keep-old`（**默认**）：交换成功后当场删除旧系统 `C:\~old`（省空间、无后悔药）；
-  - `--keep-old`：保留旧系统，之后可「返回旧系统」。
+  - `--no-keep-old`（**默认**）：新系统首次成功开机后，由首启任务自动清理 `C:\~old`；
+    在此之前它一直是可回退的旧系统；
+  - `--keep-old`：保留旧系统不动，之后可「返回旧系统」。
 - **要不要自动重启**
   - 默认**不自动重启**（脚本/批量更可控），命令行会提示手动重启；
   - `--reboot`：暂存成功后 5 秒自动重启（反悔：`shutdown /a`）。
@@ -134,7 +145,7 @@ SysRecover.exe restore --image D:\backup\win10.esd --disk 0 --part 3 --index 1 -
 - 镜像必须放在本地分区，救援层访问不到网络
 
 ```bat
-:: 换系统（默认：不保留旧系统，手动重启）
+:: 换系统（默认：新系统首启成功后自动清理 ~old，手动重启）
 SysRecover.exe restore --image D:\SYSTEM.WIM --disk 0 --part 3 --yes
 
 :: 换系统（保留旧系统可回退，暂存后自动重启）
@@ -146,7 +157,7 @@ SysRecover.exe restore --image D:\SYSTEM.WIM --disk 0 --part 3 --yes --keep-old 
 退出码：
 
 ```text
-0 成功 / 1 失败 / 2 参数错 / 3 需管理员 / 4 危险目标被拒 / 5 校验失败 / 6 取消
+0 成功 / 1 通用失败 / 2 参数错 / 3 需管理员 / 4 危险目标被拒 / 5 镜像校验失败 / 6 取消 / 7 备份不完整
 ```
 
 正常情况下随系统自适应双语。如须指定英文版，运行时加 `--lang en`，或先设置环境变量：
@@ -166,13 +177,22 @@ set SYSRECOVER_LANG=en
   https://pan.baidu.com/s/1Ni0TZgKYkBJd8iCEW0qGUQ?pwd=8666  
   提取码：`8666`
 
+> **未签名**：首次运行可能触发 SmartScreen「Windows 已保护你的电脑」，处理方式与 SHA256 校验见
+> [`docs/33-已知问题与限制（1.0）`](docs/33-已知问题与限制（1.0）.md)。
+>
 > 如果嫌体积大，可以直接删除 `Drivers` 目录（约 165MB）。这是为异机还原准备的注入驱动；不使用该功能完全可以删除。
 
-## 六、测试与反馈
+## 六、版本与变更
+
+- 当前版本：见 [`CHANGELOG.md`](CHANGELOG.md)（`1.0.0-rc` 阶段）。
+- 版本策略：开发 → `v1.0.0-rc.N` → 7 天观察期与发布闸门全绿后打 `v1.0.0`（详见 CHANGELOG「版本策略」与 `docs/26`）。
+- 已知问题与实机待确认项：[`docs/33-已知问题与限制（1.0）`](docs/33-已知问题与限制（1.0）.md)。
+
+## 七、测试与反馈
 
 已在自用台式机、笔记本和 VM 的 **Windows 7 / 10 / 11、BIOS、UEFI、x86、x64** 中测试，但仍需要大家反馈不同电脑、服务器的还原效果。
 
-准备相对成熟时会开源。还需要什么功能、遇到了什么问题，欢迎跟帖回复。
+本项目已以 **MIT** 许可证开源（见 [`LICENSE`](LICENSE)）。还需要什么功能、遇到了什么问题，欢迎提 Issue 或跟帖回复。
 
 - 不便发到论坛的信息，可发送到邮箱：`ms_w@qq.com`
 - 更多沟通，请加 QQ 群：**1128237828**
@@ -184,5 +204,6 @@ set SYSRECOVER_LANG=en
 ## 开发与构建
 
 - 开发/交接：[`docs/11-接手指南（读我优先）`](docs/11-接手指南（读我优先）.md)
-- 构建/发布：[`AGENTS.md`](AGENTS.md)
+- 架构与拆分：[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- 构建/发布：[`AGENTS.md`](AGENTS.md)、[`docs/BUILD-REPORT.md`](docs/BUILD-REPORT.md)
 - 许可证：自有代码 **MIT**，见 [`LICENSE`](LICENSE)；第三方组件许可见 [`THIRD_PARTY_LICENSES.txt`](THIRD_PARTY_LICENSES.txt)
