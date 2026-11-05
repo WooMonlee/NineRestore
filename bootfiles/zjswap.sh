@@ -30,15 +30,29 @@
 set -u
 
 T="${1:?target dev}"; M="${2:?mount point}"
+# 测试钩子（H1 回归，仅测试用；生产不设置）：ZJ_SWAP_TEST_ROOT 跳过真实挂载，
+# 直接在给定目录上演练交换逻辑；ZJ_SWAP_FAIL_OLD 注入「某个旧项 move 必失败」。
+ZJ_TROOT="${ZJ_SWAP_TEST_ROOT:-}"
+if [ -n "$ZJ_TROOT" ]; then
+    M="$ZJ_TROOT"
+fi
 # say/mnt_ntfs 单源（P0-B/PIT-145）：SWAP: 前缀是断言契约；挂载带 timeout 60
 # （PIT-112 挂死纪律），错误落 /tmp/zjmnt.err 不再被 2>/dev/null 静默吞掉。
 ZJPREFIX=SWAP
-. /zjlog.sh
+. "${ZJ_LOG_SH:-/zjlog.sh}"
 
 mkdir -p "$M"
-mnt_ntfs "$T" "$M" || {
-    say "mount FAILED ($T): $(head -1 /tmp/zjmnt.err 2>/dev/null)"
-    exit 1
+if [ -z "$ZJ_TROOT" ]; then
+    mnt_ntfs "$T" "$M" || {
+        say "mount FAILED ($T): $(head -1 /tmp/zjmnt.err 2>/dev/null)"
+        exit 1
+    }
+fi
+
+# 统一卸载（测试模式下不卸载目录）。
+zj_umount() {
+    [ -z "$ZJ_TROOT" ] && umount "$M" 2>/dev/null
+    return 0
 }
 
 # 统一的失败退出：保留 ~new/现场，卸载后以非零码退出。
@@ -47,14 +61,14 @@ abort_swap() {
     say "ERROR: $*"
     say "swap ABORTED (rc=$_code); ~new kept if present, old data recoverable"
     sync
-    umount "$M" 2>/dev/null
+    zj_umount
     exit "$_code"
 }
 
 # ── L1：先验完成标记，再动任何东西（fail-closed）──
 if [ ! -f "$M/~new/.zj-done" ]; then
     say "ERROR: ~new missing or incomplete (.zj-done absent) -> refuse; old system untouched"
-    umount "$M" 2>/dev/null
+    zj_umount
     exit 2
 fi
 say "marker ok: $(cat "$M/~new/.zj-done" 2>/dev/null | tr -d '\r\n')"
@@ -64,14 +78,14 @@ say "marker ok: $(cat "$M/~new/.zj-done" 2>/dev/null | tr -d '\r\n')"
 if [ -f "$M/~new/.zj-universal-failed" ]; then
     say "ERROR: universal restore preparation failed; refuse swap (old system untouched)"
     say "reason: $(cat "$M/~new/.zj-universal-failed" 2>/dev/null | tr -d '\r\n' | head -c 300)"
-    umount "$M" 2>/dev/null
+    zj_umount
     exit 4
 fi
 
 # ── L1：目标上已有 ~old → 拒绝交换（上次中断/用户保留；交给 Windows 侧询问）──
 if [ -d "$M/~old" ]; then
     say "ERROR: leftover ~old present -> refuse swap (exit 3); handle it on next Windows start"
-    umount "$M" 2>/dev/null
+    zj_umount
     exit 3
 fi
 
@@ -90,6 +104,11 @@ for d in "$M"/* "$M"/.[!.]*; do
             }
             continue;;
     esac
+    if [ -n "${ZJ_SWAP_FAIL_OLD:-}" ] && [ "${ZJ_SWAP_FAIL_OLD}" = "$b" ]; then
+        say "TEST: injected failure moving old $b"
+        _old_fail=1
+        continue
+    fi
     mv "$d" "$M/~old/" 2>/dev/null || {
         say "ERROR: move old $b -> ~old failed"
         _old_fail=1

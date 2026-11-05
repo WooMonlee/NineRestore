@@ -261,6 +261,7 @@ check: $(TEST_BIN)
 	$(PYTHON) tools/check-config.py
 	$(PYTHON) tools/check-layers.py
 	$(PYTHON) tools/check-secrets.py
+	@bash tests/test_zjswap.sh
 
 # ---- ★ 发布包：根目录 = x64 总入口 + x86 兼容入口；x64/ = x64 真程序；共享资源放根目录 ----
 # 需要**两套工具链**：x64 走 PATH 上的 g++（请先把 mingw64\bin 加到 PATH），x86 走绝对路径。
