@@ -9,7 +9,8 @@
        - 不加 dpiAware / dpiAwareness：会把界面从当前的 DPI 虚拟化切成真实
          DPI 渲染，等于顺带改了高 DPI 表现（本次需求与 DPI 无关，见
          docs/ui-design.md §6.3）。
-     即：与原 exe（RT_MANIFEST 为空）相比，本文件只引入「提权」这一处行为差异。 -->
+     补充（M9）：新增 longPathAware —— 只有声明它，Win32 文件 API 才接受
+     超过 260 字符的路径（配合代码里的 \\?\ 前缀），便于清理/备份深目录。 -->
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <assemblyIdentity type="win32" name="SysRecover.UI" version="0.1.0.0" processorArchitecture="*"/>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
@@ -19,4 +20,9 @@
       </requestedPrivileges>
     </security>
   </trustInfo>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+    </windowsSettings>
+  </application>
 </assembly>

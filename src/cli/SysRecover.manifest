@@ -11,9 +11,11 @@
        - 仅当从**普通用户**命令行/双击启动时，Windows 才弹一次 UAC。这是操作
          系统的安全边界，任何提权途径（含 ShellExecuteW runas 自提升）都一样
          会弹，程序侧无法绕过。
-       - 用本清单而非 ShellExecuteW(L"runas") 自提升的好处：**单进程**，不发生
-         "重启自己"，因此不需要把命令行参数搬运回去、不会把工作目录变成
-         System32、退出码也是本进程真实退出码（脚本 `&&` 判断可靠）。 -->
+       - 本清单是 **asInvoker + 运行期按需提权**（见下方 requestedExecutionLevel）。
+         需要管理员的命令由程序自己 ShellExecuteExW(runas) 重新拉起自己，
+         因此会**重启一个进程**（原注释"单进程、不重启"已过时，M13 修正）：
+         参数会原样搬运；工作目录由 lpDirectory 显式传入（否则新进程落到
+         System32，相对路径全错）；退出码由父进程等待子进程后透传。 -->
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <assemblyIdentity type="win32" name="SysRecover.CLI" version="0.1.0.0" processorArchitecture="*"/>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
@@ -28,4 +30,10 @@
       </requestedPrivileges>
     </security>
   </trustInfo>
+  <!-- M9：声明长路径支持（Win32 文件 API 才会接受 >260 字符的路径）。 -->
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+    </windowsSettings>
+  </application>
 </assembly>

@@ -48,23 +48,85 @@
 namespace sysrecover {
 
 
-// ── PIT-211：格式化目标分区（A 引擎"先格式化再解压"用）──────────────
-static bool FormatTargetVolume(wchar_t letter, std::string& log) {
+// ── M8：格式化工具预检与 diskpart 回退 ──────────────────────────────
+// 0.9.96 直接 RunProcess(SysToolPath(L"format.com"))，极简 PE 里该工具可能
+// 不存在，结果只是一个笼统的 rc!=0。这里先探测文件是否存在：
+//   · 有 format.com → 用它（沿用 /Q /Y，不传 /V，保持原卷标语义）；
+//   · 没有 → 回退 diskpart（select volume <盘符> + format fs=ntfs quick）；
+//   · 两者都没有 → 返回 -2，让上层能区分"工具缺失"与"格式化失败"。
+static bool ToolFileExists(const std::wstring& p) {
+    const DWORD a = GetFileAttributesW(p.c_str());
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static int FormatWithDiskpart(wchar_t letter, std::string& out) {
+    wchar_t tmpDir[MAX_PATH] = {};
+    if (!GetTempPathW(MAX_PATH, tmpDir))
+        return -1;
+    wchar_t scriptPath[MAX_PATH] = {};
+    swprintf_s(scriptPath, L"%szj-format-%lu.txt", tmpDir,
+               GetCurrentProcessId());
+    // diskpart 脚本用纯 ASCII：盘符 + 快速格式化 NTFS。
+    std::string script = "select volume ";
+    script += static_cast<char>(letter);
+    script += "\nformat fs=ntfs quick\nexit\n";
+    HANDLE h = CreateFileW(scriptPath, GENERIC_WRITE, 0, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return -1;
+    DWORD wrote = 0;
+    const bool ok = WriteFile(h, script.data(), (DWORD)script.size(), &wrote,
+                              nullptr) != 0;
+    CloseHandle(h);
+    if (!ok) {
+        DeleteFileW(scriptPath);
+        return -1;
+    }
+    const int rc = RunProcess(SysToolPath(L"diskpart.exe"),
+                              std::wstring(L"/s \"") + scriptPath + L"\"", out);
+    DeleteFileW(scriptPath);
+    return rc;
+}
+
+// PIT-211：格式化目标分区（A 引擎"先格式化再解压"用）。
+// 返回 0=成功；-1=格式化失败；-2=format.com 与 diskpart 都不可用。
+static int FormatTargetVolume(wchar_t letter, std::string& log,
+                              std::string* rawOut) {
+    const std::wstring fmt = SysToolPath(L"format.com");
+    if (ToolFileExists(fmt)) {
+        std::string out;
+        const int rc = RunProcess(fmt,
+                                  std::wstring(1, letter) + L": /FS:NTFS /Q /Y",
+                                  out);
+        log = "format.com rc=" + std::to_string(rc) + " / " + out;
+        if (rawOut) *rawOut = out;
+        return rc == 0 ? 0 : -1;
+    }
+    const std::wstring dp = SysToolPath(L"diskpart.exe");
+    if (!ToolFileExists(dp)) {
+        log = "format tool missing: neither format.com nor diskpart.exe";
+        if (rawOut) *rawOut = log;
+        LogWarn("format: no format.com and no diskpart.exe -> abort");
+        return -2;
+    }
     std::string out;
-    const int rc = RunProcess(SysToolPath(L"format.com"),
-                              std::wstring(1, letter) + L": /FS:NTFS /Q /Y",
-                              out);
-    log = "format.com rc=" + std::to_string(rc) + " / " + out;
-    return rc == 0;
+    const int rc = FormatWithDiskpart(letter, out);
+    log = "format.com missing -> diskpart fallback rc=" +
+          std::to_string(rc) + " / " + out;
+    if (rawOut) *rawOut = out;
+    LogInfo("format: format.com missing, used diskpart fallback");
+    return rc == 0 ? 0 : -1;
 }
 
 // PIT-214：「不格式化」= 保留文件系统/卷标，只清空根目录内容（wimlib 卷模式
 // 要求空卷；这也正是救援层 target_mode=keep 的语义）。
 // 返回 0 = 干净；>0 = 有 N 项删不掉（SVI/$RECYCLE.BIN 正常，不阻断）。
+// M9：枚举与回查都走 LongPath，深路径也能删到。
 static int WipeVolumeContents(const std::wstring& root, std::string& log) {
     int failed = 0, removed = 0;
+    const std::wstring lp = LongPath(root);
     WIN32_FIND_DATAW fd = {};
-    HANDLE h = FindFirstFileW((root + L"*").c_str(), &fd);
+    HANDLE h = FindFirstFileW((lp + L"*").c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) {
         log = "wipe: cannot list " + W2U(root) + " err=" +
               std::to_string(GetLastError());
@@ -75,7 +137,7 @@ static int WipeVolumeContents(const std::wstring& root, std::string& log) {
             continue;
         const std::wstring p = root + fd.cFileName;
         DeleteTreeRec(p);
-        if (GetFileAttributesW(p.c_str()) == INVALID_FILE_ATTRIBUTES)
+        if (GetFileAttributesW(LongPath(p).c_str()) == INVALID_FILE_ATTRIBUTES)
             ++removed;
         else
             ++failed;
@@ -98,12 +160,9 @@ static int WipeVolumeContents(const std::wstring& root, std::string& log) {
 int PrepareTargetVolume(const std::wstring& root, wchar_t letter, bool formatIt,
                         std::string& log, std::string* rawOut) {
     if (formatIt) {
-        std::string out;
-        const int rc = RunProcess(SysToolPath(L"format.com"),
-                                  std::wstring(1, letter) + L": /FS:NTFS /Q /Y",
-                                  out);
-        log = "format.com rc=" + std::to_string(rc) + " / " + out;
-        if (rawOut) *rawOut = out;
+        // M8：返回值沿用旧契约（0 成功 / -1 失败）；-2（工具缺失）也归到 -1，
+        // 但 log 中会明确写出 "format tool missing"，上层提示可区分。
+        const int rc = FormatTargetVolume(letter, log, rawOut);
         return rc == 0 ? 0 : -1;
     }
     const int left = WipeVolumeContents(root, log);

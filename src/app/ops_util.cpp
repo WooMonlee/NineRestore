@@ -135,18 +135,36 @@ bool IsDir(const std::wstring& p) {
 }
 
 
+// M9：给绝对路径加 \\?\ 前缀（UNC 用 \\?\UNC\），让 Win32 文件 API 支持
+// 超过 260 字符的路径。已是长路径前缀/相对路径则原样返回（相对路径由调用方
+// 先转绝对路径，这里不猜）。
+std::wstring LongPath(const std::wstring& p) {
+    if (p.size() >= 4 && p[0] == L'\\' && p[1] == L'\\' &&
+        (p[2] == L'?' || p[2] == L'.'))
+        return p;
+    if (p.size() >= 2 && p[0] == L'\\' && p[1] == L'\\')
+        return L"\\\\?\\UNC\\" + p.substr(2);
+    if (p.size() >= 2 && ((p[0] >= L'A' && p[0] <= L'Z') ||
+                          (p[0] >= L'a' && p[0] <= L'z')) &&
+        p[1] == L':')
+        return L"\\\\?\\" + p;
+    return p;
+}
+
 // 递归删除目录树（EA 临时目录清理用；失败不致命）。
 // 同 swapleft.cpp DeleteRec 的修法（PIT 用户 2026-10-15）：清属性 + 跳过 junction。
+// M9：所有文件 API 走 LongPath()，深目录才能删干净。
 void DeleteTreeRec(const std::wstring& dir) {
-    SetFileAttributesW(dir.c_str(), FILE_ATTRIBUTE_NORMAL);
+    const std::wstring d = LongPath(dir);
+    SetFileAttributesW(d.c_str(), FILE_ATTRIBUTE_NORMAL);
     WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+    HANDLE h = FindFirstFileW((d + L"\\*").c_str(), &fd);
     if (h != INVALID_HANDLE_VALUE) {
         do {
             if (wcscmp(fd.cFileName, L".") == 0 ||
                 wcscmp(fd.cFileName, L"..") == 0)
                 continue;
-            std::wstring p = dir + L"\\" + fd.cFileName;
+            const std::wstring p = d + L"\\" + fd.cFileName;
             // junction/symlink：只删链接本身，绝不递归进目标
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
                 SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_NORMAL);
@@ -154,7 +172,7 @@ void DeleteTreeRec(const std::wstring& dir) {
                 continue;
             }
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                DeleteTreeRec(p);
+                DeleteTreeRec(p);  // LongPath 幂等，递归里再前缀不会叠加
                 continue;
             }
             if (!DeleteFileW(p.c_str())) {
@@ -164,8 +182,8 @@ void DeleteTreeRec(const std::wstring& dir) {
         } while (FindNextFileW(h, &fd));
         FindClose(h);
     }
-    SetFileAttributesW(dir.c_str(), FILE_ATTRIBUTE_NORMAL);
-    RemoveDirectoryW(dir.c_str());
+    SetFileAttributesW(d.c_str(), FILE_ATTRIBUTE_NORMAL);
+    RemoveDirectoryW(d.c_str());
 }
 
 
