@@ -108,11 +108,11 @@ bootfiles/zjrestore-lite.sh ─► bootfiles/zjswap.sh / zjswap-undo.sh / zjlog.
 
 | 旧位置（0.9.96） | 新位置 | 说明 |
 |---|---|---|
-| `src/app/ops.cpp`（4705 行，单体） | `src/app/ops_util.cpp` | 路径/字符串/目录工具（`IsNetworkPath`、`W2U`、`DeleteTreeRec`、`CopyDir`…） |
+| `src/app/ops.cpp`（4705 行，单体） | `src/app/ops_util.cpp` | 路径/字符串/目录工具（`IsNetworkPath`、`W2U`、`DeleteTreeRec`、`CopyDir`…）、`AppendHistory`、菜单标记 |
 | 同上 | `src/app/ops_space.cpp` | `CanRestoreInPlace`、`CheckRestoreSpace`、`EstimateSwapSpace`、`QuerySwapSpace`、`SettleHome` |
-| 同上 | `src/app/ops_format.cpp` | `FormatTargetVolume`、`WipeVolumeContents` + 统一「破坏性操作前置检查」 |
+| 同上 | `src/app/ops_format.cpp` | 唯一入口 `PrepareTargetVolume`（格式化/只清空分派）；`FormatTargetVolume`、`WipeVolumeContents` 降为文件内 static |
 | 同上 | `src/app/ops_preserve.cpp` | `PreserveOldSystem`、`RollbackPreservedOld`（与交换/回滚共用） |
-| 同上 | `src/app/ops_backup.cpp` | `RunBackup`、`AppendHistory`、`ProbeBackupDest` |
+| 同上 | `src/app/ops_backup.cpp` | `RunBackup`、`ProbeBackupDest`、ESP/EA 子镜像索引与排除配置 |
 | 同上 | `src/app/ops_inplace.cpp` | `RunDirectRestore`、离线改计算机名、RunOnce 注入、首启清理助手 |
 | 同上 | `src/app/ops_staged.cpp` | `StageRestoreImpl/StageRestore/StageRestoreMenu`、`CheckStagedTaskState`、`CleanupStaleStagedTask`、`RetryStagedRestore` |
 | 同上 | `src/app/ops_returnold.cpp` | `StageReturnOld`、`DetectReturnOldCapability`、`StageReturnOldByDiskPart` |
@@ -129,7 +129,7 @@ bootfiles/zjrestore-lite.sh ─► bootfiles/zjswap.sh / zjswap-undo.sh / zjlog.
 ## 7. 阶段划分（与交付约定一致）
 
 1. **阶段 1 基线立骨**（已完成）：导入 0.9.96、恢复 x64/x86 构建与门禁/冒烟、本篇架构文档。
-2. **阶段 2 纯结构重构**：按上表拆分 `ops.cpp`，行为不变，每个提交都能编译；格式化/清空逻辑收敛为一个带前置校验的函数。
+2. **阶段 2 纯结构重构**（已完成）：`ops.cpp` 拆为 10 个翻译单元 + `ops_internal.h`；`PrepareTargetVolume` 收敛格式化/清空入口；行为不变，每个提交都编译通过。实测记录见 `docs/BUILD-REPORT.md` §6。
 3. **阶段 3 P0（H1、H2、H3、H7；H4/H5 按修订契约）**：
    - H1 `zjswap.sh` fail-closed；
    - H2 引导修复失败 → 降级结果 `OK_BOOT_UNFIXED`；

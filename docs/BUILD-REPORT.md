@@ -56,3 +56,91 @@ mingw32-make -f Makefile PYTHON='C:/Users/Administrator/AppData/Local/Programs/P
 - 单一基线提交 `40a12e6`：原项目源码/构建脚本/文档整体导入（471 文件，约 56.8 MB，排除 dist、构建产物、msys64/Python313、演练盘镜像、私钥）；MIT `LICENSE`、`THIRD_PARTY_LICENSES.txt`、原作者署名与版权声明原样保留。
 - `docs/ARCHITECTURE.md`（中文，目标结构）与 `docs/ARCHITECTURE-0.9.96.en.md`（原英文文档留存）。
 - 本报告。
+
+## 6. 阶段 2 结构重构验证记录
+
+### 6.1 提交序列（`97a0d6c..HEAD`，均由 `git log --oneline` 实取）
+
+```
+c8f96f0 refactor(ops): 格式化/清空卷收敛为 PrepareTargetVolume（行为不变）
+15d5ea3 拆出 ops_staged.cpp 并删除空的 ops.cpp（纯机械搬迁）
+7f21aa5 拆出 ops_returnold.cpp（返回旧系统，纯机械搬迁）
+ced9e11 拆出 ops_backup.cpp（备份主流程，纯机械搬迁）
+bfc962f 拆出 ops_inplace.cpp（就地还原，纯机械搬迁）
+375f79a 拆出 ops_space.cpp（空间预检/落盘搬家，纯机械搬迁）
+42cd9f1 拆出 ops_selfpack.cpp（自打包/解包，纯机械搬迁）
+01c37e0 拆出 ops_boot.cpp（ESP/引导修复，纯机械搬迁）
+ea12f6e 拆出 ops_preserve.cpp（~old 保留/回滚，纯机械搬迁）
+cae6552 拆出 ops_format.cpp（格式化/清空卷，纯机械搬迁）
+7432d75 refactor(ops): 拆出 ops_util.cpp（纯机械搬迁）
+cf9dc5b refactor(ops): 拆分前最小可见性调整 —— BootWriteBlockedHint 去掉 static
+```
+
+每个提交都单独通过 `make ARCH=x64 all` + `make ARCH=x86 all` + `make check` 后才提交。
+
+### 6.2 拆分结果
+
+| 文件 | 行数 | 主要内容 |
+|---|---:|---|
+| `ops_util.cpp` | 263 | 字符串/路径/目录工具、`AppendHistory`、菜单标记 |
+| `ops_format.cpp` | 114 | `PrepareTargetVolume`（唯一入口）+ 两个 static 实现 |
+| `ops_preserve.cpp` | 119 | `PreserveOldSystem` / `RollbackPreservedOld` |
+| `ops_boot.cpp` | 658 | ESP 挂载/定位、`BiosBcdLooksValid`、`BootWriteBlockedHint`、`RepairBoot` |
+| `ops_selfpack.cpp` | 262 | `PackSelfToSingleFile` / `ExtractSelfToFolder` |
+| `ops_space.cpp` | 334 | 空间预检、`SettleHome`、swap 空间估算 |
+| `ops_inplace.cpp` | 634 | `RunDirectRestore`、离线改机名、RunOnce、首启清理 |
+| `ops_backup.cpp` | 638 | `RunBackup`、备份目标探测、ESP/EA 排除配置 |
+| `ops_returnold.cpp` | 419 | `StageReturnOld` 系列 |
+| `ops_staged.cpp` | 1774 | 暂存还原主流程、状态机、菜单绑定、重试 |
+
+`git diff --shortstat 97a0d6c..HEAD` → `13 files changed, 5298 insertions(+), 4706 deletions(-)`（增量主要是每个文件重复的 include 前导与拆分头注释）。
+
+### 6.3 逻辑未丢失/未重复的机械证明
+
+用脚本对比拆分前后的顶层函数集合（原 `ops.cpp` vs 10 个 `ops_*.cpp`）：
+
+| 指标 | 期望 | 实际 |
+|---|---|---|
+| 函数数 | 与原文件一致 | 67 vs 67 |
+| 原文件有、拆分后无（MISSING） | 无 | none |
+| 拆分后有、原文件无（EXTRA） | 无 | none |
+| 拆分后重复定义 | 无 | none |
+| `src/app/ops.cpp` 是否残留 | 否 | 已删除 |
+
+（`ErrorAdvice(...)=delete;` 是删除声明而非函数，未计入 67。）
+
+### 6.4 可复现验证清单
+
+```powershell
+# 1) 构建（PATH 不含 bash）
+$env:PATH = "D:\Prog\ProgIDE\mingw64\bin;D:\Prog\ProgIDE\mingw32\bin;C:\Users\Administrator\AppData\Local\Programs\Python313;" + $env:PATH
+mingw32-make -f Makefile PYTHON='C:/Users/Administrator/AppData/Local/Programs/Python313/python.exe' ARCH=x64 all
+mingw32-make -f Makefile PYTHON='C:/Users/Administrator/AppData/Local/Programs/Python313/python.exe' ARCH=x86 all
+
+# 2) 门禁（PATH 需含 bash）
+$env:PATH = "D:\Prog\ProgIDE\msys64\usr\bin;" + $env:PATH
+mingw32-make -f Makefile PYTHON='C:/Users/Administrator/AppData/Local/Programs/Python313/python.exe' check
+
+# 3) 打包 + CLI 冒烟（顺序不能反）
+mingw32-make -f Makefile PYTHON='C:/Users/Administrator/AppData/Local/Programs/Python313/python.exe' package
+mingw32-make -f Makefile PYTHON='C:/Users/Administrator/AppData/Local/Programs/Python313/python.exe' ARCH=x64 smoke-cli
+
+# 4) 结构证明
+git log --oneline 97a0d6c..HEAD
+git diff --shortstat 97a0d6c..HEAD
+git ls-files src/app | Select-String ops
+```
+
+| 步骤 | 期望 | 实际（2026-11-05） |
+|---|---|---|
+| x64 all | 退出码 0，生成 `dist/x64/SysRecover*.exe` | PASS |
+| x86 all | 退出码 0，生成 `dist/SysRecover*_x86.exe` | PASS |
+| check | `70 cases, 613 checks, 0 failures` + 全部门禁 PASS | PASS |
+| package | 退出码 0，`--strict-dist` PASS | PASS（退出码 0） |
+| smoke-cli | CLI 19 例 + 检查程序 5 例全 PASS | PASS（含 `check --lang en help`） |
+| 函数集合对比 | 67/67，无缺失/多余/重复 | PASS |
+
+### 6.5 构建系统注意（拆分后新增）
+
+- `ar rcs` 只增换、不删除：源清单移除文件后，旧 `.o` 会残留在 `libapp.a` 里。归档规则已改为「先删后建」；但 **Make 无法感知源清单变化**，因此源清单变更后首次构建必须 `make clean`（或手动删 `build*/libapp.a`）。CI 每次全量构建，不受影响。
+- 拆分后 `src/app/ops_internal.h` 是唯一新增的内部头：只放跨模块声明，不含实现；`ops.h` 对外 API 未改。
