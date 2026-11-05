@@ -239,3 +239,75 @@ test_zjswap: PASS (A fail-closed/rollback, B happy path, C marker gate, D post-v
 - 测试 ③（追加中途失败原镜像可用）与 ④（keep 清空不完整中止）需要真实 WIM 写入或 Linux 挂载环境，**不进 `make check`**；可复现步骤与通过判据见 `docs/07` §6。
 - 测试 ⑤（引导修复失败降级上报）核心判定已由 `rescue_status_ok_exact` 覆盖；端到端需真机/VM。
 - L3（`ops.cpp` 单体拆分）已在阶段 2 完成（函数集合 67/67 一致）。
+
+## 9. 1.0 交付总说明
+
+### 9.1 目录结构
+
+| 路径 | 作用 |
+|---|---|
+| `src/app/` | 业务编排：备份、还原（就地/暂存/返回旧系统）、格式化、空间预检、镜像源等（阶段 2 由 `ops.cpp` 拆分） |
+| `src/boot/` | UEFI/BIOS 启动链：启动项、任务与契约文件、bootfix、菜单安装 |
+| `src/cli/` | 命令行入口（命令、退出码、JSON 输出） |
+| `src/common/` | 公共基础设施：路径/长路径、锁、日志、i18n、CPU 能力、救援回执判定（纯逻辑） |
+| `src/disk/` | 磁盘/分区枚举（含 USB 显式开关、extent 重试） |
+| `src/gui/` | Win32/DirectUI 界面与清单（`longPathAware`） |
+| `src/launcher/` | 根启动器（x64 入口、提权、控制台交接） |
+| `src/tools/` | `wimcheck`、`zj-restore-boot`、EA apply 等小工具 |
+| `src/wim/` | wimlib 封装（线程上限、捕获/应用/追加/校验） |
+| `bootfiles/` | 救援层载荷：内核、initramfs、`zjrestore-lite.sh`、`zjswap*.sh`、启动资产 |
+| `tests/` | 单元测试与脚本回归（`test_zjswap.sh`、`test_version.py`） |
+| `tools/` | 门禁脚本（docs/i18n/宽度/shell/config/layers/secrets/dist）、打包与 SHA256 |
+| `docs/` | 架构、构建报告、测试矩阵、已知问题、接手指南与历史归档 |
+| `lang/`、`skin/`、`resources/` | 双语词典、皮肤、图标与清单 |
+| `third_party/` | vendored wimlib（含第三方许可） |
+| `dist/` | 构建/打包输出（不入库；含 `SHA256SUMS.txt`） |
+
+规模：`src/` 共 63 个 `.cpp`、53 个 `.h`。
+
+### 9.2 各阶段成果
+
+| 阶段 | 成果 |
+|---|---|
+| ① 基线立骨 | 从只读源建立可独立构建的 1.0 工程；双架构构建与 `make check` 跑通；文档骨架 |
+| ② 纯结构重构 | `ops.cpp`（4705 行）拆为 13 个 `ops_*.cpp`；函数集合 67/67 一致、行为不变；每提交可编译；格式化收敛先行为一致 |
+| ③ P0 数据安全 | H1 交换 fail-closed + 后置校验、H2 引导降级回执、H3 旧系统保留回滚、H4 校验契约、H5 空间预检/残留清理、H6 救援侧启动项、H7 单实例锁；H1 回归脚本"改前失败、改后通过" |
+| ④ P1 + 测试 + CI | M1~M15 全部（配对/身份校验/不静默覆盖/预检/长路径/USB 开关/备份完整性/契约回读/ESP 降级等）；L1/L4/L5/L6/L7；CI x86 门禁 + release 打包/SHA256；测试③④可复现步骤 |
+| ⑤ 发布工程 | 版本 1.0.0、`v1.0.0-rc1` 标签；`CHANGELOG.md`、已知问题页、README 中英事实修正；`package → sha256(73) → dist-check` 全绿 |
+
+### 9.3 测试结果（1.0.0 本机）
+
+- 双架构构建：`ARCH=x64 all`、`ARCH=x86 all` 退出码 **0**。
+- `make check`：**80 cases / 636 checks / 0 failures**；含 `test_zjswap` A~D、回执判定、WIM 结构预检。
+- 门禁：i18n `863/863`、docs PASS（`version=1.0.0 contract_version=1 契约键 34（救援读 22）`）、
+  widths OK（1 WARN，历史项）、shell PASS（deny-list 8 clean）、config/layers/secrets 全 PASS。
+- 发布链：`package` 0 → `SHA256SUMS: 73 file(s)` → `check-dist: PASS`。
+- H1 证据：改前 `FAIL: A: exit=0 (want 4)` / `~new was removed` / `~old left behind` / `new tree leaked`；
+  改后 `test_zjswap: PASS`。
+
+### 9.4 与原项目 0.9.96 的差异
+
+1. **结构**：`ops.cpp` 单体重构为 13 个模块；新增 `src/common/rescue_decision.h`、`src/app/ops_util|space|staged|inplace` 等；公共设施（长路径、锁、i18n）集中。
+2. **行为（数据安全）**：交换/清空/引导修复由"尽力而为 + 告警"改为 **fail-closed**；旧系统默认保留到首启成功后再清理（可回退）；格式化前强制结构预检，全量校验改为显式入口。
+3. **行为（可靠性）**：USB 默认隐藏但可显式打开；磁盘上限 128、extent 可重试；备份不完整返回 7；同名镜像不覆盖；长路径支持。
+4. **工程**：双架构 CI 门禁 + 发布打包/SHA256；12 处译文格式串问题清零并加门禁；wim 线程上限 8。
+5. **不变量**：镜像格式（WIM/ESD/ZJENC1）、CLI 主命令、MIT + 第三方许可、原作者署名保持不变。
+
+### 9.5 剩余风险
+
+1. **未签名**：SmartScreen/杀软拦截无法在发布前消除；被拦截时暂存会明确失败，不会静默继续。
+2. **真机覆盖不足**：救援层挑盘、引导修复、异机驱动在多种 RAID/双盘/加密环境下的实际命中率仍需现场验证。
+3. **NVRAM 写保护/写满**：已改为返回失败（L5），但不同固件返回码差异大，极端机型可能仍需手动清理。
+4. **BitLocker/EFS/重解析点**未做专项兼容验证；操作前需解密或备份。
+5. **CI 首次真实运行**：workflow 的 i686 工具链下载地址与 PATH 逻辑为本地推演，需首次 Actions 运行确认。
+6. **镜像格式边界**：仅 WIM/ESD（+`.zje`）；GHOST/SNA/TBI 等不支持。
+
+### 9.6 需实机确认的 7 项
+
+1. 救援层按磁盘序列号 + 分区 GUID 挑中目标盘（多盘同型号）。
+2. keep 模式清空不完整时在 apply 前中止，目标盘仍可挂载（`docs/07` §6 ④）。
+3. 追加中途失败/断电后原镜像仍可校验通过（`docs/07` §6 ③）。
+4. 引导修复失败回执为 `OK_BOOT_UNFIXED`，Windows 侧不报"还原成功"。
+5. USB 固定盘勾选后可见且标注正确，默认仍隐藏。
+6. ≥16 核机器备份线程被限制为 8，峰值内存可控。
+7. NVRAM 写保护/写满时临时 UEFI 启动项清理失败能被上层感知（退出码 1）。
