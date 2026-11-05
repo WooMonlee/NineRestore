@@ -1256,7 +1256,7 @@ bool CanRestoreInLinuxOnly(const std::wstring& image, int index,
 
 // 命令返回 0，实际没落盘，重启后照旧进原系统，用户完全没有提示。凡写后
 // 读回校验失败（或命令本身失败）都要带上这句，指向"退出防护重试/PE 就地还原"。
-static std::string BootWriteBlockedHint() {
+std::string BootWriteBlockedHint() {
     MarkBootBlocked();
     return Tr(" 可能被安全软件（如火绒/360）拦截，写入未生效："
               "请退出其防护后重试，或用 PE 就地还原。");
