@@ -35,8 +35,10 @@ def read(p):
     return p.read_text(encoding="utf-8", errors="replace")
 
 
+# SemVer 2.0 的核心部分 + 预发布后缀（1.0.0-beta.1 / 1.0.0-rc.2）。
+# 预发布阶段是发布流程的一部分（dev → beta → rc → 正式），门禁必须认。
 def check_semver(v):
-    if not re.fullmatch(r"\d+\.\d+\.\d+", v):
+    if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:[.\-][0-9A-Za-z]+)*)?", v):
         fails.append("version.h 版本号不是 SemVer: %r" % v)
 
 

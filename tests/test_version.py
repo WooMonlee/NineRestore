@@ -31,6 +31,9 @@ def eq(a, b, msg):
 
 # ---- 纯函数 ----
 eq(v.is_semver("1.2.3"), True, "is_semver 1.2.3")
+eq(v.is_semver("1.0.0-beta.1"), True, "is_semver 预发布 beta")
+eq(v.is_semver("1.0.0-rc.2"), True, "is_semver 预发布 rc")
+eq(v.is_semver("1.0.0-"), False, "is_semver 空后缀")
 eq(v.is_semver("1.2"), False, "is_semver 1.2")
 eq(v.is_semver("v1.2.3"), False, "is_semver v1.2.3")
 eq(v.is_semver("1.2.3.4"), False, "is_semver 1.2.3.4")
@@ -38,6 +41,7 @@ eq(v.is_semver(""), False, "is_semver 空")
 eq(v.bump("0.2.0"), "0.2.1", "bump 0.2.0")
 eq(v.bump("1.9.9"), "1.9.10", "bump 1.9.9")
 eq(v.bump("0.0.0"), "0.0.1", "bump 0.0.0")
+eq(v.bump("1.0.0-beta.1"), "1.0.1", "bump 预发布丢弃后缀")
 
 # ---- 读写往返（临时文件）----
 with tempfile.TemporaryDirectory() as td:

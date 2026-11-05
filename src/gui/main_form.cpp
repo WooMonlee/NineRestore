@@ -1171,7 +1171,7 @@ void CMainForm::Notify(TNotifyUI& msg) {
             // 皮肤里已隐藏（2026-10-27 收进「更多功能>>」）；保留路由给旧皮肤。
             StartRepairBoot();
         } else if (name == _T("MoreBtn")) {
-            ShowMoreMenu();   // 「更多功能>>」下拉（异机还原/修复引导/清除菜单/镜像检查）
+            ShowMoreMenu();   // 「更多功能>>」下拉（打包日志/修复引导/清除菜单/镜像检查…）
         } else if (name == _T("BootMenuBtn")) {
             ToggleBootMenu();
         } else if (name == _T("LogBtn")) {
@@ -1670,9 +1670,9 @@ void CMainForm::ShowMoreMenu() {
         // 「清除」只在真装了东西时可点（否则空转，用户会以为没生效）。
         // 「镜像检查」只在镜像已解析成功时可点（对坏镜像做全量校验没有意义）。
         const bool canVerify = !m_wimPath.empty() && m_imageOk;
-        ::AppendMenuW(hMenu,
-                      MF_STRING | (IsUniversalChecked() ? MF_CHECKED : 0u), 1,
-                      Tr(L"使用异机还原"));
+        // 2026-11-05 用户规格：与「异机还原」对调 —— 异机还原变成第三步常驻勾选框，
+        // 「打包日志」收进本菜单（菜单第一项，占原「使用异机还原」的位置）。
+        ::AppendMenuW(hMenu, MF_STRING, 1, Tr(L"打包日志"));
         ::AppendMenuW(hMenu, MF_STRING, 2, Tr(L"修复引导"));
         ::AppendMenuW(hMenu, MF_STRING | (installed ? 0u : MF_GRAYED), 3,
                       Tr(L"清除启动中还原菜单"));
@@ -1711,16 +1711,8 @@ void CMainForm::ShowMoreMenu() {
     m_pickGuard = false;
     if (cmd <= 0) return;
     if (cmd == 1) {
-        COptionUI* p = static_cast<COptionUI*>(
-            m_PaintManager.FindControl(_T("Universal")));
-        if (p) {
-            const bool on = !p->IsSelected();
-            p->Selected(on, /*bTriggerEvent=*/false);  // COptionUI 的接口是 Selected()
-            SetStatus(on ? Tr(L"已启用异机还原（还原时自动注入启动驱动）")
-                         : Tr(L"已关闭异机还原"));
-            LogInfo(std::string("GUI universal: ") + (on ? "on" : "off"));
-        }
-        UpdateMainAction();
+        // 2026-11-05：菜单第一项现在是「打包日志」（原为「使用异机还原」开关）。
+        ExportSupportFlow();
     } else if (cmd == 2) {
         StartRepairBoot();
     } else if (cmd == 3) {
@@ -3318,13 +3310,13 @@ void CMainForm::ApplyModeUi() {
             }
         }
         // 备份模式不给这些还原专属按钮（2026-09-28 / 2026-10-27 规格）：
-        // 「安装到启动」「打包日志」只在还原模式出现；「更多功能>>」**两模式都要**
-        //（2026-10-29 用户规格：加密备份/增量备份都在这个菜单里，备份模式必须有入口）。
+        // 「安装到启动」只在还原模式出现；「打包日志」也在还原模式的「更多功能>>」菜单里；
+        // 「更多功能>>」**两模式都要**（2026-10-29 用户规格：加密备份/增量备份都在这个菜单里）。
         Vis(_T("FixBootBtn"),   false);  // 皮肤已隐藏；入口在「更多功能>>」
-        Vis(_T("Universal"), false);  // 皮肤已隐藏；入口在「更多功能>>」
+        Vis(_T("Universal"), false);  // 异机还原是还原模式专属（备份模式隐藏）
         Vis(_T("MoreBtn"),      true);
         Vis(_T("BootMenuBtn"),  false);
-        Vis(_T("LogBtn"),       false);  // 「打包日志」是还原模式专属（用户 2026-10-03 规格）
+        Vis(_T("LogBtn"),       false);  // 入口已收进还原模式的「更多功能>>」菜单
         Text(_T("PartTitle"),   Tr(L"备份源分区"));
         Text(_T("PartHint"),    Tr(L"选择要备份为镜像的源分区（移动盘已隐藏）"));
         // 第三步右侧：备份模式 = 静默模式 + CPU 下拉；引导按钮两模式共用同一位置（XML 定）。
@@ -3354,21 +3346,20 @@ void CMainForm::ApplyModeUi() {
         Vis(_T("FormatLabel"),  false);
         Vis(_T("FormatBox"),    false);
         Vis(_T("CpuCapBox"),    false);
-        // 皮肤里这两行控件保持隐藏：入口已收进「更多功能>>」（2026-10-27 用户规格：
-        // 第三行原本挤 6 个按钮，英文/高分屏必然裁字）。这里显式压回 false，防止
-        // 皮肤改动或上一模式遗留把它们又露出来。
+        // 「修复引导」仍隐藏（入口在「更多功能>>」）；「异机还原」勾选框常驻第三步
+        // （2026-11-05 用户规格：与「打包日志」位置对调，后者收进菜单）。
         Vis(_T("FixBootBtn"),   false);
-        Vis(_T("Universal"),    false);
+        Vis(_T("Universal"),    true);
         Vis(_T("MoreBtn"),      true);
         Vis(_T("BootMenuBtn"),  true);
-        Vis(_T("LogBtn"),       true);
+        Vis(_T("LogBtn"),       false);  // 打包日志已收进「更多功能>>」菜单
         Text(_T("PartTitle"),   Tr(L"系统安装位置"));
         Text(_T("PartHint"),    Tr(L"选择要安装恢复镜像的目标分区（移动盘已隐藏）"));
-        // 还原模式几何（切回时必须复位第三步右侧那几个）。2026-10-27 用户规格：
-        //   静默 248..330 / 打包日志 340..438 / 安装到启动 446..562 / 更多功能>> 570..721
-        // 四项等距 8px，右侧贴到卡片内沿；`Universal`/`FixBootBtn` 已隐藏、不再占位。
+        // 还原模式几何（切回时必须复位第三步右侧那几个）。2026-11-05 用户规格：
+        //   静默 248..330 / 异机还原 340..438 / 安装到启动 446..562 / 更多功能>> 570..721
+        // （与备份模式的 338..456、464..562 同一条 562 分界；`FixBootBtn` 仍隐藏不占位。）
         Pos(_T("Silent"),        248, 302, 330, 326);
-        Pos(_T("LogBtn"),        340, 298, 438, 331);
+        Pos(_T("Universal"),     340, 298, 438, 331);
         Pos(_T("BootMenuBtn"),   446, 298, 562, 331);
         Pos(_T("MoreBtn"),       570, 298, 721, 331);
         Pos(_T("FormatLabel"),   350, 302, 388, 326);

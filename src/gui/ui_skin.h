@@ -23,6 +23,12 @@ namespace ui_skin {
 // ── GDI+ 生命周期（进程内一次） ─────────────────────────────
 void EnsureGdiplus();
 
+// 面向用户的版本显示名（只用 version.h 的内部串派生，不另写一份数字）：
+//   1.0.0-beta.1 → 「1.0.0 测试版」（英文 Beta）
+//   1.0.0-rc.2   → 「1.0.0 RC」
+//   1.0.0        → 「1.0.0」
+CDuiString VersionDisplay();
+
 // ── 颜色 ────────────────────────────────────────────────────
 COLORREF ToRef(DWORD argb);
 
@@ -206,7 +212,7 @@ private:
 // ────────────────────────────────────────────────────────────
 class CTitleLabelUI : public CLabelUI {
 public:
-    CTitleLabelUI() : m_sub(SYSRECOVER_VERSION_W), m_subPx(13), m_px(19) {}
+    CTitleLabelUI() : m_sub(ui_skin::VersionDisplay()), m_subPx(13), m_px(19) {}
 
     LPCTSTR GetClass() const override { return _T("TitleLabel"); }
     void SetAttribute(LPCTSTR pstrName, LPCTSTR pstrValue) override;

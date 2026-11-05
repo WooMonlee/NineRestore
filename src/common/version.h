@@ -8,10 +8,13 @@
 // 规则（见 PLAN.md「版本号规则」，自 0.1.3 起生效）：
 //   主版本.次版本 **由人指定**（产品口径变化、架构/契约变更时才动）；
 //   修订号 **每解决一个问题 +1** —— 提交前执行 `python tools/version.py --bump`。
+//   预发布后缀（-beta.N / -rc.N）由人指定，`--bump` 不会自动加。
 //   一次发布 = 一个 git tag（vX.Y.Z），三处（version.h / git tag / version.json）同源。
 // 说明：契约版本另计（SYSRECOVER_CONTRACT_VERSION，改跨层字段才动）。
 #define SYSRECOVER_NAME "SysRecover"
-#define SYSRECOVER_VERSION "1.0.0"
+// 内部版本串（日志/CLI/version.json 用它）；面向用户的显示名由 GUI 转成
+// 「1.0.0 测试版」（见 src/gui/ui_skin.h::VersionDisplay，beta→测试版、rc→RC）。
+#define SYSRECOVER_VERSION "1.0.0-beta.1"
 // 宽串形态：把窄串字面量加上 L 前缀（两级宏，避免 ## 阻止展开）。
 #define SYSRECOVER_WIDEN2(x) L##x
 #define SYSRECOVER_WIDEN(x) SYSRECOVER_WIDEN2(x)

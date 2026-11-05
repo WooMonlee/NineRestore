@@ -17,7 +17,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 VERSION_H = ROOT / "src" / "common" / "version.h"
 PAT = re.compile(r'#define\s+SYSRECOVER_VERSION\s+"([^"]+)"')
-SEMVER = re.compile(r"\d+\.\d+\.\d+")
+SEMVER = re.compile(
+    r"\d+\.\d+\.\d+"                      # 主.次.修订
+    r"(?:-[0-9A-Za-z]+(?:[.\-][0-9A-Za-z]+)*)?"  # 可选预发布后缀：-beta.1 / -rc.2
+)
 
 
 def is_semver(v: str) -> bool:
@@ -25,8 +28,9 @@ def is_semver(v: str) -> bool:
 
 
 def bump(v: str) -> str:
-    """修订号 +1（主/次不动）。"""
-    major, minor, patch = (int(x) for x in v.split("."))
+    """修订号 +1（主/次不动；预发布后缀丢弃）。"""
+    base = v.split("-", 1)[0]
+    major, minor, patch = (int(x) for x in base.split("."))
     return "%d.%d.%d" % (major, minor, patch + 1)
 
 

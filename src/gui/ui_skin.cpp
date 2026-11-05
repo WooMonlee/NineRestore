@@ -99,6 +99,25 @@ void AddRound(Gdiplus::GraphicsPath& path, const Gdiplus::RectF& r, float rad) {
 
 namespace ui_skin {
 
+// 版本显示名：只从 version.h 的内部串派生，避免界面里再抄一份版本号。
+// 1.0.0-beta.1 → 「1.0.0 测试版」；1.0.0-rc.2 → 「1.0.0 RC」（保留序号）；正式版原样。
+CDuiString VersionDisplay() {
+    const std::wstring v = SYSRECOVER_VERSION_W;
+    const size_t dash = v.find(L'-');
+    if (dash == std::wstring::npos) return CDuiString(v.c_str());
+    const std::wstring base = v.substr(0, dash);
+    const std::wstring pre = v.substr(dash + 1);
+    if (pre.compare(0, 4, L"beta") == 0) {
+        return CDuiString((base + L" " + Tr(L"测试版")).c_str());
+    }
+    if (pre.compare(0, 2, L"rc") == 0) {
+        // rc.2 → RC2（序号保留，便于区分候选批次）
+        std::wstring num = pre.size() > 3 ? pre.substr(3) : L"";
+        return CDuiString((base + L" RC" + num).c_str());
+    }
+    return CDuiString(v.c_str());
+}
+
 void EnsureGdiplus() {
     static ULONG_PTR s_token = 0;
     if (s_token == 0) {
