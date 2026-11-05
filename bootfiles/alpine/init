@@ -503,6 +503,36 @@ emit_result(){
 # 一旦 swap 早退（~new 缺失等）就永远走不到 → 临时内核始终在 ESP 上 → 固件每次都
 # 把我们这条（BootOrder 置顶）启动项拉起来 → 无限重启进救援。
 # 现在改到 init 里、且在调用 lite **之前**执行；reboot_now 里再兜一次。
+# H6（1.0）：把 bootorder.bak 写回固件 BootOrder。
+# efivarfs 文件 = 4 字节属性头 + 数据；写回必须保留属性头（否则固件变量属性变空）。
+# 写完**读回比对**（cmp），只有内容一致才算成功，调用方据此决定要不要删标记。
+restore_bootorder(){
+    _rbk=$1
+    _rbo=/sys/firmware/efi/efivars/BootOrder-8be4df61-93ca-11d2-aa0d-00e098032b8c
+    [ -s "$_rbk" ] || return 1
+    _rnew=/tmp/zj_bootorder.new
+    rm -f "$_rnew"
+    if [ -f "$_rbo" ]; then
+        dd if="$_rbo" bs=1 count=4 of="$_rnew" 2>/dev/null || return 1
+    else
+        printf '\007\000\000\000' > "$_rnew" || return 1
+    fi
+    dd if="$_rbk" of="$_rnew" bs=1 oflag=append conv=notrunc 2>/dev/null || {
+        rm -f "$_rnew"
+        return 1
+    }
+    if ! cat "$_rnew" > "$_rbo" 2>/dev/null; then
+        rm -f "$_rnew"
+        return 1
+    fi
+    if ! dd if="$_rbo" bs=1 skip=4 2>/dev/null | cmp -s - "$_rbk"; then
+        rm -f "$_rnew"
+        return 1
+    fi
+    rm -f "$_rnew"
+    return 0
+}
+
 disarm_staged_entry(){
     _dn=0
     for _dd in /dev/nvme*n*p* /dev/sd*[0-9] /dev/vd*[0-9] /dev/mmcblk*p*; do
@@ -526,24 +556,53 @@ disarm_staged_entry(){
             # zjtemp，避免编号被复用后误删别人的条目。
             _tnfile=/tmp/zj_dis/EFI/ZJRESTORE/temp-entry.txt
             if [ -f "$_tnfile" ]; then
+                _tn_ok=1
                 _tn=$(tr -d ' \t\r\n' < "$_tnfile")
                 case "$_tn" in
                     Boot[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f])
                         _tv="/sys/firmware/efi/efivars/${_tn}-8be4df61-93ca-11d2-aa0d-00e098032b8c"
                         if [ -f "$_tv" ]; then
                             if tr -d '\000' < "$_tv" | grep -q 'zjtemp'; then
-                                if rm -f "$_tv"; then
+                                # H6：删完**复查文件确实消失**，否则不算成功（保留标记）
+                                if rm -f "$_tv" && [ ! -f "$_tv" ]; then
                                     say "temporary firmware entry $_tn removed"
                                 else
-                                    say "WARN: cannot remove firmware entry $_tn"
+                                    say "WARN: cannot remove firmware entry $_tn (marker kept)"
+                                    _tn_ok=0
                                 fi
                             else
                                 say "WARN: $_tn does not look like ours, left alone"
+                                _tn_ok=0
                             fi
+                        else
+                            say "temporary firmware entry $_tn already absent"
                         fi
                         ;;
+                    *)
+                        say "WARN: bad temp-entry marker ($_tn), left alone"
+                        _tn_ok=0
+                        ;;
                 esac
-                rm -f "$_tnfile"
+                # H6：从 bootorder.bak 恢复 BootOrder；恢复失败 → 保留标记，下次还能重试
+                _bk=/tmp/zj_dis/EFI/ZJRESTORE/bootorder.bak
+                if [ "$_tn_ok" -eq 1 ] && [ -f "$_bk" ]; then
+                    if restore_bootorder "$_bk"; then
+                        rm -f "$_bk"
+                        say "BootOrder restored from bootorder.bak"
+                    else
+                        say "WARN: restore BootOrder failed (marker kept for retry)"
+                        _tn_ok=0
+                    fi
+                fi
+                if [ "$_tn_ok" -eq 1 ]; then
+                    if rm -f "$_tnfile"; then
+                        say "staged boot entry disarmed"
+                    else
+                        say "WARN: cannot remove temp-entry marker"
+                    fi
+                else
+                    say "WARN: staged entry not fully disarmed, marker kept"
+                fi
             fi
             umount /tmp/zj_dis
         else
