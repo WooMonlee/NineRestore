@@ -247,7 +247,7 @@ void CMainForm::StartupLazyWork() {
     // PhysicalDriveN 开句柄发 IOCTL，慢盘上每次都能卡几秒，过去这里
     // diag(1) + list(1) + 收集(每盘符 1) + 填下拉(1) 各来一遍。
     sysrecover::StartupPhase("lazy-start");
-    std::vector<DiskInfo> disks = sysrecover::EnumerateDisks();
+    std::vector<DiskInfo> disks = sysrecover::EnumerateDisks(m_showUsb);
     sysrecover::StartupPhase("enumerate-disks");  // 问题 2 的关键计时点
     sysrecover::WriteDiagFiles(logsDir, &disks);
     sysrecover::CollectDeployArtifacts(logsDir + L"\\collected", 0, &disks);
@@ -793,10 +793,11 @@ void CMainForm::OnTaskComplete(int rc) {
                 msg += Tr(L"\n完整清单见日志：\n");
             }
             msg += LogBaseDir() + L"\\logs";
-            wchar_t status[256];
-            swprintf(status, 256, Tr(L"备份完成，但有 %d 个文件未备份"),
-                     n);
-            SetStatus(std::wstring(status) + tp);
+            // L1：固定文本 + 数值拼接（不再把译文当格式串）。
+            const std::wstring status =
+                Tr(L"备份完成，但有 ") + std::to_wstring(n) +
+                Tr(L" 个文件未备份");
+            SetStatus(status + tp);
             MessageBoxW(m_hWnd, (msg + tp).c_str(), Tr(L"备份不完整"),
                         MB_OK | MB_ICONWARNING);
         } else {
@@ -1689,6 +1690,10 @@ void CMainForm::ShowMoreMenu() {
     }
     // PIT-207：与模式无关的"包"操作（两种模式都给）
     ::AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+    // M12：USB 设备（含 USB 外接硬盘，它上报 BusTypeUsb 会被默认过滤）
+    // 默认不显示；只有用户显式勾选才枚举出来，并在分区行标注「USB 设备」。
+    ::AppendMenuW(hMenu, MF_STRING | (m_showUsb ? MF_CHECKED : 0u), 11,
+                  Tr(L"显示 USB 设备（默认隐藏，谨慎选择）"));
     ::AppendMenuW(hMenu, MF_STRING, 8, Tr(L"打包成单文件…"));
     ::AppendMenuW(hMenu, MF_STRING, 9, Tr(L"解压到文件夹…"));
 
@@ -1722,6 +1727,16 @@ void CMainForm::ShowMoreMenu() {
         ClearBootMenuEntry();
     } else if (cmd == 4) {
         StartVerifyImage();
+    } else if (cmd == 11) {
+        // M12：显式开关 —— 打开后才枚举 USB 设备；关闭时恢复默认（隐藏）。
+        m_showUsb = !m_showUsb;
+        SetStatus(m_showUsb ? Tr(L"正在枚举磁盘（含 USB 设备）…")
+                            : Tr(L"正在枚举磁盘（已隐藏 USB 设备）…"));
+        PopulatePartitions(sysrecover::EnumerateDisks(m_showUsb));
+        SetStatus(m_showUsb ? Tr(L"已显示 USB 设备（还原目标请谨慎选择）")
+                            : Tr(L"已隐藏 USB 设备"));
+        LogInfo(std::string("GUI show usb devices: ") +
+                (m_showUsb ? "on" : "off"));
     } else if (cmd == 10) {
         m_restoreVerifyImage = !m_restoreVerifyImage;
         SetStatus(m_restoreVerifyImage
@@ -2142,7 +2157,9 @@ void CMainForm::PopulatePartitions(const std::vector<DiskInfo>& disks) {
     int selDefault = -1;
     for (const auto& disk : disks) {
         for (const auto& part : disk.parts) {
-            if (part.isEsp || part.isMsr || part.isRecovery || disk.isRemovable)
+            // M12：默认隐藏可移动盘；仅当用户勾选「显示 USB 设备」时保留 USB 盘。
+            if (part.isEsp || part.isMsr || part.isRecovery ||
+                (disk.isRemovable && !m_showUsb))
                 continue;
             if (part.sizeBytes < 2ULL * 1024 * 1024 * 1024)
                 continue;
@@ -2161,10 +2178,15 @@ void CMainForm::PopulatePartitions(const std::vector<DiskInfo>& disks) {
                                    : Tr(L"系统保留");
             int pct = part.sizeBytes
                       ? (int)(used * 100 / part.sizeBytes) : 0;
+            // M12：USB 盘在分区行显式标注，提醒用户不要误选。
+            std::wstring modelTxt =
+                disk.model.empty() ? Tr(L"本地磁盘") : disk.model;
+            if (disk.isUsb)
+                modelTxt += Tr(L"（USB 设备）");
             item->SetPart(part.letter.empty() ? Tr(L"—") : part.letter.c_str(),
                           U2W(StyleName(disk.style)).c_str(),
                           part.fs.c_str(), part.isSystem,
-                          disk.model.empty() ? Tr(L"本地磁盘") : disk.model.c_str(),
+                          modelTxt.c_str(),
                           part.label.c_str(), partNo,
                           cap.c_str(), freeTxt.c_str(), pct);
             pCombo->Add(item);
@@ -2408,11 +2430,11 @@ void CMainForm::OnSearchImages() {
     const std::wstring best = m_searchHits[0];
     m_wimPath = best;
     SetImagePathEdit(best);  // 同步原生 EDIT → EN_CHANGE 闭环
-    wchar_t buf[512];
-    // MinGW %d=int ✓（路径等宽串在 swprintf 外拼接，避 PIT-007 的 %ls 坑）
-    swprintf(buf, 512, Tr(L"找到 %d 个镜像文件，已填入最新："),
-             (int)m_searchHits.size());
-    SetStatus(std::wstring(buf) + best);  // 解析失败时会被 LoadWimImages 的错误覆盖
+    // L1：译文只拼在固定文本外，不再作为 swprintf 格式串。
+    const std::wstring foundMsg =
+        Tr(L"找到 ") + std::to_wstring(m_searchHits.size()) +
+        Tr(L" 个镜像文件，已填入最新：");
+    SetStatus(foundMsg + best);  // 解析失败时会被 LoadWimImages 的错误覆盖
     LoadWimImages(best);
 }
 
@@ -2530,13 +2552,14 @@ void CMainForm::LoadWimImages(const std::wstring& path) {
         // 收起框空白，见 ui_skin.h 注释）
         CTextItemUI* item = new CTextItemUI;
         item->SetFixedHeight(30);
-        wchar_t buf[512];
-        // 注意：MinGW 下 swprintf 的 %s 当**窄**字符串用（PIT-007）—— 传 wchar_t*
-        // 会在第一个字符的高字节 0x00 处截断（症状：镜像名只剩首字母 "1 - W"）。
-        // 宽字符串必须用 %ls。
-        swprintf(buf, 512, Tr(L"%d - %ls（%.1f GB）"), img.index, img.name.c_str(),
-                 img.sizeBytes / 1073741824.0);
-        item->SetText(buf);
+        // L1：译文不再作为格式串。数值/名称各自格式化后用 std::wstring 拼接
+        //（也顺手避开 PIT-007 的 %ls/%s 宽度坑）。
+        wchar_t sizeText[32];
+        swprintf(sizeText, 32, L"%.1f", img.sizeBytes / 1073741824.0);
+        const std::wstring row = std::to_wstring(img.index) + L" - " +
+                                 img.name + Tr(L"（") + sizeText +
+                                 Tr(L" GB）");
+        item->SetText(row.c_str());
         pCombo->Add(item);
         m_imgIdx.push_back(img.index);
     }
@@ -2614,9 +2637,8 @@ void CMainForm::ApplyCpuCapFromUi() {
     m_cpuCap = kCapByIndex[sel];
     std::wstring msg = Tr(L"CPU 不限制");
     if (m_cpuCap != 0) {
-        wchar_t buf[64];
-        swprintf(buf, 64, Tr(L"CPU 限制：%d%%"), m_cpuCap);
-        msg = buf;
+        // L1：固定文本 + 数值拼接（不再把译文当格式串）。
+        msg = Tr(L"CPU 限制：") + std::to_wstring(m_cpuCap) + L"%";
     }
     if (m_busy) {
         std::string why;

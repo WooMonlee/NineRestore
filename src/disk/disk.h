@@ -35,11 +35,14 @@ struct DiskInfo {
     uint64_t sizeBytes = 0;
     PartitionStyle style = PartitionStyle::Unknown;
     bool isRemovable = false;
+    bool isUsb = false;  // 总线类型为 USB（含 USB 外接硬盘；默认同样被过滤）
     std::vector<PartitionInfo> parts;
 };
 
 // 枚举本地固定磁盘（跳过可移动盘与光驱）。失败的磁盘静默跳过。
-std::vector<DiskInfo> EnumerateDisks();
+// includeUsb=true 时额外列出 USB 总线设备（M12：仅由用户显式开关开启，
+// 避免把系统还原到 U 盘上；非 USB 的可移动介质始终不列出）。
+std::vector<DiskInfo> EnumerateDisks(bool includeUsb = false);
 
 // 磁盘健康（只读、尽力而为）。诚实告知"能不能取到"：
 // 走 ATA PASS THROUGH 读 SMART（ATA/SATA 一般可读，含 USB-SATA 桥；NVMe / RAID 虚拟盘

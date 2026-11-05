@@ -227,6 +227,8 @@ private:
     std::wstring m_backupPassword;
     // H4（1.0）：还原前全量校验（「更多功能>>」里的勾选项；默认关）。
     bool m_restoreVerifyImage = false;
+    // M12：显式显示 USB 设备（含 USB 外接硬盘；默认隐藏，避免误选）。
+    bool m_showUsb = false;
     std::wstring m_lastLoadedWim;  // 上次已解析过子镜像的路径（避免手动输入时反复解析）
     sysrecover::SystemDescription m_sysDesc;  // 运行中系统的描述（InitWindow 里取）
     int m_selPart = -1;

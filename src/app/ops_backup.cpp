@@ -315,9 +315,10 @@ int RunBackup(const BackupRequest& reqIn, ProgressFn progress,
     if (rc != 0) {
         ReleaseOpLock();
         ProgressDone("backup", "failed");
-        char buf[128];
-        snprintf(buf, sizeof(buf), Tr("备份失败(rc=%d): "), rc);
-        err = buf;
+        // L1：译文不再当 printf 格式串（译文含 % 会读错参数）。
+        err = Tr("备份失败(rc=");
+        err += std::to_string(rc);
+        err += "): ";
         err += W2U(WimEngine::ErrorString(rc));
         LogError(err);
         return 1;
@@ -464,9 +465,10 @@ int RunBackup(const BackupRequest& reqIn, ProgressFn progress,
 
     // ESP 失败时统一的错误文本（tail 由调用方给）
     auto espFail = [&](const std::string& tail) {
-        char buf[160];
-        snprintf(buf, sizeof(buf), Tr("ESP 备份失败(rc=%d): "), erc);
-        std::string e = buf;
+        // L1：固定格式串拼接，避免把译文当 printf 格式串。
+        std::string e = Tr("ESP 备份失败(rc=");
+        e += std::to_string(erc);
+        e += "): ";
         // -1 = 引擎未初始化（wimlib.h 不外泄 → ErrorString(-1) 不可用）
         e += erc == -1 ? std::string(Tr("wimlib 初始化失败"))
                        : W2U(WimEngine::ErrorString(erc));
@@ -537,9 +539,10 @@ int RunBackup(const BackupRequest& reqIn, ProgressFn progress,
         if (vrc != 0) {
             ReleaseOpLock();
             ProgressDone("backup", "verify-failed");
-            char buf[128];
-            snprintf(buf, sizeof(buf), Tr("备份已写出但校验失败(rc=%d): "), vrc);
-            err = buf;
+            // L1：固定格式串拼接。
+            err = Tr("备份已写出但校验失败(rc=");
+            err += std::to_string(vrc);
+            err += "): ";
             err += W2U(WimEngine::ErrorString(vrc));
             LogError(err);
             return 5;

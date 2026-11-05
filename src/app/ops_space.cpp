@@ -141,10 +141,15 @@ int CheckRestoreSpace(const std::wstring& imagePath, int index,
              bytes / 1073741824.0, need / 1073741824.0, have / 1073741824.0);
     LogInfo(buf);
     if (have && need > have) {
-        snprintf(buf, sizeof(buf),
-                 Tr("目标分区空间不足：镜像解压后约需 %.1f GB（已含余量），" "但目标分区只有 %.1f GB。\n请换更大的目标分区，或改用更小的镜像。"),
-                 need / 1073741824.0, have / 1073741824.0);
-        err = buf;
+        // L1：数值先格式化，再用固定文本拼接（译文不再当格式串）。
+        char needG[32], haveG[32];
+        snprintf(needG, sizeof(needG), "%.1f", need / 1073741824.0);
+        snprintf(haveG, sizeof(haveG), "%.1f", have / 1073741824.0);
+        err = Tr("目标分区空间不足：镜像解压后约需 ");
+        err += needG;
+        err += Tr(" GB（已含余量），但目标分区只有 ");
+        err += haveG;
+        err += Tr(" GB。\n请换更大的目标分区，或改用更小的镜像。");
         return 1;
     }
     return 0;

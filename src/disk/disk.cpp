@@ -111,18 +111,35 @@ std::vector<VolumeRec> EnumerateVolumes() {
                               FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                               OPEN_EXISTING, 0, nullptr));
         if (vh.valid()) {
-            std::vector<BYTE> buf(sizeof(VOLUME_DISK_EXTENTS) +
-                                  7 * sizeof(DISK_EXTENT));
-            DWORD ret = 0;
-            if (DeviceIoControl(vh.h, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
-                                nullptr, 0, buf.data(), (DWORD)buf.size(),
-                                &ret, nullptr)) {
-                auto* e = reinterpret_cast<VOLUME_DISK_EXTENTS*>(buf.data());
-                for (DWORD i = 0; i < e->NumberOfDiskExtents; ++i)
-                    rec.extents.push_back(
-                        {e->Extents[i].DiskNumber,
-                         static_cast<uint64_t>(
-                             e->Extents[i].StartingOffset.QuadPart)});
+            // M12：extent 缓冲不再固定 7 个。首次按 8 个请求，遇到
+            // ERROR_MORE_DATA（跨盘卷/动态卷）就倍增重试，避免分区信息被截断。
+            // 上限 64 个只是为了防异常卷把内存吃光；超过即放弃该卷的 extent。
+            DWORD cap = 8;
+            for (;;) {
+                std::vector<BYTE> buf(sizeof(VOLUME_DISK_EXTENTS) +
+                                      cap * sizeof(DISK_EXTENT));
+                DWORD ret = 0;
+                if (DeviceIoControl(vh.h, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+                                    nullptr, 0, buf.data(), (DWORD)buf.size(),
+                                    &ret, nullptr)) {
+                    auto* e =
+                        reinterpret_cast<VOLUME_DISK_EXTENTS*>(buf.data());
+                    if (e->NumberOfDiskExtents > cap && cap < 64) {
+                        cap *= 2;
+                        continue;
+                    }
+                    for (DWORD i = 0; i < e->NumberOfDiskExtents; ++i)
+                        rec.extents.push_back(
+                            {e->Extents[i].DiskNumber,
+                             static_cast<uint64_t>(
+                                 e->Extents[i].StartingOffset.QuadPart)});
+                    break;
+                }
+                if (GetLastError() == ERROR_MORE_DATA && cap < 64) {
+                    cap *= 2;
+                    continue;
+                }
+                break;
             }
         }
         out.push_back(std::move(rec));
@@ -197,9 +214,13 @@ void FillDiskProps(HANDLE h, DiskInfo& d) {
             MultiByteToWideChar(CP_ACP, 0, tmp, -1, w, 128);
             d.serial = w;
         }
+        // 注意（M12 复核）：BusTypeUsb 与 RemovableMedia 都会把 isRemovable 置真，
+        // 所以 USB 外接硬盘（固定盘）也会被默认枚举过滤。产品决定：默认仍不列出，
+        // 但提供显式「显示 USB 设备」开关（isUsb 单独标记，供 UI 标注）。
+        d.isUsb = (desc->BusType == BusTypeUsb);
         if (desc->RemovableMedia)
             d.isRemovable = true;
-        if (desc->BusType == BusTypeUsb)
+        if (d.isUsb)
             d.isRemovable = true;
     }
 }
@@ -217,12 +238,14 @@ const char* StyleName(PartitionStyle s) {
     }
 }
 
-std::vector<DiskInfo> EnumerateDisks() {
+std::vector<DiskInfo> EnumerateDisks(bool includeUsb) {
     std::vector<DiskInfo> disks;
     const wchar_t sysLetter = SystemDriveLetter();
     const auto volumes = EnumerateVolumes();
 
-    for (uint32_t idx = 0; idx < 16; ++idx) {
+    // M12：上限从 16 放宽到 128。PhysicalDrive 编号是连续递增的，超过 128 的
+    // 属于异常环境（多盘阵列/测试台）；这里保留硬上限只为防死循环。
+    for (uint32_t idx = 0; idx < 128; ++idx) {
         wchar_t path[64] = {};
         swprintf_s(path, L"\\\\.\\PhysicalDrive%u", idx);
         Handle h(CreateFileW(path, GENERIC_READ,
@@ -234,8 +257,11 @@ std::vector<DiskInfo> EnumerateDisks() {
         DiskInfo d;
         d.index = idx;
         FillDiskProps(h.h, d);
-        if (d.isRemovable)
-            continue;  // 跳过可移动盘（与旧原型一致）
+        // 默认跳过可移动盘；只有用户显式开启「显示 USB 设备」时才列出 USB 设备
+        // （含 USB 外接硬盘：它上报 BusTypeUsb，被默认过滤）。非 USB 的可移动介质
+        // （SD 卡等）无论如何都不列出，避免误选。
+        if (d.isRemovable && !(includeUsb && d.isUsb))
+            continue;
 
         std::vector<BYTE> buf;
         if (!ReadLayout(h.h, buf))

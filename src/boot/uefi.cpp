@@ -693,12 +693,20 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
         if (freeBytes.QuadPart < need + kMargin) {
             // 文案把"净增量"和"给 bcdboot 的 16MB 余量"都写清，别再出现
             // "需要 29.5 / 可用 29.4"这种看起来只差 0.1MB 的误导。
-            snprintf(line, sizeof(line),
-                     Tr("ESP 空间不足：还需 %.1fMB，另需预留 %.0fMB 给 bcdboot，"
-                        "可用 %.1fMB。请清理 ESP 上的其它文件，或换用更小的 "
-                        "initramfs。\n"),
-                     need / 1048576.0, kMargin / 1048576.0,
+            // L1：数值先格式化到小缓冲，再用固定文本拼接（译文不再当格式串）。
+            char needM[32], marginM[32], freeM[32];
+            snprintf(needM, sizeof(needM), "%.1f", need / 1048576.0);
+            snprintf(marginM, sizeof(marginM), "%.0f", kMargin / 1048576.0);
+            snprintf(freeM, sizeof(freeM), "%.1f",
                      freeBytes.QuadPart / 1048576.0);
+            std::string msg = Tr("ESP 空间不足：还需 ");
+            msg += needM;
+            msg += Tr("MB，另需预留 ");
+            msg += marginM;
+            msg += Tr("MB 给 bcdboot，可用 ");
+            msg += freeM;
+            msg += Tr("MB。请清理 ESP 上的其它文件，或换用更小的 initramfs。\n");
+            snprintf(line, sizeof(line), "%s", msg.c_str());
             log += line;
             return false;
         }
@@ -941,9 +949,11 @@ bool UefiBootEntryExists(std::string& detail) {
         detail = Tr("未安装（固件启动项不存在）");
         return false;
     }
-    char line[64];
-    snprintf(line, sizeof(line), Tr("已安装 Boot%04X"), num);
-    detail = line;
+    // L1：Boot#### 的编号单独格式化后再拼接（固定 %04X 格式串）。
+    char numText[16];
+    snprintf(numText, sizeof(numText), "%04X", num);
+    detail = Tr("已安装 Boot");
+    detail += numText;
     return true;
 }
 

@@ -26,10 +26,13 @@ bool SetRate(DWORD rate, std::string* why) {
                                 sizeof(ci)))
         return true;
     if (why) {
-        char buf[160];
-        snprintf(buf, sizeof(buf), Tr("无法设置 CPU 限制（err=%lu）"),
+        // L1：固定格式串拼接，避免译文被当作 printf 格式串。
+        char code[32];
+        snprintf(code, sizeof(code), "%lu",
                  static_cast<unsigned long>(GetLastError()));
-        *why = buf;
+        *why = Tr("无法设置 CPU 限制（err=");
+        *why += code;
+        *why += Tr("）");
     }
     return false;
 }
@@ -54,10 +57,13 @@ bool SetCpuCap(int pct, std::string* why) {
         g_job = CreateJobObjectW(nullptr, nullptr);
         if (!g_job) {
             if (why) {
-                char buf[160];
-                snprintf(buf, sizeof(buf), Tr("无法创建 CPU 限制任务对象（err=%lu）"),
+                // L1：固定格式串拼接。
+                char code[32];
+                snprintf(code, sizeof(code), "%lu",
                          static_cast<unsigned long>(GetLastError()));
-                *why = buf;
+                *why = Tr("无法创建 CPU 限制任务对象（err=");
+                *why += code;
+                *why += Tr("）");
             }
             return false;
         }
@@ -69,11 +75,13 @@ bool SetCpuCap(int pct, std::string* why) {
         if (!AssignProcessToJobObject(g_job, GetCurrentProcess())) {
             // 常见于本进程已被别的 Job 收编（Win7 不支持嵌套 Job）。
             if (why) {
-                char buf[192];
-                snprintf(buf, sizeof(buf),
-                         Tr("无法限制 CPU：程序已在其它任务对象中（err=%lu）"),
+                // L1：固定格式串拼接。
+                char code[32];
+                snprintf(code, sizeof(code), "%lu",
                          static_cast<unsigned long>(GetLastError()));
-                *why = buf;
+                *why = Tr("无法限制 CPU：程序已在其它任务对象中（err=");
+                *why += code;
+                *why += Tr("）");
             }
             CloseHandle(g_job);
             g_job = nullptr;
@@ -94,3 +102,4 @@ int GetCpuCap() {
 }
 
 }  // namespace sysrecover
+

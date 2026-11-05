@@ -227,6 +227,12 @@ bool RelaunchElevated(int* exitCode) {
     sei.lpVerb = L"runas";
     sei.lpFile = self;
     sei.lpParameters = params.empty() ? nullptr : params.c_str();
+    // M13：runas 拉起的新进程默认工作目录是 System32，命令行里的相对路径
+    // （--image .\a.wim）会解析到 System32 下。显式传入当前工作目录，
+    // 保证提权前后相对路径语义一致（无需改动用户命令行）。
+    wchar_t cwd[MAX_PATH] = {};
+    if (GetCurrentDirectoryW(MAX_PATH, cwd))
+        sei.lpDirectory = cwd;
     sei.nShow = SW_SHOWNORMAL;
     if (!ShellExecuteExW(&sei) || !sei.hProcess)
         return false;
@@ -440,6 +446,12 @@ int CmdBackup(const std::vector<std::string>& a) {
                         static_cast<int>(skipped.size() - shown));
         std::printf(Tr("完整清单见日志：%s\n"),
                     W2U8(sysrecover::LogBaseDir() + L"\\logs").c_str());
+        // M11（1.0）：0.9.96 在这种情况下仍 exit 0，脚本 `&&` 会把"不完整备份"
+        // 当成功继续。这里返回 7（备份不完整），只有显式 --allow-skipped 才归 0。
+        if (!Has(a, "--allow-skipped")) {
+            std::printf(Tr("备份已生成但不完整；确认可接受请加 --allow-skipped（此时退出码为 0）。\n"));
+            return 7;
+        }
     }
     std::printf(Tr("%s，用时 %s。\n"),
                 req.verify ? Tr("备份并校验完成") : Tr("备份完成"),
@@ -985,19 +997,21 @@ static int CmdScanEa(const std::vector<std::string>& args) {
 }
 
 int CmdList(const std::vector<std::string>& a) {
-    const auto disks = sysrecover::EnumerateDisks();
+    // M12：USB 设备（含 USB 外接硬盘）默认不列出；显式 --include-usb 才显示。
+    const auto disks = sysrecover::EnumerateDisks(Has(a, "--include-usb"));
     if (Has(a, "--json")) {
         std::printf("{\n  \"disks\": [");
         for (size_t di = 0; di < disks.size(); ++di) {
             const auto& d = disks[di];
             std::printf("%s\n    {\"index\":%u,\"model\":\"%s\",\"serial\":\"%s\","
                         "\"sizeBytes\":%llu,\"style\":\"%s\",\"removable\":%s,"
-                        "\"partitions\":[",
+                        "\"usb\":%s,\"partitions\":[",
                         di ? "," : "", d.index, JsonEsc(d.model).c_str(),
                         JsonEsc(d.serial).c_str(),
                         (unsigned long long)d.sizeBytes,
                         sysrecover::StyleName(d.style),
-                        d.isRemovable ? "true" : "false");
+                        d.isRemovable ? "true" : "false",
+                        d.isUsb ? "true" : "false");
             for (size_t pi = 0; pi < d.parts.size(); ++pi) {
                 const auto& p = d.parts[pi];
                 std::printf("%s{\"number\":%u,\"letter\":\"%s\",\"label\":\"%s\","
@@ -1028,7 +1042,7 @@ int CmdList(const std::vector<std::string>& a) {
                      d.model.empty() ? L"?" : d.model.c_str(),
                      d.sizeBytes / gb,
                      sysrecover::StyleName(d.style),
-                     d.isRemovable ? "  [Removable]" : "");
+                     d.isUsb ? "  [USB]" : (d.isRemovable ? "  [Removable]" : ""));
         for (const auto& p : d.parts) {
             std::wprintf(
                 L"  Part %u  %ls  %ls  %.0fGB free %.0fGB%ls%ls%ls\n",
@@ -1111,7 +1125,7 @@ const CmdHelp* CmdHelpTable(size_t* n) {
         "  （不给 --out 时输出到桌面 SysRecover-logs-<时间>.zip）。")},
     {"images", Tr("images --file <镜像>\n  列出镜像里的子镜像：<index> - <名称>（<大小>）。")},
     {"backup",
-     Tr("backup --dest <文件> [--source <目录>] [--compress fast|maximum|recovery]\n" "       [--name <名>] [--append] [--verify] [--esp] [--no-snapshot] [--password <pwd>] [--yes]\n" "  --source 写盘符根（`C:` 或 `C:/` 都行）即自动走 VSS 热备；\n" "  --compress 决定体积/速度；--verify 写完立即校验；--append 追加为同一 WIM 的新子镜像；\n" "  --esp 把 ESP 分区并入同一镜像（子镜像名 ESP，还原系统时自动恢复回 ESP）；\n" "  --no-snapshot 冷备（PE/离线卷/VHD 卷上 VSS 不可用时用）；\n" "  本机没有 ESP 时自动跳过（不算失败）。")},
+     Tr("backup --dest <文件> [--source <目录>] [--compress fast|maximum|recovery]\n" "       [--name <名>] [--append] [--verify] [--esp] [--no-snapshot] [--password <pwd>]\n" "       [--allow-skipped] [--yes]\n" "  --source 写盘符根（`C:` 或 `C:/` 都行）即自动走 VSS 热备；\n" "  --allow-skipped 有文件读不到时仍以退出码 0 结束（默认返回 7 = 备份不完整）；\n" "  --compress 决定体积/速度；--verify 写完立即校验；--append 追加为同一 WIM 的新子镜像；\n" "  --esp 把 ESP 分区并入同一镜像（子镜像名 ESP，还原系统时自动恢复回 ESP）；\n" "  --no-snapshot 冷备（PE/离线卷/VHD 卷上 VSS 不可用时用）；\n" "  本机没有 ESP 时自动跳过（不算失败）。")},
     {"restore",
      Tr("restore --image <文件> --disk N --part M [--index N] [--keep-old]\n"
         "        [--no-keep-old] [--reboot] [--no-repair-boot] [--engine block|swap]\n"
@@ -1173,7 +1187,8 @@ void PrintAllUsage() {
            "  support [--out <zip>]        一键收集诊断资料（各盘日志+转储+事件日志）打包\n"
            "  images --file <镜像>         列出镜像里的子镜像（含大小/描述）\n"
            "  backup --dest <文件> [--source <目录>] [--compress fast|maximum|recovery]\n"
-           "         [--name <名>] [--append] [--verify] [--esp] [--no-snapshot] [--password <pwd>] [--yes]\n"
+           "         [--name <名>] [--append] [--verify] [--esp] [--no-snapshot] [--password <pwd>]\n"
+           "         [--allow-skipped] [--yes]\n"
            "  restore --image <文件> --disk N --part M [--index N] [--keep-old|--no-keep-old]\n"
            "          [--reboot] [--no-repair-boot] [--engine block|swap] [--universal [--drivers <目录>]] [--verify-image] [--yes]\n"
            "  verify --image <文件>        校验镜像完整性\n"
@@ -1196,7 +1211,7 @@ void PrintAllUsage() {
            "  --lang <zh|en>               界面语言（如: SysRecover.exe --lang en help）\n"
            "  --yes                        跳过确认（危险操作仍受安全门禁约束）\n"
            "\n"
-           "退出码: 0 成功 / 1 通用失败 / 2 参数错 / 3 需管理员 / 4 危险目标被拒 / 5 镜像校验失败 / 6 取消\n"
+           "退出码: 0 成功 / 1 通用失败 / 2 参数错 / 3 需管理员 / 4 危险目标被拒 / 5 镜像校验失败 / 6 取消 / 7 备份不完整\n"
            "注意: 还原系统盘会自动重启进救援层；镜像必须放在**本地分区**（救援层访问不到网络）。\n"));
 }
 

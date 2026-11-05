@@ -328,10 +328,11 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
         }
     }
     if (!found) {
-        char buf[96];
-        snprintf(buf, sizeof(buf), Tr("找不到目标分区 磁盘%d 分区%d"), req.disk,
-                 req.part);
-        err = buf;
+        // L1：固定格式串拼接（译文不再当 printf 格式串）。
+        err = Tr("找不到目标分区 磁盘");
+        err += std::to_string(req.disk);
+        err += Tr(" 分区");
+        err += std::to_string(req.part);
         return 1;
     }
     // 1b) 软件/镜像若在目标分区（会被格式化）上 → 镜像移动、软件复制到数据盘。
@@ -632,14 +633,18 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
         }
         SwapSpaceEstimate se;
         if (!EstimateSwapSpace(target, content, se) || !se.enough) {
-            char buf[256];
-            snprintf(buf, sizeof(buf),
-                     Tr("A 引擎空间不足：需要约 %.1f GB（内容+页文件+余量），"
-                        "目标盘可用 %.1f GB。请清理磁盘后重试，或改用 "
-                        "`--engine block`（B 引擎兜底：先格式化再写入，只需"
-                        "目标总容量 ≥ 镜像体积）。"),
-                     se.required / 1073741824.0, se.freeBytes / 1073741824.0);
-            err = buf;
+            // L1：数值先格式化到小缓冲，再用固定文本拼接。
+            char reqG[32], freeG[32];
+            snprintf(reqG, sizeof(reqG), "%.1f",
+                     se.required / 1073741824.0);
+            snprintf(freeG, sizeof(freeG), "%.1f",
+                     se.freeBytes / 1073741824.0);
+            err = Tr("A 引擎空间不足：需要约 ");
+            err += reqG;
+            err += Tr(" GB（内容+页文件+余量），目标盘可用 ");
+            err += freeG;
+            err += Tr(" GB。请清理磁盘后重试，或改用 `--engine block`"
+                      "（B 引擎兜底：先格式化再写入，只需目标总容量 ≥ 镜像体积）。");
             if (adv) *adv = ADV_SPACE;
             LogError(err);
             return 1;
@@ -669,9 +674,10 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
             DeleteTreeRec(newDir);
             if (plainTemp)
                 ReleaseImagePlain(imagePath);
-            char b2[160];
-            snprintf(b2, sizeof(b2), Tr("A 引擎解压失败(rc=%d): "), erc);
-            err = b2;
+            // L1：固定格式串拼接。
+            err = Tr("A 引擎解压失败(rc=");
+            err += std::to_string(erc);
+            err += "): ";
             err += W2U(WimEngine::ErrorString(erc));
             LogError(err);
             return 1;
