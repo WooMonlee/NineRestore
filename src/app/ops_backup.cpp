@@ -212,9 +212,69 @@ int RunBackup(const BackupRequest& reqIn, ProgressFn progress,
         }
     }
     if (!ProbeBackupDest(req.dest, err)) return 1;
+    // M7（1.0）：备份前空间与 FAT32 单文件上限预检。
+    // 0.9.96 直接开写：FAT32 目标卷写满 4GB 才失败，而且可能已覆盖旧文件。
+    {
+        const std::wstring dir = ParentDir(req.dest);
+        ULONGLONG freeB = 0;
+        ULARGE_INTEGER totalB = {}, totalFreeB = {};
+        wchar_t fsName[16] = {};
+        if (dir.empty() ||
+            !GetDiskFreeSpaceExW(dir.c_str(), nullptr, &totalB, &totalFreeB) ||
+            !GetVolumeInformationW(dir.c_str(), nullptr, 0, nullptr, nullptr,
+                                   nullptr, fsName, 16)) {
+            LogWarn("backup precheck: cannot query dest volume; continue");
+        } else {
+            freeB = totalFreeB.QuadPart;
+            ULONGLONG srcUsed = 0;
+            ULARGE_INTEGER srcTotal = {}, srcFree = {};
+            if (volumeRoot &&
+                GetDiskFreeSpaceExW(source.c_str(), nullptr, &srcTotal, &srcFree))
+                srcUsed = srcTotal.QuadPart - srcFree.QuadPart;
+            const bool fat = _wcsicmp(fsName, L"FAT32") == 0 ||
+                             _wcsicmp(fsName, L"FAT") == 0;
+            // FAT32：单文件硬上限 4GB（减 64MB 留 FAT 表/簇开销）。
+            if (fat && srcUsed > (4ULL << 30) - (64ULL << 20)) {
+                err = std::string(Tr("目标卷是 FAT32，单个镜像文件不能超过 4GB；源卷已用约 ")) +
+                      std::to_string(srcUsed >> 30) +
+                      Tr(" GB。请把镜像写到 NTFS/exFAT 分区，或缩小备份范围。");
+                LogError(err);
+                if (adv) *adv = ADV_SPACE;
+                return 1;
+            }
+            // 空间：按"源已用 × 0.5 + 128MB"估（WIM 常规压缩经验值，仅作下限）。
+            const ULONGLONG needB =
+                volumeRoot ? srcUsed / 2 + (128ULL << 20) : (128ULL << 20);
+            if (freeB < needB) {
+                err = std::string(Tr("备份目标空间不足：预计至少需要约 ")) +
+                      std::to_string(needB >> 20) +
+                      std::string(Tr(" MB，可用 ")) + std::to_string(freeB >> 20) +
+                      Tr(" MB。请清理目标分区后重试。");
+                LogError(err);
+                if (adv) *adv = ADV_SPACE;
+                return 1;
+            }
+            LogInfo("backup precheck: fs=" + W2U(fsName) +
+                    " freeMB=" + std::to_string(freeB >> 20) +
+                    " needMB=" + std::to_string(needB >> 20));
+        }
+    }
     if (!AcquireOpLock()) {
         err = Tr("已有备份/还原实例在运行");
         return 1;
+    }
+    // M10（1.0）：拿到单实例锁之后，清理上一次异常退出（断电/杀进程）留下的
+    // 明文中转（<目标>.plain.tmp / .stage / .stage.tmp）。加密备份的红线是
+    // "磁盘上绝不留明文"，0.9.96 只在正常路径删，崩溃后明文会一直躺着。
+    if (encrypt) {
+        for (const auto& p : {req.dest, req.dest + L".stage",
+                              req.dest + L".stage.tmp"}) {
+            if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_NORMAL);
+                DeleteFileW(p.c_str());
+                LogWarn("stale plaintext temp removed: " + W2U(p));
+            }
+        }
     }
     ProgressUpdate("backup", 0, "start");
     LogInfo("backup source=" + W2U(source) + " dest=" + W2U(req.dest) +

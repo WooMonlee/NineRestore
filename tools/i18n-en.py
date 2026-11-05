@@ -864,4 +864,11 @@ EN = {
     '（': ' (',
     '（USB 设备）': ' (USB device)',
     '）': ')',
+    ' GB。请把镜像写到 NTFS/exFAT 分区，或缩小备份范围。': ' GB. Write the image to an NTFS/exFAT partition, or reduce the backup scope.',
+    ' MB。请清理目标分区后重试。': ' MB available. Free up space on the target partition and retry.',
+    ' MB，可用 ': ' MB needed, ',
+    ')，为避免还原后引导不完整，已在交换前中止。': '); aborting before the swap to avoid an incomplete boot setup.',
+    '加密镜像的 ESP 子镜像暂存失败(rc=': 'Encrypted ESP sub-image staging failed (rc=',
+    '备份目标空间不足：预计至少需要约 ': 'Not enough space on the backup target: at least about ',
+    '目标卷是 FAT32，单个镜像文件不能超过 4GB；源卷已用约 ': 'The target volume is FAT32; a single image file cannot exceed 4GB. The source volume already uses about ',
 }

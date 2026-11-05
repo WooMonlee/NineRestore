@@ -7,4 +7,4 @@
 18	bootfiles/zjswap-undo.sh
 3	bootfiles/setup-swap.sh
 1	bootfiles/zjlog.sh
-63	bootfiles/alpine/init
+70	bootfiles/alpine/init

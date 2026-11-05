@@ -35,10 +35,13 @@
   1) Win+R 输入 services.msc → 找到「=  1) Press Win+R, type services.msc, find "
   2) 命令行执行：sc config =  2) Run in a command line: sc config 
  GB。\n请换更大的目标分区，或改用更小的镜像。= GB.\nPick a larger target partition, or use a smaller image.
+ GB。请把镜像写到 NTFS/exFAT 分区，或缩小备份范围。= GB. Write the image to an NTFS/exFAT partition, or reduce the backup scope.
  GB。请清理磁盘后重试，或改用 `--engine block`（B 引擎兜底：先格式化再写入，只需目标总容量 ≥ 镜像体积）。= GB. Free up disk space and retry, or use `--engine block` (B-engine fallback: format first, then write; only needs total target capacity >\= image size).
  GB（内容+页文件+余量），目标盘可用 = GB (content + page file + margin); target has 
  GB（已含余量），但目标分区只有 = GB (margin included), but the target partition has only 
  GB）= GB)
+ MB。请清理目标分区后重试。= MB available. Free up space on the target partition and retry.
+ MB，可用 = MB needed, 
  个候选都没装上）。请确认驱动与镜像位数匹配，或只做同机/就地还原。详见日志。= candidate(s) could not be installed). Check that the drivers match the image architecture, or just do a same-machine/in-place restore. See the logs for details.
  个文件未备份= file(s) could not be backed up
  个镜像文件，已填入最新：= image file(s); filled in the newest: 
@@ -48,6 +51,7 @@
  备份= backup
  或 = or 
 %s，用时 %s。\n=%s, took %s.\n
+)，为避免还原后引导不完整，已在交换前中止。=); aborting before the swap to avoid an incomplete boot setup.
 **本次未执行任何操作**。正确用法：\n\n=**Nothing was executed**. Correct usage:\n\n
 --compress 只支持 fast/maximum/recovery\n=--compress supports only fast/maximum/recovery\n
 --disk/--part 必须是有效数字\n=--disk/--part must be a valid number\n
@@ -230,6 +234,7 @@ wimlib 初始化失败\n=wimlib initialization failed\n
 加密镜像数据校验失败（被篡改或损坏）=Encrypted image data check failed (tampered with or damaged)
 加密镜像正文被截断（文件比声明的短）=Encrypted image body is truncated (file shorter than declared)
 加密镜像版本不受支持（请用更新版本的 SysRecover）=This encrypted image version is not supported (use a newer SysRecover)
+加密镜像的 ESP 子镜像暂存失败(rc\==Encrypted ESP sub-image staging failed (rc\=
 加密镜像被截断或损坏（文件大小不符）=Encrypted image is truncated or damaged (size mismatch)
 加密镜像被截断（块数据不完整）=Encrypted image is truncated (incomplete chunk)
 加密镜像解密失败：=Failed to decrypt the encrypted image:
@@ -294,6 +299,7 @@ wimlib 初始化失败\n=wimlib initialization failed\n
 备份格式：esd(慢)\=慢速压缩、体积最小；wim(中)\=正常大小；wim(快)\=最快、体积最大=Backup format: esd(slow) \= slowest compression, smallest file; wim(mid) \= normal size; wim(fast) \= fastest, largest file
 备份源分区=Source Disk
 备份目标不可写（错误码 =Backup target is not writable (error 
+备份目标空间不足：预计至少需要约 =Not enough space on the backup target: at least about 
 备份镜像不可用：=Backup image is unusable: 
 备返（保留旧系统）仅支持默认 A 引擎：--engine block 会格式化目标分区并丢弃旧系统。请改用默认引擎，或取消备返。=KeepOld (preserve old system) is only supported with the default A-engine: --engine block formats the target partition and discards the old system. Use the default engine, or disable KeepOld.
 复制失败：=Copy failed: 
@@ -626,6 +632,7 @@ wimlib 初始化失败\n=wimlib initialization failed\n
 目标分区正被使用（有打开的文件或句柄）=The target partition is in use (open files or handles)
 目标分区没有盘符（无法就地写）=The target partition has no drive letter (cannot write in place)
 目标分区空间不足：镜像解压后约需 =Not enough space on the target partition: the extracted image needs about 
+目标卷是 FAT32，单个镜像文件不能超过 4GB；源卷已用约 =The target volume is FAT32; a single image file cannot exceed 4GB. The source volume already uses about 
 目标文件已存在，覆盖需加 --yes 确认（追加请用 --append）\n=The target file already exists; add --yes to overwrite (use --append to add to it)\n
 目标是正在运行的系统盘（必须重启后脱机还原）=The target is the running system disk (it must be restored offline after a reboot)
 目标盘存在未处理的 ~old 残留，A 引擎还原已中止（重新运行程序会再次询问如何处理）=The target drive still has an unhandled ~old leftover; the A-engine restore was aborted (run the program again to be asked).

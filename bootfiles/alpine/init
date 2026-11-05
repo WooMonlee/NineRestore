@@ -279,16 +279,38 @@ scan_for_log(){
                 _have=$(dev_offset_sectors "$_d")
                 _have_sz=""
                 [ -n "$_sz" ] && _have_sz=$((_sz * 512))
+                # M5（1.0）：光比 offset/size 还不够 —— 多盘机的首分区都在 1MiB，
+                # 且 sd 字母本来就会变。这里再核对磁盘序列号（契约 log）与分区
+                # GUID（restore-task.conf）；双方都有值时才强制相等。
+                _want_serial=$(grep '^target_disk_serial=' "$_f" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r')
+                _disk=$(basename "$(dirname "$(readlink -f "/sys/class/block/$(basename "$_d")" 2>/dev/null)" 2>/dev/null)" 2>/dev/null)
+                _have_serial=""
+                [ -n "$_disk" ] && _have_serial=$(cat "/sys/class/block/$_disk/device/serial" 2>/dev/null | tr -d '[:space:]')
+                _serial_ok=1
+                if [ -n "$_want_serial" ] && [ -n "$_have_serial" ] && \
+                   [ "$_want_serial" != "$_have_serial" ]; then
+                    _serial_ok=0
+                fi
+                _want_guid=$(grep '^target_guid=' "$ZJ_M/restore-task.conf" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r')
+                _have_guid=$(blkid -s PART_ENTRY_UUID -o value "$_d" 2>/dev/null)
+                _guid_ok=1
+                if [ -n "$_want_guid" ] && [ -n "$_have_guid" ] && \
+                   [ "$_want_guid" != "$_have_guid" ]; then
+                    _guid_ok=0
+                fi
                 # offset 匹配 +（双方都有 size 时）size 也要匹配：多盘首分区都在
                 # 1MiB，且 Linux 的 sd 字母会变（2026-10-06 实测），只比 offset
                 # 会把别的盘误判成目标（PIT-128）。
                 if [ -n "$_want" ] && [ -n "$_have" ] && [ "$_want" = "$_have" ] && \
-                   { [ -z "$_want_sz" ] || [ -z "$_have_sz" ] || [ "$_want_sz" = "$_have_sz" ]; }; then
+                   { [ -z "$_want_sz" ] || [ -z "$_have_sz" ] || [ "$_want_sz" = "$_have_sz" ]; } && \
+                   [ "$_serial_ok" = "1" ] && [ "$_guid_ok" = "1" ]; then
                     cp "$_f" /tmp/ 2>/dev/null
                     found_log="$_f"; TARGET_DEV="$_d"
                     say "found log: $_f (dev=$_d rem=${_rem:-0}, offset match $_want size ${_have_sz:-?})"
                     [ -f "$ZJ_M/restore-task.conf" ] && cp "$ZJ_M/restore-task.conf" /tmp/ 2>/dev/null
                     break
+                elif [ -n "$_want" ] && [ "$_want" = "$_have" ]; then
+                    say "ERROR: candidate $_d offset matches but identity differs (serial=${_have_serial:-?} guid=${_have_guid:-?}) -> skip"
                 fi
                 [ -z "$_fb_log" ] && { _fb_log="$_f"; _fb_dev="$_d"; }
             done

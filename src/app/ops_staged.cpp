@@ -151,10 +151,28 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
             // Probe 刚过 → 这里失败几乎不可能；按 0 处理（不恢复 ESP/不投 EA）
             LogWarn("ListImages failed; esp/ea restore disabled");
         } else {
+            // M1（1.0）：ESP/EA 子镜像必须与**本次选中的系统子镜像**配对。
+            // 0.9.96 取镜像里第一个 ESP/ZJEA，多份备份追加进同一 WIM 后会把
+            // 上一次的 ESP 恢复到本次系统上。追加顺序固定为
+            // 系统 → ESP → ZJEA（见 ops_backup），所以配对规则 = 紧跟其后、
+            // 遇到下一个系统镜像就停止。
+            int pairedEsp = 0;
+            int pairedEa = 0;
+            for (const auto& d : imgs) {
+                if (d.index <= eff)
+                    continue;
+                if (pairedEsp == 0 &&
+                    d.name.find(L"ESP") != std::wstring::npos)
+                    pairedEsp = d.index;
+                if (pairedEa == 0 &&
+                    d.name.find(L"ZJEA") != std::wstring::npos)
+                    pairedEa = d.index;
+                if (d.name.find(L"ESP") == std::wstring::npos &&
+                    d.name.find(L"ZJEA") == std::wstring::npos)
+                    break;  // 下一个系统镜像 → 本次会话的子镜像已结束
+            }
             for (const auto& d : imgs) {
                 if (d.name.find(L"ESP") != std::wstring::npos) {
-                    if (espIndex == 0)
-                        espIndex = d.index;
                     if (d.index == eff) {
                         err = Tr("子镜像「") + W2U(d.name) +
                               Tr("」是 ESP 分区备份，不能单独还原为系统。恢复系统"
@@ -166,8 +184,6 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
                     }
                 }
                 if (d.name.find(L"ZJEA") != std::wstring::npos) {
-                    if (eaIndex == 0)
-                        eaIndex = d.index;
                     if (d.index == eff) {
                         err = Tr("子镜像「") + W2U(d.name) +
                               Tr("」是扩展属性（EA）修复数据，不能单独还原为"
@@ -179,11 +195,15 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
                     }
                 }
             }
+            espIndex = pairedEsp;
+            eaIndex = pairedEa;
             if (espIndex > 0)
-                LogInfo("esp subimage found in image: index=" +
+                LogInfo("esp subimage paired with system #" +
+                        std::to_string(eff) + ": index=" +
                         std::to_string(espIndex));
             if (eaIndex > 0)
-                LogInfo("ea subimage found in image: index=" +
+                LogInfo("ea subimage paired with system #" +
+                        std::to_string(eff) + ": index=" +
                         std::to_string(eaIndex));
         }
     }
@@ -355,9 +375,26 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
             std::wstring fn =
                 sl == std::wstring::npos ? imagePath : imagePath.substr(sl + 1);
             std::wstring dst = keep + L"\\" + fn;
+            // M6（1.0）：数据盘 ~备份 里已有同名镜像时**不覆盖**（0.9.96 用
+            // MOVEFILE_REPLACE_EXISTING 静默替换，等于悄悄删掉用户旧备份）。
+            // 改名成 name_1.wim、name_2.wim …，并把最终名字告诉用户。
+            {
+                const std::wstring base = dst;
+                int n = 1;
+                while (GetFileAttributesW(dst.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                    const size_t dot = fn.find_last_of(L'.');
+                    const std::wstring stem =
+                        dot == std::wstring::npos ? fn : fn.substr(0, dot);
+                    const std::wstring ext =
+                        dot == std::wstring::npos ? L"" : fn.substr(dot);
+                    dst = keep + L"\\" + stem + L"_" + std::to_wstring(n) + ext;
+                    ++n;
+                }
+                if (dst != base)
+                    LogWarn("image move: target exists, using " + W2U(dst));
+            }
             LogInfo("image on target partition; moving to " + W2U(dst));
-            if (!MoveFileExW(imagePath.c_str(), dst.c_str(),
-                             MOVEFILE_COPY_ALLOWED | MOVEFILE_REPLACE_EXISTING)) {
+            if (!MoveFileExW(imagePath.c_str(), dst.c_str(), MOVEFILE_COPY_ALLOWED)) {
                 err = Tr("镜像在目标分区内，搬到数据盘失败（空间不足？）；请先手动移走镜像");
                 if (adv) *adv = ADV_SPACE;  // 旧关键词版命中的也是"空间不足"（保留原建议）
                 return 4;
@@ -699,10 +736,16 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
                     espFixRel = L"ZJRESTORE/espfix";
                     LogInfo("encrypted: ESP subimage staged to ~new\\ZJRESTORE\\espfix");
                 } else {
-                    LogWarn("encrypted: ESP subimage stage failed rc=" +
-                            std::to_string(xrc) +
-                            " (main system continues without ESP restore)");
+                    // M15（1.0）：0.9.96 只 Warn，任务仍按成功收尾 —— 交换完成后
+                    // 目标机可能"系统能进、但 ESP 里没有本次的引导文件"，等于
+                    // 把引导问题留到重启后才暴露。这里在写 .zj-done / 交换之前
+                    // 直接失败：目标分区尚未被改动，~new 留作排查。
                     DeleteTreeRec(dst);
+                    err = Tr("加密镜像的 ESP 子镜像暂存失败(rc=");
+                    err += std::to_string(xrc);
+                    err += Tr(")，为避免还原后引导不完整，已在交换前中止。");
+                    LogError(err);
+                    return 5;
                 }
             }
             if (eaIndex > 0) {
