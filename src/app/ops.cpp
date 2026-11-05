@@ -40,122 +40,9 @@
 #include "selfdiag.h"
 #include "imgsrc.h"
 
+#include "ops_internal.h"
 namespace sysrecover {
 namespace {
-
-// 网络路径判定：UNC（\\server\share\...）或**映射网络驱动器**（DRIVE_REMOTE）。
-// 用途：**暂存+重启**的还原由 Linux 救援层读镜像，而救援层**访问不到网络** →
-// 网络镜像必然 image not found，必须在格式化之前就拦下（问题清单 D1/H1）。
-bool IsNetworkPath(const std::wstring& p) {
-    if (p.size() >= 2 && (p[0] == L'\\' || p[0] == L'/') &&
-        (p[1] == L'\\' || p[1] == L'/'))
-        return true;  // \\server\share\...
-    if (p.size() >= 2 && p[1] == L':') {
-        wchar_t root[4] = {p[0], L':', L'\\', 0};
-        if (GetDriveTypeW(root) == DRIVE_REMOTE)
-            return true;
-    }
-    return false;
-}
-
-// 用户显式「安装菜单」的标记。日常还原的临时项用另一个名字/GUID，
-// 首启清理只认临时项；这个标记只用于“已安装常驻菜单”的判重，
-// 避免一次日常还原静默覆盖用户菜单。
-std::wstring MenuFlagPath() {
-    return ContractDir() + L"\\restore-menu.flag";
-}
-
-bool HasInstalledMenu() {
-    DWORD a = GetFileAttributesW(MenuFlagPath().c_str());
-    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
-}
-
-void SetMenuFlag(bool installed) {
-    std::wstring p = MenuFlagPath();
-    if (!installed) {
-        SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_NORMAL);
-        DeleteFileW(p.c_str());
-        return;
-    }
-    HANDLE h = CreateFileW(p.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                           FILE_ATTRIBUTE_HIDDEN, nullptr);
-    if (h == INVALID_HANDLE_VALUE) {
-        LogWarn("menu flag write failed err=" + std::to_string(GetLastError()));
-        return;
-    }
-    const char k[] = "installed\n";
-    DWORD wr = 0;
-    WriteFile(h, k, (DWORD)sizeof(k) - 1, &wr, nullptr);
-    CloseHandle(h);
-}
-
-std::string W2U(const std::wstring& w) {
-    if (w.empty())
-        return {};
-    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0,
-                                nullptr, nullptr);
-    std::string s(n > 0 ? n - 1 : 0, 0);
-    if (n > 0)
-        WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, s.data(), n, nullptr,
-                            nullptr);
-    return s;
-}
-
-// UTF-8 → 宽串（读 restore-task.conf 里的路径用，conf 是 W2U 写出来的）。
-std::wstring U2W(const std::string& s) {
-    if (s.empty())
-        return {};
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
-    std::wstring w(n > 0 ? n - 1 : 0, 0);
-    if (n > 0)
-        MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), n);
-    return w;
-}
-
-std::wstring ExePath() {
-    wchar_t buf[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, buf, MAX_PATH);
-    return buf;
-}
-
-bool IsDir(const std::wstring& p) {
-    DWORD a = GetFileAttributesW(p.c_str());
-    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
-}
-
-// 递归删除目录树（EA 临时目录清理用；失败不致命）。
-// 同 swapleft.cpp DeleteRec 的修法（PIT 用户 2026-10-15）：清属性 + 跳过 junction。
-void DeleteTreeRec(const std::wstring& dir) {
-    SetFileAttributesW(dir.c_str(), FILE_ATTRIBUTE_NORMAL);
-    WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
-    if (h != INVALID_HANDLE_VALUE) {
-        do {
-            if (wcscmp(fd.cFileName, L".") == 0 ||
-                wcscmp(fd.cFileName, L"..") == 0)
-                continue;
-            std::wstring p = dir + L"\\" + fd.cFileName;
-            // junction/symlink：只删链接本身，绝不递归进目标
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
-                SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_NORMAL);
-                RemoveDirectoryW(p.c_str()) || DeleteFileW(p.c_str());
-                continue;
-            }
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                DeleteTreeRec(p);
-                continue;
-            }
-            if (!DeleteFileW(p.c_str())) {
-                SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_NORMAL);
-                DeleteFileW(p.c_str());
-            }
-        } while (FindNextFileW(h, &fd));
-        FindClose(h);
-    }
-    SetFileAttributesW(dir.c_str(), FILE_ATTRIBUTE_NORMAL);
-    RemoveDirectoryW(dir.c_str());
-}
-
 
 // ── PIT-211：格式化目标分区（A 引擎"先格式化再解压"用）──────────────
 bool FormatTargetVolume(wchar_t letter, std::string& log) {
@@ -338,34 +225,6 @@ bool SetComputerNameOffline(const std::wstring& winDir, const std::wstring& name
     return wrote;
 }
 
-// 递归复制目录（软件自保用；不处理 ACL）。
-bool CopyDir(const std::wstring& src, const std::wstring& dst) {
-    if (!IsDir(src))
-        return false;
-    CreateDirectoryW(dst.c_str(), nullptr);
-    WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW((src + L"\\*").c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE)
-        return false;
-    bool ok = true;
-    do {
-        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0)
-            continue;
-        std::wstring s = src + L"\\" + fd.cFileName;
-        std::wstring d = dst + L"\\" + fd.cFileName;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-            ok &= CopyDir(s, d);
-        else if (!CopyFileW(s.c_str(), d.c_str(), FALSE))
-            ok = false;
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
-    return ok;
-}
-
-bool SameDrive(wchar_t a, wchar_t b) {
-    return towupper(a) == towupper(b);
-}
-
 // 0.9.38：ESP 诊断必须有不依赖主日志的落点。主日志在部分 PE 的 support 包里
 // 会缺失（GUI/CLI 日志根或文件共享问题），所以这里直接写 `ESP-diag.txt`：
 // 同时写“日志根\logs”和“程序目录\logs”，support 的 logs 树一定能收到。
@@ -419,7 +278,6 @@ void EspDiagVolumes() {
         EspDiagLine(line);
     }
 }
-
 
 // 目标盘的分区风格（找不到该盘 → Unknown）。
 PartitionStyle DiskStyleOf(uint32_t diskIndex) {
@@ -1187,7 +1045,6 @@ bool InstallFirstBootCleanup(const std::wstring& newDir,
     log += "first-boot cleanup deployed (helper + startup cmd)\n";
     return true;
 }
-
 }  // namespace
 
 // 目标分区该走 UEFI/ESP 分支吗？**以目标磁盘分区风格为准**（boot/bootpath.h）：
@@ -1200,7 +1057,6 @@ bool InstallFirstBootCleanup(const std::wstring& newDir,
 bool UseUefiBootFor(const PartitionInfo& t) {
     return ShouldUseUefiBoot(IsUefiFirmware(), DiskStyleOf(t.diskIndex));
 }
-
 // 启动项/固件变量写入失败时的统一提示（用户 2026-10-27 需求）：
 // 装了金山毒霸/360 一类底层拦截的机器上，bcdedit / BootNext 都会"假成功"——
 // 「被安全软件拦截」的结构化信号（2026-10-28，用户规格）：
@@ -1261,7 +1117,6 @@ std::string BootWriteBlockedHint() {
     return Tr(" 可能被安全软件（如火绒/360）拦截，写入未生效："
               "请退出其防护后重试，或用 PE 就地还原。");
 }
-
 // 目标分区是否**未**被占用（可以就地写）？—— 对外可见（ops.h），因为 GUI/CLI 要用它
 // 决定提示文案（"需不需要重启"）；StageRestore 内部用的是同一个函数，不会漂移。
 // 判据（用户规格）：不是正在运行的系统盘，且能对该卷加独占锁 ——
@@ -1364,7 +1219,6 @@ int CheckRestoreSpace(const std::wstring& imagePath, int index,
     }
     return 0;
 }
-
 // ── Q1「先落盘后搬家」（用户 2026-10-18）────────────────────────────────────
 // 还原确认后、写契约/格式化之前调用：程序家目录所在物理盘 == 目标盘时，
 // 静默整包复制到安全分区 + 日志跟过去（不 re-exec：当前进程照旧跑完本次操作，
@@ -1495,68 +1349,6 @@ SettleResult SettleHome(int targetDiskIndex, int exeDiskIndex) {
 }
 
 const SettleResult& LastSettleResult() { return g_settleResult; }
-
-// 失败后的"下一步"（P8）已迁到 advice.cpp —— 见 advice.h。原因（PLAN §14 M1）：
-// 本文件里旧版靠「中文关键词匹配中文消息」，消息一被翻译就全部失配 → 静默不给建议。
-// 下面这行 = 把老签名**声明为已删除**：谁在本翻译单元里再按旧签名调用，编译期就报错。
-std::string ErrorAdvice(int rc, const std::string& err) = delete;
-
-// 历史记录（P7）：往 日志根\logs\history.jsonl 追加一行（JSON Lines，外部/AI 好读）。
-// 日志根见 LogBaseDir（PIT-104/105：一般=程序目录；软件在系统盘时=数据盘 ZJRESTORE）。
-// 记"什么时候做了什么"：备份完成、就地还原、暂存还原（暂存的实际结果在救援层日志里）。
-void AppendHistory(const char* action, const std::wstring& image,
-                   const std::wstring& target, unsigned long long ms,
-                   const char* detail) {
-    std::wstring dir = LogBaseDir() + L"\\logs";
-    CreateDirectoryW(dir.c_str(), nullptr);
-    HANDLE h = CreateFileW((dir + L"\\history.jsonl").c_str(), FILE_APPEND_DATA,
-                           FILE_SHARE_READ, nullptr, OPEN_ALWAYS,
-                           FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE)
-        return;
-    // 完整 JSON 字符串转义：`\` `"` 以及所有 < 0x20 的控制字符（\n\t\r\b\f 用短写，
-    // 其余用 \u00xx）。原来只转义 `\` 和 `"` —— detail 一旦带换行就会写出非法 JSON
-    //（问题清单 L-03）。
-    auto esc = [](const std::string& s) {
-        static const char* hx = "0123456789abcdef";
-        std::string o;
-        o.reserve(s.size() + 8);
-        for (unsigned char c : s) {
-            switch (c) {
-                case '\\': o += "\\\\"; break;
-                case '"': o += "\\\""; break;
-                case '\n': o += "\\n"; break;
-                case '\r': o += "\\r"; break;
-                case '\t': o += "\\t"; break;
-                case '\b': o += "\\b"; break;
-                case '\f': o += "\\f"; break;
-                default:
-                    if (c < 0x20) {
-                        o += "\\u00";
-                        o += hx[(c >> 4) & 0xF];
-                        o += hx[c & 0xF];
-                    } else {
-                        o += static_cast<char>(c);
-                    }
-            }
-        }
-        return o;
-    };
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    char buf[1200];
-    snprintf(buf, sizeof(buf),
-             "{\"time\":\"%04u-%02u-%02u %02u:%02u:%02u\",\"action\":\"%s\","
-             "\"image\":\"%s\",\"target\":\"%s\",\"elapsed_s\":%llu,"
-             "\"version\":\"%s\",\"detail\":\"%s\"}\n",
-             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
-             action, esc(W2U(image)).c_str(), esc(W2U(target)).c_str(),
-             ms / 1000, SYSRECOVER_VERSION, detail ? detail : "");
-    DWORD wrote = 0;
-    WriteFile(h, buf, static_cast<DWORD>(strlen(buf)), &wrote, nullptr);
-    CloseHandle(h);
-}
-
 // ────────────────── ESP 分区备份（方案 C：并入主镜像，用户 2026-09-30 规格） ──────────────────
 
 // ESP 子镜像的 <DESCRIPTION> 注释（"镜像里直接加注释"的落点；镜像内元数据，
@@ -1571,7 +1363,6 @@ static const wchar_t kEspImageDesc[] =
 static const wchar_t kEaImageDesc[] =
     L"SysRecover extended-attributes (EA) fix data; deployed to the target by "
     L"the rescue layer and applied on first boot (never restore this image alone)";
-
 // ESP 捕获的排除配置（wimscript 格式，临时文件，同 EnsureExclusionConfig 做法）：
 //   · \EFI\ZJRESTORE —— 我们的常驻救援载荷（约 33MB，还原后 Windows 侧会重新
 //     部署，进镜像纯属浪费，且它不是"原厂 ESP 内容"）；
@@ -3538,7 +3329,6 @@ int StageRestoreMenu(const RestoreRequest& req, std::string& err,
     return StageRestoreImpl(req, err, &needReboot, progress, adv,
                             /*menuEntry=*/true);
 }
-
 namespace {
 
 bool ReadWholeSmall(const std::wstring& path, std::string& out) {
@@ -3585,7 +3375,6 @@ unsigned long long DoneMarkerBytes(const std::wstring& dir) {
 }
 
 }  // namespace
-
 StagedTaskState CheckStagedTaskState(std::string* detailOut) {
     auto setD = [&](const std::string& d) {
         if (detailOut) *detailOut = d;
@@ -3701,7 +3490,6 @@ int CleanupStaleStagedTask() {
         LogWarn("stale staged task cleaned (" + std::to_string(n) + " item(s))");
     return n;
 }
-
 // ── 返回旧系统（PIT-139，方案 C）──────────────────────────────────────
 // 只读探测：目标根是否同时具备「完整旧系统 ~/.old\Windows」与「完整新系统
 // 根 \Windows」。两者都在才谈得上"反向交换"；只有其一说明上次交换中断或
@@ -4070,7 +3858,6 @@ int StageReturnOldByDiskPart(int disk, int part, std::string& err,
             W2U(target.letter) + ":");
     return StageReturnOld(target, err, needReboot);
 }
-
 // 读"已安装菜单项"绑定的镜像/目标：<ContractDir()>\restore-task.conf（UTF-8，key=value）。
 bool ReadMenuBinding(std::wstring* imagePath, int* imageIndex,
                      unsigned long long* targetOffset,
@@ -4125,7 +3912,6 @@ void DeleteMenuBinding() {
     SetFileAttributesW(pend.c_str(), FILE_ATTRIBUTE_NORMAL);
     DeleteFileW(pend.c_str());
 }
-
 // 一键重试（P3 / PIT-148）：从 <ContractDir()>\restore-task.conf 重建请求并
 // StageRestore。仅 A/B 类失败可走此路（调用方已用 RescueStepRetryable 把关）；
 // keepOld 恒 false（重试要备返请走正常流程，见 ops.h）。
@@ -4438,7 +4224,6 @@ int RepairBoot(int disk, int part, std::string& msg) {
     msg = Tr("引导已修复并校验通过（UEFI）\n");
     return 0;
 }
-
 // ── A 引擎空间预检（用户 2026-10-09 规格，docs/22 §1.1）────────────────
 bool EstimateSwapSpace(const PartitionInfo& target,
                        unsigned long long imageContentBytes,
@@ -4488,8 +4273,6 @@ bool QuerySwapSpace(const std::wstring& imagePath, int index,
         return false;  // 读不到大小 → 无法判定（按"够"继续，与原行为一致）
     return EstimateSwapSpace(target, bytes, out);
 }
-
-
 // ── PIT-207：自我打包 / 解包 ──────────────────────────────────────────
 namespace {
 
