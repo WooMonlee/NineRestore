@@ -144,3 +144,52 @@ git ls-files src/app | Select-String ops
 
 - `ar rcs` 只增换、不删除：源清单移除文件后，旧 `.o` 会残留在 `libapp.a` 里。归档规则已改为「先删后建」；但 **Make 无法感知源清单变化**，因此源清单变更后首次构建必须 `make clean`（或手动删 `build*/libapp.a`）。CI 每次全量构建，不受影响。
 - 拆分后 `src/app/ops_internal.h` 是唯一新增的内部头：只放跨模块声明，不含实现；`ops.h` 对外 API 未改。
+
+## 7. 阶段 3（P0 数据安全整改）实测证据
+
+环境同上（Windows 10/11 x64 本机，GCC 14.2.0 MinGW-w64 x64/x86，Python 3.13，MSYS2 bash）。
+时间：2026-11-05。
+
+### 7.1 双架构构建
+
+| 命令 | 结果 |
+|---|---|
+| `mingw32-make ARCH=x64 all` | 退出码 0 |
+| `mingw32-make ARCH=x86 all` | 退出码 0 |
+
+### 7.2 门禁（`make check`，PATH 含 `msys64\usr\bin`）
+
+```
+79 cases, 630 checks, 0 failures
+check-docs: PASS  (version=0.9.96 contract_version=1 契约键 34 个)
+check-i18n: OK (838 keys, 838 lang entries)
+check-widths: OK (1 WARN: skin:FormatLabel zh 39px > budget 38px)
+check-shell: PASS (zjrestore-lite.sh=178, zjswap.sh=13, init=63 ...)
+check-config: PASS / check-layers: PASS / check-secrets: PASS
+test_zjswap: PASS (A fail-closed/rollback, B happy path, C marker gate, D post-verify)
+```
+
+### 7.3 H1「改前失败 / 改后通过」证据
+
+同一份 `tests/test_zjswap.sh`，分别指向 **0.9.96 插桩副本**（仅加测试脚手架：跳过 mount、`umount` 置空、注入 move 失败，交换逻辑保持原样）与**新脚本**：
+
+改前（0.9.96）：
+
+```
+FAIL: A: exit=0 (want 4)
+FAIL: A: ~new was removed (must be kept)
+FAIL: A: ~old left behind after rollback
+FAIL: A: new tree leaked into root
+FAIL: D: exit=0 (want 5)
+FAIL: D: ~new removed although verify failed
+test_zjswap: FAIL
+rc=1
+```
+
+改后（HEAD）：
+
+```
+test_zjswap: PASS (A fail-closed/rollback, B happy path, C marker gate, D post-verify)
+```
+
+用例含义：A 注入旧项 move 失败 → 必须 exit 4、回滚已搬项、保留 `~new`、不得留下 `~old`、新树不得泄漏到根；B 正常路径 → exit 0、删 `~new`、保留 `~old`；C 缺 `.zj-done` → exit 2；D 新树缺 `winload` → exit 5 且保留 `~new`。
