@@ -27,6 +27,11 @@ probe(){ echo "$(date '+%F %T') $*" >> "$PROBE" 2>/dev/null; say "PROBE $*"; }
 # 成功置 OK。init 用 /tmp/zj-bb.done 判断"脚本是否已经扫过"，避免重复全扫。
 RESULT=UNKNOWN
 STEP=boot
+# H2（1.0）：引导修复结果单独记账，失败不再被 RESULT=OK 掩盖。
+#   1 = 成功 / 不需要；0 = 失败或无法确认。最终 RESULT：
+#     OK（全部成功） / OK_BOOT_UNFIXED（系统已还原，引导未修好 → 必须降级上报）。
+BOOTFIX_OK=1
+ESP_OK=1
 # 兜底日志窝（用户 2026-10-04 规格 3）：软件目录找不到时，在非目标分区认领一个
 # ZJRESTORE-logs/ 并**保持挂载**，整个流程持续镜像日志（防中途断电/被杀导致
 # "哪里都没有日志"）。收集（日志按钮）后会连同其它散落日志一起清掉。
@@ -371,6 +376,8 @@ bb_status_text(){
     echo "build=$(cat /zjrescue-version 2>/dev/null)"
     echo "result=$RESULT"
     echo "step=$STEP"
+    echo "bootfix=${BOOTFIX_OK:-}"
+    echo "esp=${ESP_OK:-}"
     echo "target=${TARGET_DEV:-}"
     echo "image=${IMAGE_PATH:-}"
 }
@@ -1596,6 +1603,7 @@ fi
 # \bootmgr —— cp 会正常覆盖。
 if [ -f /tmp/bootfix/bootmgr ]; then
     STEP=bootfix
+    BOOTFIX_OK=0
     say "install bootfix files (\\bootmgr + \\Boot)"
     command -v ntfsfix >/dev/null 2>&1 && timeout 60 ntfsfix -d "$TARGET_DEV" >> "$LOG" 2>&1
     BFM=/tmp/zj_bf
@@ -1610,9 +1618,11 @@ if [ -f /tmp/bootfix/bootmgr ]; then
         cp -rf /tmp/bootfix/* "$BFM"/ 2>/tmp/zjbf.err
         bf_rc=$?
         sync
+        _bf_verified=0
         if [ -f "$BFM/Boot/BCD" ] && [ -f "$BFM/bootmgr" ]; then
             say "bootfix BCD+bootmgr verified on target"
             STAGE=2
+            _bf_verified=1
         else
             say "ERROR: bootfix BCD/bootmgr NOT on target after copy"
         fi
@@ -1623,14 +1633,23 @@ if [ -f /tmp/bootfix/bootmgr ]; then
         else
             say "ERROR: bootfix copy rc=$bf_rc: $(cat /tmp/zjbf.err 2>/dev/null | tr '\n' ' ')"
         fi
+        # H2：复制 rc=0 且 BCD/bootmgr 双双存在才算修好了引导。
+        if [ $bf_rc -eq 0 ] && [ "$_bf_verified" = "1" ]; then
+            BOOTFIX_OK=1
+        else
+            BOOTFIX_OK=0
+        fi
     else
         say "ERROR: mount target for bootfix failed: $(cat /tmp/zjbf.err 2>/dev/null | tr '\n' ' ')"
     fi
 else
     if [ -d /sys/firmware/efi ]; then
         say "no bootfix needed (UEFI boot), skip boot files"
+        BOOTFIX_OK=1
     else
-        say "WARN: no bootfix files, skip boot files"
+        # H2：BIOS 机器没有 bootfix 载荷 = 无法确认引导可启动 → 降级上报，不再只 WARN。
+        say "WARN: no bootfix files, BIOS boot not verifiable (degraded)"
+        BOOTFIX_OK=0
     fi
 fi
 
@@ -1787,6 +1806,7 @@ if [ -n "$ESP_FIX_DIR" ]; then
     # 加密镜像（ZJENC1）：ESP 子镜像已由 Windows 解到目标盘的 $ESP_FIX_DIR，
     # 这里只做目录拷贝（救援层没有解密器，读不了 .zje）。
     STEP=esp
+    ESP_OK=0
     ESP_DEV=$(find_esp_dev)
     if [ -n "$ESP_DEV" ]; then
         ESPM=/tmp/zj_esp_m
@@ -1803,11 +1823,12 @@ if [ -n "$ESP_FIX_DIR" ]; then
                     if cp -a "$SRC/." "$ESPM/" 2>/tmp/espfix.err || cp -r "$SRC/." "$ESPM/" 2>>/tmp/espfix.err; then
                         sync
                         say "esp restored (copy rc=0)"
+                        ESP_OK=1
                     else
                         say "ERROR: esp copy failed: $(tr '\n' ' ' < /tmp/espfix.err 2>/dev/null | head -c 200)"
                     fi
                 else
-                    say "WARN: esp fix dir not found: $SRC (skip)"
+                    say "WARN: esp fix dir not found: $SRC (skip; degraded)"
                 fi
                 umount "$TGTM" 2>/dev/null
             else
@@ -1818,10 +1839,11 @@ if [ -n "$ESP_FIX_DIR" ]; then
             say "ERROR: esp mount failed: $(cat /tmp/zjmnt.err 2>/dev/null | tr '\n' ' ')"
         fi
     else
-        say "WARN: task has esp fix dir but no ESP partition found (skip)"
+        say "WARN: task has esp fix dir but no ESP partition found (skip; degraded)"
     fi
 elif [ -n "$ESP_INDEX" ]; then
     STEP=esp
+    ESP_OK=0
     ESP_DEV=$(find_esp_dev)
     if [ -n "$ESP_DEV" ]; then
         ESPM=/tmp/zj_esp_m
@@ -1833,6 +1855,7 @@ elif [ -n "$ESP_INDEX" ]; then
             sync
             if [ $esp_rc -eq 0 ]; then
                 say "esp restored (rc=0)"
+                ESP_OK=1
             else
                 say "ERROR: esp restore rc=$esp_rc:"
                 head -n 5 /tmp/esp.out 2>/dev/null | while IFS= read -r _l; do say "  |$_l"; done
@@ -1842,7 +1865,7 @@ elif [ -n "$ESP_INDEX" ]; then
             say "ERROR: esp mount failed: $(cat /tmp/zjmnt.err 2>/dev/null | tr '\n' ' ')"
         fi
     else
-        say "WARN: task has esp subimage (idx $ESP_INDEX) but no ESP partition found (skip)"
+        say "WARN: task has esp subimage (idx $ESP_INDEX) but no ESP partition found (skip; degraded)"
     fi
 fi
 # ── EA 修复投放（PIT-122，2026-10-06）──
@@ -2078,7 +2101,14 @@ cleanup_after_success(){
 
 # 成功：结果置 OK；日志 + 状态回执落软件目录与 ESP（**不写目标盘** —— 还原后
 # 的系统盘不留我们的文件；ESP 的 \EFI\ZJRESTORE\logs\ 是常驻救援模块的一部分）。
-RESULT=OK; STEP="done"
+# H2：引导修复（bootfix / ESP）任一失败 → 降级为 OK_BOOT_UNFIXED。
+# Windows 侧必须把它当"未完全成功"展示，不能报"还原成功"；用户可重试引导修复。
+if [ "$BOOTFIX_OK" = "1" ] && [ "$ESP_OK" = "1" ]; then
+    RESULT=OK; STEP="done"
+else
+    RESULT=OK_BOOT_UNFIXED; STEP="boot-unfixed"
+    say "WARN: system restored but boot fix NOT complete (bootfix=$BOOTFIX_OK, esp=$ESP_OK)"
+fi
 persist_log          # 把完整日志落到 <软件目录>\logs\（cleanup 会保留该子目录）
 # 成功回执也必须落**软件目录**（BIOS 机器没有 ESP；UEFI 的 ESP 写入也可能失败）：
 # 否则 Windows 侧看不到"已成功"，会把待执行标记误报成"任务未执行"（0.6.29 规则）。

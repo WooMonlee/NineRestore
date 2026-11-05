@@ -333,7 +333,9 @@ bool ReadMarker(const std::wstring& path, unsigned long long& content,
     return true;
 }
 
-// 根下 ZJRESTORE-status.txt（救援黑匣子回执）：result=OK？
+// 根下 ZJRESTORE-status.txt（救援黑匣子回执）：result 是否**严格等于 OK**。
+// H2（1.0）：0.9.96 用 strstr("result=OK")，会把 result=OK_BOOT_UNFIXED（系统已
+// 还原但引导未修好）误判成完全成功。这里按行精确匹配，降级回执一律返回 false。
 bool ReadRescueOk(const std::wstring& root) {
     HANDLE h = CreateFileW((root + L"ZJRESTORE-status.txt").c_str(),
                            GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
@@ -343,7 +345,21 @@ bool ReadRescueOk(const std::wstring& root) {
     DWORD rd = 0;
     ReadFile(h, buf, sizeof(buf) - 1, &rd, nullptr);
     CloseHandle(h);
-    return std::strstr(buf, "result=OK") != nullptr;
+    // 逐行扫描；容忍 CRLF 与行尾空格。
+    std::string text(buf, rd);
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t eol = text.find('\n', pos);
+        if (eol == std::string::npos)
+            eol = text.size();
+        std::string line = text.substr(pos, eol - pos);
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+            line.pop_back();
+        if (line == "result=OK")
+            return true;
+        pos = eol + 1;
+    }
+    return false;
 }
 
 // 探测一块盘上的 ~new(wantNew=true) / ~old；无残留返回 false

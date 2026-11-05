@@ -1067,12 +1067,16 @@ RescueNotice CheckLastRescueFailure() {
         std::string tm = StatusField(t, "time");
         if (lastAnyTime.empty() || tm > lastAnyTime)
             lastAnyTime = tm;
-        if (StatusField(t, "result") != "FAILED")
+        // H2（1.0）：OK_BOOT_UNFIXED = 系统已还原但 bootfix/ESP 失败，必须降级上报，
+        // 不能因为"盘还原成功"就当作完全成功。
+        const std::string result = StatusField(t, "result");
+        if (result != "FAILED" && result != "OK_BOOT_UNFIXED")
             continue;
         // 同一回执出现在多个分区且内容一致；取时间最大的一次
         if (bestTime.empty() || tm > bestTime) {
             bestTime = tm;
-            bestStep = StatusField(t, "step");
+            bestStep = result == "OK_BOOT_UNFIXED" ? "boot-unfixed"
+                                                   : StatusField(t, "step");
             bestBuild = StatusField(t, "build");
         }
     }
@@ -1135,6 +1139,20 @@ RescueNotice CheckLastRescueFailure() {
     }
     WriteUtf8File(marker, key);
     out.step = bestStep;
+    if (bestStep == "boot-unfixed") {
+        // 降级：系统文件已换入，但引导修复不完整。重跑整个还原不安全（目标已动），
+        // 只提示先修复引导；这不是"还原成功"。
+        out.retryable = false;
+        out.msg = Tr(L"上次系统还原**只完成了一部分**：文件已还原，"
+                     L"但引导修复未成功。\n");
+        out.msg += Tr(L"时间 ") + Utf8ToW(bestTime) + Tr(L"，版本 ") +
+                   Utf8ToW(bestBuild) + L"\n";
+        out.msg += Tr(L"新系统可能无法启动。请先用「修复引导」重试，"
+                      L"或把 logs\\collected 发给技术支持。");
+        LogWarn("rescue receipt OK_BOOT_UNFIXED: time=" + bestTime +
+                " build=" + bestBuild);
+        return out;
+    }
     // A/B 类（未动目标 / 引导未验证）→ 可一键重试；C 类只给日志路径（PIT-148）。
     out.retryable = RescueStepRetryable(bestStep);
     out.msg = Tr(L"上次系统还原未成功（") + StatusStepText(bestStep) + Tr(L"）\n");
