@@ -35,4 +35,8 @@ void AppendHistory(const char* action, const std::wstring& image,
                    const std::wstring& target, unsigned long long ms,
                    const char* detail);
 
+// ── ops_format.cpp ──
+bool FormatTargetVolume(wchar_t letter, std::string& log);
+int WipeVolumeContents(const std::wstring& root, std::string& log);
+
 }  // namespace sysrecover

@@ -44,44 +44,6 @@
 namespace sysrecover {
 namespace {
 
-// ── PIT-211：格式化目标分区（A 引擎"先格式化再解压"用）──────────────
-bool FormatTargetVolume(wchar_t letter, std::string& log) {
-    std::string out;
-    const int rc = RunProcess(SysToolPath(L"format.com"),
-                              std::wstring(1, letter) + L": /FS:NTFS /Q /Y",
-                              out);
-    log = "format.com rc=" + std::to_string(rc) + " / " + out;
-    return rc == 0;
-}
-
-// PIT-214：「不格式化」= 保留文件系统/卷标，只清空根目录内容（wimlib 卷模式
-// 要求空卷；这也正是救援层 target_mode=keep 的语义）。
-// 返回 0 = 干净；>0 = 有 N 项删不掉（SVI/$RECYCLE.BIN 正常，不阻断）。
-int WipeVolumeContents(const std::wstring& root, std::string& log) {
-    int failed = 0, removed = 0;
-    WIN32_FIND_DATAW fd = {};
-    HANDLE h = FindFirstFileW((root + L"*").c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) {
-        log = "wipe: cannot list " + W2U(root) + " err=" +
-              std::to_string(GetLastError());
-        return -1;
-    }
-    do {
-        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L".."))
-            continue;
-        const std::wstring p = root + fd.cFileName;
-        DeleteTreeRec(p);
-        if (GetFileAttributesW(p.c_str()) == INVALID_FILE_ATTRIBUTES)
-            ++removed;
-        else
-            ++failed;
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
-    log = "wipe: removed=" + std::to_string(removed) +
-          " left=" + std::to_string(failed);
-    return failed;
-}
-
 // PIT-216：把目标分区的**现有内容整体移到 <root>~old**（旧系统保留，可回退）。
 // 同卷改名，秒级完成；返回移动的顶层条目数（<0 = 失败，未动数据）。
 int PreserveOldSystem(const std::wstring& root, std::string& log) {
