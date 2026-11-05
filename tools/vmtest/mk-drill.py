@@ -1,0 +1,421 @@
+# -*- coding: utf-8 -*-
+"""mk-drill.py - 重建还原演练盘 base/drill.raw（2GB，3 个 FAT32 分区）。
+
+为什么用 Python 而不是 mk-drill.sh：
+  mtools 的 `mformat` 用**文件大小**决定卷大小，对多分区磁盘镜像会把整盘当成一个卷
+  （分区 FAT 相互覆盖 → sda2/sda3 变 "non DOS media"，grldr 也会丢）。
+  正确做法：每个分区**单独**建一个精确大小的镜像文件 → mformat/mcopy → 再拼回磁盘。
+  （2026-09-24；原 mk-drill.sh 已因此失效，另它还引用了已删除的 bootfiles/restore.sh。）
+
+布局（512B 扇区）：
+  sda1 2048..206847     100MB  引导（grldr.mbr 由 MBR 加载；grldr/menu.lst/vmlinuz/initramfs）
+                              + 兼作假 ESP（根下 EFI/ 目录命中 find_esp_dev 的 FAT 回退）
+  sda2 206848..1606847  683MB  还原目标（根目录 _zjresy-drill.log = 任务靶子）
+  sda3 1606848..4194303 1.2GB  镜像分区（images/test.wim + bootfix/ + restore-task.conf）
+
+用法：python tools/vmtest/mk-drill.py   （先确保 drill-images/test.wim 存在）
+
+EA 修复子镜像（PIT-122）要求 test.wim 里带 ZJEA 子镜像（index=3）。git 不保存
+NTFS 扩展属性，换机器/重新生成 test.wim 前先给样例文件打 EA（否则 test.wim 会
+少一个子镜像，run-drill 的 EA 断言会失败）：
+  build\\ea-scan.exe --set tools\\vmtest\\drill-src\\ea-test.txt
+  build\\ea-scan.exe --set tools\\vmtest\\drill-src\\DirA\\ea2.bin
+  （ea-scan.exe 构建：g++ -O2 -static -municode -o build\\ea-scan.exe tools\\ea-scan.cpp -lntdll）
+
+环境变量（可选，见 AGENTS PIT 记录）：
+  ZJ_DRILL_ENGINE=swap      A 引擎（swap）演练盘
+  ZJ_DRILL_UNDO / _UNDORESUME   返回旧系统 / 中断续做
+  ZJ_DRILL_AUTORECOVER=1    镜像不存在 -> 自动回退演练
+  ZJ_DRILL_REPARSE=cert|stale|oldcert|reject   1019 案预检演练（PIT-157 W1/W2）：
+      cert/stale 在契约里写 reparse_scan=0 + efs_scan=0 证书（= 0.7.71 版 exe；
+      stale 把 image_size 加 1 逼出全扫描分支）；oldcert = 只写 reparse_scan=0
+      （模拟 0.7.70 版 exe 的旧证书）—— 救援层必须**不信任**它、强制全扫描
+      （防旧证书漏掉 EFS；W2 起 fast path 要求两个键都是 0）；
+      reject 把契约指向 images/reparse-test.wim —— 先一次性构建：
+        build\\reparse-lab.exe make build\\reparse-src\\zjtag.bin   （GUID tag 0xDEAD）
+        build\\reparse-lab.exe capture build\\reparse-src tools\\vmtest\\drill-images\\reparse-test.wim
+      （reparse-src = drill-src 的副本 + zjtag.bin；capture 走 libwim 无排除规则）
+  ZJ_DRILL_EFS=1            W2 EFS 演练盘：契约指向 images/efs-test.wim
+      （drill-src 副本里放一个 EFS 加密文件后用 reparse-lab.exe capture 生成）：
+        cipher /e <efs-src>/efs1.bin
+        build\\reparse-lab.exe capture build\\efs-src tools\\vmtest\\drill-images\\efs-test.wim
+      不加 reparse/efs 证书键 → 救援层走全量扫描；W2 之后应以
+      STEP=efs-encrypted 在 mkntfs 之前拒绝（W2 之前则正常 apply，wimlib 只警告
+      "Ignoring EFS-encrypted data"，内容丢成空文件——观察轮）。
+"""
+import os
+import struct
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+MB = r'D:\Prog\ProgIDE\msys64\mingw64\bin'
+QIMG = os.path.join(MB, 'qemu-img.exe')
+MCOPY = os.path.join(MB, 'mcopy.exe')
+MFORMAT = os.path.join(MB, 'mformat.exe')
+MMD = os.path.join(MB, 'mmd.exe')
+ROOT = os.path.dirname(os.path.dirname(HERE))
+BOOT = os.path.join(ROOT, 'bootfiles')
+BASE = os.path.join(HERE, 'base')
+IMG = os.path.join(BASE, 'drill.raw')
+WIM = os.path.join(HERE, 'drill-images', 'test.wim')
+# ZJ_DRILL_INITRD 可指定实验用 initramfs（如强制降级版）；默认产线版
+INITRD = os.environ.get('ZJ_DRILL_INITRD') or os.path.join(
+    BOOT, 'initramfs-zjrestore.cpio.gz')
+SEC = 512
+DISK_SECTORS = 2 * 1024 * 1024 * 1024 // SEC
+
+# ZJ_DRILL_ENGINE=swap -> A-engine drill (PIT-138 regression: engine=swap must
+# still restore the ESP/EA subimages from the image file). Swap mode differs in
+# exactly two ways, both driven by the contract/cmdline, not by the layout:
+#   * CONF/LOG gain `engine=swap`
+#   * the first boot menu carries `zjsetup=1` so init runs setup-swap.sh, which
+#     formats sda2 and plants `~new/` + `.zj-done` (the pre-extracted system),
+#     then rewrites menu.lst to drop the flag so the *second* boot runs the
+#     real restore. Default 'block' keeps the existing B-engine drill intact.
+#
+# ZJ_DRILL_UNDO=1 / ZJ_DRILL_UNDORESUME=1 -> returnold drill (PIT-139, 方案 C):
+#   * both imply ENGINE=swap (`engine=swap` in the contract)
+#   * contract action=returnold, image_*=0/empty (返回旧系统不碰镜像)
+#   * first boot cmdline zjsetup=2 (undo) / zjsetup=3 (interrupted undo, phase=2)
+#   * setup-swap.sh builds the post-swap layout directly, so the host (Windows)
+#     never has to mount the NTFS the rescue layer just wrote in order to swap
+#     the contract between two boots.
+#
+# ZJ_DRILL_BULK=N -> scale drill (PIT-142): plant N small files in the tree the
+#   next boot must rename/delete (only when ENGINE=swap).  The drill disk used
+#   to carry a 3-file toy tree while a real Windows has 100k+ files, so the
+#   2026-10-13 "rm -rf ~/.new failed" could never be reproduced here.
+ENGINE = os.environ.get('ZJ_DRILL_ENGINE', 'block')
+UNDO = os.environ.get('ZJ_DRILL_UNDO', '') != ''
+UNDO_RESUME = os.environ.get('ZJ_DRILL_UNDORESUME', '') != ''
+SETUP_MODE = ''          # '' = no zjsetup=; else the N in zjsetup=N
+if UNDO or UNDO_RESUME:
+    ENGINE = 'swap'
+    SETUP_MODE = '3' if UNDO_RESUME else '2'
+
+# PIT-142: scale drill.  The drill disk always carried a 3-file toy tree while a
+# real Windows has 100k+ files, so "rm -rf ~/.new failed" (2026-10-13) could not
+# be reproduced here at all.  ZJ_DRILL_BULK=N makes setup-swap.sh plant N small
+# files in the tree that the *next* boot must rename/delete.  0 = off (default,
+# keeps the existing fast drills).
+BULK = os.environ.get('ZJ_DRILL_BULK', '').strip()
+
+PARTS = [
+    (2048, 204800, 'ZJBOOT'),
+    (206848, 1400000, 'ZJSYS'),
+    (1606848, DISK_SECTORS - 1606848, 'ZJIMG'),
+]
+
+LOG_TXT = """action=restore
+log_time=2026-09-24 17:00:00
+software_version=0.3.0
+software_path=D:\\ZJRESTORE\\SysRecover.exe
+target_disk_name=QEMU HARDDISK DRILL
+target_disk_serial=QEMU-DRILL-0001
+target_disk_size=2147483648
+target_part_offset=105906176
+target_part_size=716800000
+target_fs=FAT32
+target_vol_label=ZJSYS
+image_path=D:/images/test.wim
+image_index=1
+esp_index=2
+ea_index=3
+repair_boot=1
+pt_type=mbr
+"""
+
+CONF_TXT = """action=restore
+pt_type=mbr
+target_offset=105906176
+target_size=716800000
+target_disk_serial=QEMU-DRILL-0001
+image_path=D:/images/test.wim
+image_index=1
+esp_index=2
+ea_index=3
+repair_boot=1
+"""
+
+MENU_TXT = ("timeout 3\ndefault 0\ntitle zjrestore-test\n"
+            "kernel /vmlinuz-zjrestore console=tty0 console=ttyS0,115200 loglevel=7 "
+            "nvme_core.io_timeout=1\ninitrd /initramfs-zjrestore.cpio.gz\n")
+
+# A-engine deltas (PIT-138). Contract gets engine=swap, and the first boot menu
+# carries zjsetup=N so init runs setup-swap.sh (formats sda2, plants the initial
+# swap/returnold layout) which then rewrites menu.lst to drop the flag for the
+# real run.
+if ENGINE == 'swap':
+    CONF_TXT = CONF_TXT + 'engine=swap\n'
+    LOG_TXT = LOG_TXT.replace('pt_type=mbr\n', 'pt_type=mbr\nengine=swap\n')
+    if SETUP_MODE:
+        MENU_TXT = MENU_TXT.replace('nvme_core.io_timeout=1\n',
+                                    'nvme_core.io_timeout=1 zjsetup=%s\n' % SETUP_MODE)
+    else:
+        MENU_TXT = MENU_TXT.replace('nvme_core.io_timeout=1\n',
+                                    'nvme_core.io_timeout=1 zjsetup=1\n')
+    if BULK:
+        MENU_TXT = MENU_TXT.replace('zjsetup=%s\n' % SETUP_MODE if SETUP_MODE else 'zjsetup=1\n',
+                                    ('zjsetup=%s zjbulk=%s\n' % (SETUP_MODE or '1', BULK)))
+
+# returnold deltas (PIT-139, 方案 C): the contract is the *only* thing driving
+# this drill - action=returnold + no image (返回旧系统不碰镜像). image_*=0 and
+# an empty image_path mirror what StageReturnOld writes on a real machine.
+if UNDO or UNDO_RESUME:
+    CONF_TXT = (CONF_TXT
+                .replace('action=restore\n', 'action=returnold\n')
+                .replace('image_path=D:/images/test.wim\n', 'image_path=\n')
+                .replace('image_index=1\n', 'image_index=0\n')
+                .replace('esp_index=2\n', 'esp_index=0\n')
+                .replace('ea_index=3\n', 'ea_index=0\n'))
+    LOG_TXT = (LOG_TXT
+               .replace('action=restore\n', 'action=returnold\n')
+               .replace('image_path=D:/images/test.wim\n', 'image_path=\n')
+               .replace('image_index=1\n', 'image_index=0\n')
+               .replace('esp_index=2\n', 'esp_index=0\n')
+               .replace('ea_index=3\n', 'ea_index=0\n'))
+
+# ZJ_DRILL_AUTORECOVER=1 -> P3 auto-recover drill (PIT-148): point the contract
+# at a nonexistent image so the rescue layer fails *before* touching the target
+# (STEP=image-not-found, STAGE=0). Expected new behavior: the EXIT trap writes
+# "recover decision: reboot", init AUTO-RECOVERs with reboot -f instead of
+# dropping to a bare # shell; with QEMU -no-reboot the VM exits by itself.
+AUTORECOVER = os.environ.get('ZJ_DRILL_AUTORECOVER', '') != ''
+if AUTORECOVER:
+    CONF_TXT = CONF_TXT.replace('image_path=D:/images/test.wim\n',
+                                'image_path=D:/images/no-such.wim\n')
+    LOG_TXT = LOG_TXT.replace('image_path=D:/images/test.wim\n',
+                              'image_path=D:/images/no-such.wim\n')
+
+# ZJ_DRILL_REPARSE=cert|stale|oldcert|reject -> 1019-case rescue precheck drill
+# (PIT-157 W1/W2; the precheck lives right after the image scan and aborts
+# BEFORE mkntfs):
+#   cert   = contract carries the staging-side certificate (reparse_scan=0 AND
+#            efs_scan=0 AND image_size == the real file size) -> rescue must
+#            take the fast path ("certified clean by staging side") and NOT
+#            scan metadata.
+#   stale  = same certificate but image_size off by one -> the size mismatch
+#            must force the full metadata scan (guards against a stale disk).
+#   oldcert= 0.7.70-era certificate (reparse_scan=0 only, no efs_scan) -> the
+#            rescue layer must NOT fast-path (W2: both keys must be 0) and
+#            must run the full scan instead.
+#   reject = contract points at images/reparse-test.wim (built once with
+#            tools/reparse-lab.exe: "make" a GUID reparse file inside a copy of
+#            drill-src, then "capture" it - a no-exclusions libwim capture, so
+#            the image carries a non-MS reparse point like the 1019 machine's
+#            ipfsrv.dptf) -> rescue must refuse with STEP=reparse-unsettable
+#            and never run mkntfs/apply.
+REPARSE = os.environ.get('ZJ_DRILL_REPARSE', '').strip()
+RTWIM = os.path.join(HERE, 'drill-images', 'reparse-test.wim')
+if REPARSE in ('cert', 'stale'):
+    _rsz = os.path.getsize(WIM) if os.path.exists(WIM) else 0
+    if REPARSE == 'stale':
+        _rsz += 1
+    # 0.7.71-era certificate: BOTH keys (W2 requires reparse_scan=0 AND efs_scan=0
+    # before the rescue layer takes the fast path).
+    CONF_TXT += 'reparse_scan=0\nefs_scan=0\nimage_size=%d\n' % _rsz
+    LOG_TXT += 'reparse_scan=0\nefs_scan=0\nimage_size=%d\n' % _rsz
+if REPARSE == 'oldcert':
+    # Pre-W2 certificate: a 0.7.70-era exe wrote reparse_scan=0 but knew nothing
+    # about EFS -> the rescue layer MUST ignore the fast path and scan (else an
+    # old-stage + new-rescue combo would silently drop EFS content).
+    _rsz = os.path.getsize(WIM) if os.path.exists(WIM) else 0
+    CONF_TXT += 'reparse_scan=0\nimage_size=%d\n' % _rsz
+    LOG_TXT += 'reparse_scan=0\nimage_size=%d\n' % _rsz
+if REPARSE == 'reject':
+    CONF_TXT = (CONF_TXT
+                .replace('image_path=D:/images/test.wim\n',
+                         'image_path=D:/images/reparse-test.wim\n')
+                .replace('esp_index=2\n', 'esp_index=0\n')
+                .replace('ea_index=3\n', 'ea_index=0\n'))
+    LOG_TXT = (LOG_TXT
+               .replace('image_path=D:/images/test.wim\n',
+                        'image_path=D:/images/reparse-test.wim\n')
+               .replace('esp_index=2\n', 'esp_index=0\n')
+               .replace('ea_index=3\n', 'ea_index=0\n'))
+
+# ZJ_DRILL_EFS=1 -> W2 EFS drill (2026-10-19): contract points at
+# images/efs-test.wim (host-built: drill-src copy + `cipher /e` EFS file,
+# captured with reparse-lab.exe capture). No cert keys on purpose: the rescue
+# layer must run the full metadata scan and (after W2) refuse with
+# STEP=efs-encrypted BEFORE mkntfs. Against the pre-W2 rescue it applied anyway
+# and wimlib only warned "Ignoring EFS-encrypted data of N files" (observation).
+EFS = os.environ.get('ZJ_DRILL_EFS', '') != ''
+EFWIM = os.path.join(HERE, 'drill-images', 'efs-test.wim')
+if EFS:
+    CONF_TXT = (CONF_TXT
+                .replace('image_path=D:/images/test.wim\n',
+                         'image_path=D:/images/efs-test.wim\n')
+                .replace('esp_index=2\n', 'esp_index=0\n')
+                .replace('ea_index=3\n', 'ea_index=0\n'))
+    LOG_TXT = (LOG_TXT
+               .replace('image_path=D:/images/test.wim\n',
+                        'image_path=D:/images/efs-test.wim\n')
+               .replace('esp_index=2\n', 'esp_index=0\n')
+               .replace('ea_index=3\n', 'ea_index=0\n'))
+
+
+# ZJ_DRILL_ENC=<path.zje> -> 加密镜像演练（docs/30）：镜像分区换成 .zje，
+# 契约 esp_index/ea_index=0（单镜像），救援层应走 dm-crypt 映射再 apply。
+# 口令在串口控制台输入（-nographic 下 stdin 就是 /dev/console）。
+ENC = os.environ.get('ZJ_DRILL_ENC', '').strip()
+ENCZJE = os.path.abspath(ENC) if ENC else ''
+if ENC:
+    CONF_TXT = (CONF_TXT
+                .replace('image_path=D:/images/test.wim\n',
+                         'image_path=D:/images/enc.zje\n')
+                .replace('esp_index=2\n', 'esp_index=0\n')
+                .replace('ea_index=3\n', 'ea_index=0\n'))
+    LOG_TXT = (LOG_TXT
+               .replace('image_path=D:/images/test.wim\n',
+                        'image_path=D:/images/enc.zje\n')
+               .replace('esp_index=2\n', 'esp_index=0\n')
+               .replace('ea_index=3\n', 'ea_index=0\n'))
+
+
+def run(*args):
+    r = subprocess.run(args, capture_output=True)
+    if r.returncode != 0:
+        sys.stderr.write('FAILED: %s\n%s\n' % (' '.join(args), r.stderr.decode('utf-8', 'replace')))
+        raise SystemExit(1)
+
+
+def chs(lba):
+    c, h, s = lba // (255 * 63), (lba // 63) % 255, lba % 63 + 1
+    if c > 1023:
+        c, h, s = 1023, 254, 63
+    return bytes([h, (s | ((c >> 8) << 6)) & 0xFF, c & 0xFF])
+
+
+def write_mbr():
+    with open(IMG, 'r+b') as f:
+        gr = open(os.path.join(BOOT, 'grldr.mbr'), 'rb').read()
+        f.seek(0); f.write(gr)                      # 引导代码先写（会覆盖 0..8191）
+        off = 446
+        for i, (start, length, _lbl) in enumerate(PARTS):
+            active = 0x80 if i == 0 else 0x00
+            entry = struct.pack('<B3sB3sII', active, chs(start), 0x0C,
+                                chs(start + length - 1), start, length)
+            f.seek(off); f.write(entry); off += 16
+        f.seek(510); f.write(b'\x55\xaa')
+    print('MBR: grldr.mbr + %d partitions written' % len(PARTS))
+
+
+def make_part(part_idx, files, subdirs=()):
+    """files: list of (src_abs_path, dst_name)。建精确大小的分区镜像并拼回磁盘。"""
+    start, length, label = PARTS[part_idx]
+    pimg = os.path.join(BASE, 'part%d.img' % part_idx)
+    if os.path.exists(pimg):
+        os.remove(pimg)
+    run(QIMG, 'create', '-f', 'raw', pimg, str(length * SEC))
+    run(MFORMAT, '-i', pimg, '-F', '-v', label, '::')
+    for d in subdirs:
+        run(MMD, '-i', pimg, '::' + d)
+    for src, dst in files:
+        run(MCOPY, '-o', '-i', pimg, src, '::' + dst)
+    # 拼回磁盘
+    with open(IMG, 'r+b') as disk, open(pimg, 'rb') as p:
+        disk.seek(start * SEC)
+        while True:
+            chunk = p.read(8 << 20)
+            if not chunk:
+                break
+            disk.write(chunk)
+    os.remove(pimg)
+    print('part%d (%s, %d sectors) -> %d files' % (part_idx, label, length, len(files)))
+
+
+def main():
+    if REPARSE == 'reject':
+        if not os.path.exists(RTWIM):
+            print('missing %s - build it first:' % RTWIM)
+            print('  1) build/reparse-lab.exe make <tmp>/zjtag.bin  (GUID tag 0xDEAD)')
+            print('  2) build/reparse-lab.exe capture <tmp copy of drill-src> %s' % RTWIM)
+            return 1
+    elif EFS:
+        if not os.path.exists(EFWIM):
+            print('missing %s - build it first:' % EFWIM)
+            print('  1) cipher /e <efs-src>/efs1.bin  (efs-src = copy of drill-src)')
+            print('  2) build/reparse-lab.exe capture <efs-src> %s' % EFWIM)
+            return 1
+    elif ENC and not os.path.exists(ENCZJE):
+        print('missing %s' % ENCZJE)
+        return 1
+    elif not ENC and not os.path.exists(WIM):
+        print('missing %s - create it first:' % WIM)
+        print('  dist/SysRecover.exe backup --source tools/vmtest/drill-src/ '
+              '--dest tools/vmtest/drill-images/test.wim --compress fast --esp --yes')
+        print('  (EA samples need EAs first - see the header comment)')
+        return 1
+    for f in ('grldr', 'grldr.mbr', 'vmlinuz-zjrestore'):
+        if not os.path.exists(os.path.join(BOOT, f)):
+            print('missing bootfiles/%s' % f); return 1
+    os.makedirs(BASE, exist_ok=True)
+
+    if os.path.exists(IMG):
+        os.remove(IMG)
+    run(QIMG, 'create', '-f', 'raw', IMG, '2G')
+    write_mbr()
+
+    menu = os.path.join(BASE, 'menu-drill.lst')
+    with open(menu, 'w', newline='\n') as f:
+        f.write(MENU_TXT)
+    # sda1 兼作"假 ESP"：根下有 EFI/ 目录 → 救援层 find_esp_dev 的 FAT 回退会命中它；
+    # 预置 marker 文件用来验证 ESP 子镜像 apply 是**只加不删**（目录模式）。
+    marker = os.path.join(BASE, 'esp-marker.txt')
+    with open(marker, 'wb') as f:
+        f.write(b'DRILL-ESP-MARKER (must survive ESP subimage apply)\n')
+    make_part(0, [
+        (os.path.join(BOOT, 'grldr'), 'grldr'),
+        (menu, 'menu.lst'),
+        (os.path.join(BOOT, 'vmlinuz-zjrestore'), 'vmlinuz-zjrestore'),
+        (INITRD, 'initramfs-zjrestore.cpio.gz'),
+        (marker, 'EFI/DRILL-MARKER.txt'),
+    ], subdirs=('EFI',))
+
+    logf = os.path.join(BASE, '_zjresy-drill.log')
+    with open(logf, 'w', newline='\n') as f:
+        f.write(LOG_TXT)
+    make_part(1, [(logf, '_zjresy-drill.log')])
+
+    # bootfix（生产由 Windows 侧生成；演练造假文件，Linux 侧会 cp 进目标）
+    bf = os.path.join(BASE, 'bootfix')
+    os.makedirs(os.path.join(bf, 'Boot', 'fonts'), exist_ok=True)
+    for rel, content in (('bootmgr', b'FAKE-BOOTMGR'), ('Boot/BCD', b'FAKE-BCD'),
+                         ('Boot/fonts/chs_boot.ttf', b'FAKE-FONT')):
+        with open(os.path.join(bf, rel.replace('/', os.sep)), 'wb') as f:
+            f.write(content)
+    conf = os.path.join(BASE, 'restore-task.conf')
+    with open(conf, 'w', newline='\n') as f:
+        f.write(CONF_TXT)
+    # ZJRESTORE/ = 软件目录（log 里 software_path=D:\ZJRESTORE\SysRecover.exe）：
+    # 救援层 find_soft_dir 会命中它 → zjrestore-debug.log / zjrestore-apply.out
+    # 落盘（回归：日志实时镜像与最终持久化）。
+    image_entry = ((RTWIM, 'images/reparse-test.wim') if REPARSE == 'reject'
+                   else (EFWIM, 'images/efs-test.wim') if EFS
+                   else (ENCZJE, 'images/enc.zje') if ENC
+                   else (WIM, 'images/test.wim'))
+    make_part(2, [
+        image_entry,
+        (conf, 'restore-task.conf'),
+        (os.path.join(bf, 'bootmgr'), 'bootfix/bootmgr'),
+        (os.path.join(bf, 'Boot', 'BCD'), 'bootfix/Boot/BCD'),
+        (os.path.join(bf, 'Boot', 'fonts', 'chs_boot.ttf'), 'bootfix/Boot/fonts/chs_boot.ttf'),
+    ], subdirs=('images', 'bootfix', 'bootfix/Boot', 'bootfix/Boot/fonts',
+                'ZJRESTORE'))
+
+    mode = 'undo-resume' if UNDO_RESUME else ('undo' if UNDO else ENGINE)
+    if REPARSE:
+        mode += '+reparse-' + REPARSE
+    if EFS:
+        mode += '+efs'
+    if ENC:
+        mode += '+enc'
+    print('== drill.raw ready: %s (%d bytes) engine=%s mode=%s bulk=%s ==' % (
+        IMG, os.path.getsize(IMG), ENGINE, mode, BULK or 'off'))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

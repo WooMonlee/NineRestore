@@ -1,0 +1,1555 @@
+// SysRecover CLI（Phase 0）：version / diag。完整命令见 AGENTS.md §9。
+// 退出码：0 成功，1 通用失败，2 参数错误（与 AGENTS.md §9 一致）。
+#include "../common/i18n.h"
+#include <windows.h>
+#include <shellapi.h>  // CommandLineToArgvW（P11：从宽命令行取参数）
+#include <shlobj.h>
+#include <chrono>
+#include <climits>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <vector>
+
+#include "wimlib.h"
+#include "../common/version.h"
+#include "../common/zip.h"
+#include "../app/imgsrc.h"
+#include "../app/ops.h"
+#include "../app/universal.h"
+#include "../app/safety.h"
+#include "../app/selfdiag.h"
+#include "../app/shortcut.h"
+#include "../app/swapleft.h"
+#include "../boot/bcd.h"
+#include "../boot/grub.h"
+#include "../boot/task.h"
+#include "../boot/uefi.h"
+#include "../common/crash.h"  // 崩溃处理（minidump + 可读日志）
+#include "../common/logger.h"
+#include "../common/process.h"
+#include "../common/progress.h"
+#include "../common/relocate.h"
+#include "../common/pathutil.h"  // DriversRoot()
+#include "../common/selfarch.h"
+#include "../common/singleton.h"
+#include "../disk/disk.h"
+#include "../wim/exclude.h"
+using sysrecover::Tr;
+#include "../wim/wim.h"
+
+namespace {
+
+// 前向声明（放在**外层**匿名命名空间，与 1110 行的定义同域）：
+// 缺参/错参时要当场打印该命令的正确用法。
+bool PrintCmdUsage(const char* cmd);
+
+int CmdVersion() {
+    std::printf("%s %s (contract v%d, MinGW %s)\n", SYSRECOVER_NAME,
+                SYSRECOVER_VERSION, SYSRECOVER_CONTRACT_VERSION, __VERSION__);
+    return 0;
+}
+
+int CmdDiag() {
+    std::string t;
+    int rc = sysrecover::DiagReportText(t);
+    std::fputs(t.c_str(), stdout);
+    return rc == 0 ? 0 : 1;
+}
+
+namespace {
+
+// Ctrl+C/Break 取消：只置标志，由进度回调返回 true → wimlib 以
+// WIMLIB_ERR_ABORTED_BY_PROGRESS(76) 干净中止（不硬杀进程、不破坏正在写的文件）。
+volatile LONG g_cancel = 0;
+BOOL WINAPI OnCtrl(DWORD type) {
+    if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT) {
+        InterlockedExchange(&g_cancel, 1);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+std::wstring ToWide(const std::string& s) {
+    if (s.empty())
+        return L"";
+    int n =
+        MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    std::wstring w(n > 0 ? n - 1 : 0, 0);
+    if (n > 0)
+        MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), n);
+    return w;
+}
+
+// 宽 → UTF-8（参数统一走 UTF-8）
+std::string W2U8(const std::wstring& w) {
+    if (w.empty())
+        return {};
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr,
+                                nullptr);
+    std::string s(n > 0 ? n - 1 : 0, 0);
+    if (n > 0)
+        WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &s[0], n, nullptr,
+                            nullptr);
+    return s;
+}
+
+std::string JsonEsc(const std::wstring& w) {
+    std::string s = W2U8(w);
+    std::string o;
+    o.reserve(s.size() + 8);
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"': o += "\\\""; break;
+            case '\\': o += "\\\\"; break;
+            case '\n': o += "\\n"; break;
+            case '\r': o += "\\r"; break;
+            case '\t': o += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    char b[8];
+                    snprintf(b, sizeof(b), "\\u%04x", c);
+                    o += b;
+                } else {
+                    o += (char)c;
+                }
+        }
+    }
+    return o;
+}
+
+// 取命令行参数（**UTF-8**）—— P11。
+// 为什么不用 argv：C 运行时给的 argv 是 **ANSI**（当前代码页），而下游的 ToWide()
+// 是按 UTF-8 解的 → 中文路径被弄乱（实测 `images --file 中文.esd` 报
+// "Failed to open a file"）。改用 GetCommandLineW + CommandLineToArgvW 拿宽字符，
+// 再统一转成 UTF-8，整条链路就自洽了。
+std::vector<std::string> Utf8Args() {
+    std::vector<std::string> out;
+    int n = 0;
+    LPWSTR* w = CommandLineToArgvW(GetCommandLineW(), &n);
+    if (!w)
+        return out;
+    for (int i = 1; i < n; ++i)  // 跳过 argv[0]（exe 路径）
+        out.push_back(W2U8(w[i]));
+    LocalFree(w);
+    return out;
+}
+
+std::string Opt(const std::vector<std::string>& a, const char* key,                const std::string& def = "") {
+    for (size_t i = 0; i + 1 < a.size(); ++i)
+        if (a[i] == key)
+            return a[i + 1];
+    return def;
+}
+
+bool Has(const std::vector<std::string>& a, const char* key) {
+    for (const auto& x : a)
+        if (x == key)
+            return true;
+    return false;
+}
+
+// 逐命令的选项白名单：未知参数/缺值必须在进入业务逻辑前报错（退出码 2），
+// 不能靠“忽略未知项”掩盖用户拼写错误（例如 --yse、--destt）。
+bool OneOf(const std::string& s, const std::vector<const char*>& names) {
+    for (const char* n : names)
+        if (s == n)
+            return true;
+    return false;
+}
+
+// 读取整数选项；缺省 true（用 def），但“写了非法值”必须 false ——
+// 否则 atoi("abc")=0 会把 --disk abc 静默当成磁盘 0（危险）。
+bool OptInt(const std::vector<std::string>& a, const char* key, int def,
+            int& out) {
+    std::string s = Opt(a, key);
+    if (s.empty()) {
+        out = def;
+        return true;
+    }
+    char* end = nullptr;
+    long v = std::strtol(s.c_str(), &end, 10);
+    if (end == s.c_str() || !end || *end != '\0' || v < INT_MIN ||
+        v > INT_MAX) {
+        std::printf(Tr("参数 %s 不是有效数字：%s\n"), key, s.c_str());
+        return false;
+    }
+    out = (int)v;
+    return true;
+}
+
+// ── 按需提权（PIT-200）────────────────────────────────────────────────
+// 命令分两类：只读命令不需要管理员；其余（写 BCD/分区/固件变量/驱动）需要。
+bool CliNeedsAdmin(const std::string& cmd) {
+    static const char* kNeed[] = {"list",      "restore",        "backup",
+                                  "repair-boot", "returnold",    "diag",
+                                  "support",   "export-drivers", "scan-ea",
+                                  "check-staged"};
+    for (const char* n : kNeed)
+        if (cmd == n)
+            return true;
+    return false;
+}
+
+bool IsElevatedNow() {
+    HANDLE tok = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok))
+        return false;
+    TOKEN_ELEVATION te = {};
+    DWORD got = 0;
+    const BOOL ok = GetTokenInformation(tok, TokenElevation, &te, sizeof(te),
+                                        &got);
+    CloseHandle(tok);
+    return ok && te.TokenIsElevated;
+}
+
+// 用 UAC 重新拉起自己并等待；成功返回 true 并写 exitCode。
+bool RelaunchElevated(int* exitCode) {
+    wchar_t self[MAX_PATH] = {};
+    if (!GetModuleFileNameW(nullptr, self, MAX_PATH))
+        return false;
+    // 参数 = 命令行去掉程序名那一段
+    const std::wstring cl = GetCommandLineW();
+    size_t i = 0;
+    while (i < cl.size() && cl[i] == L' ') ++i;
+    if (i < cl.size() && cl[i] == L'"') {
+        const size_t j = cl.find(L'"', i + 1);
+        i = (j == std::wstring::npos) ? cl.size() : j + 1;
+    } else {
+        const size_t j = cl.find(L' ', i);
+        i = (j == std::wstring::npos) ? cl.size() : j;
+    }
+    const std::wstring params = cl.substr(i);
+    SHELLEXECUTEINFOW sei = {};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb = L"runas";
+    sei.lpFile = self;
+    sei.lpParameters = params.empty() ? nullptr : params.c_str();
+    sei.nShow = SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&sei) || !sei.hProcess)
+        return false;
+    WaitForSingleObject(sei.hProcess, INFINITE);
+    DWORD c = 0;
+    GetExitCodeProcess(sei.hProcess, &c);
+    CloseHandle(sei.hProcess);
+    if (exitCode) *exitCode = (int)c;
+    return true;
+}
+
+bool ValidateCommandArgs(const std::vector<std::string>& a) {
+    if (a.empty())
+        return true;
+    const std::string& cmd = a[0];
+    std::vector<const char*> flags;
+    std::vector<const char*> values;
+    if (cmd == "backup") {
+        flags = {"--append", "--verify", "--snapshot", "--no-snapshot", "--esp",
+                 "--yes", "-y"};
+        values = {"--dest", "--source", "--compress", "--name", "--password"};
+    } else if (cmd == "restore") {
+        // --repair-boot 是默认行为的显式写法（网友常这么写）→ 接受且无操作
+        flags = {"--no-repair-boot", "--repair-boot", "--universal", "--yes",
+                 "-y", "--keep-old", "--no-keep-old", "--reboot"};
+        values = {"--image", "--disk", "--part", "--index", "--engine",
+                  "--drivers", "--password"};
+    } else if (cmd == "verify") {
+        values = {"--image", "--password"};
+    } else if (cmd == "repair-boot") {
+        values = {"--disk", "--part"};
+    } else if (cmd == "returnold") {
+        flags = {"--yes", "-y"};
+        values = {"--disk", "--part"};
+    } else if (cmd == "images") {
+        values = {"--file", "--password"};
+    } else if (cmd == "export-drivers") {
+        values = {"--dest"};
+    } else if (cmd == "extract") {
+        flags = {"--all"};
+        values = {"--file", "--image", "--path", "--dest", "--index", "--password"};
+    } else if (cmd == "pack-self") {
+        values = {"--out", "--stub"};
+    } else if (cmd == "unpack-self") {
+        values = {"--dest"};
+    } else if (cmd == "check-staged") {
+        // 无参数：只做暂存任务"数据面"自检（PIT-198）
+    } else if (cmd == "diag") {
+        flags = {"--zip"};
+        values = {"--out"};
+    } else if (cmd == "support" || cmd == "scan-ea") {
+        values = {"--out", "--root"};
+    } else if (cmd == "shortcut") {
+        flags = {"--startmenu"};
+        values = {"--target", "--args", "--name"};
+    } else if (cmd == "list") {
+        // 保留旧脚本可能传入的 --json（当前实现输出人类可读列表；不静默改变语义）
+        flags = {"--json"};
+    } else if (cmd == "history") {
+        values = {"--last"};
+    } else if (cmd == "version") {
+        if (a.size() > 1) {
+            std::printf(Tr("未知参数：%s\n"), a[1].c_str());
+            return false;
+        }
+        return true;
+    } else {
+        return true;  // 未知命令由 dispatch/Usage 处理
+    }
+
+    for (size_t i = 1; i < a.size(); ++i) {
+        if (OneOf(a[i], values)) {
+            const bool nextMissing =
+                i + 1 >= a.size() ||
+                (a[i] != "--args" &&
+                 (OneOf(a[i + 1], values) || OneOf(a[i + 1], flags)));
+            if (nextMissing) {
+                std::printf(Tr("参数 %s 缺少值\n"), a[i].c_str());
+                std::printf(Tr("**本次未执行任何操作**。正确用法：\n\n"));
+                PrintCmdUsage(cmd.c_str());
+                return false;
+            }
+            ++i;
+        } else if (OneOf(a[i], flags)) {
+            continue;
+        } else {
+            // PIT-200（网友实测 `-repair-boot`）：以前只回一句"未知参数"，
+            // 用户以为命令跑了、重启后"没变化"。现在把话说全：没执行任何操作
+            // + 最接近的正确写法。
+            std::string hint;
+            for (const char* f : flags) {
+                const std::string fs(f);
+                if (a[i].size() > 2) {
+                    const std::string tail = a[i].substr(a[i].rfind('-') + 1);
+                    if (!tail.empty() && fs.find(tail) != std::string::npos) {
+                        hint = fs;
+                        break;
+                    }
+                    const std::string no = "--no-" + tail;
+                    if (no == fs) { hint = fs; break; }
+                }
+            }
+            if (!hint.empty())
+                std::printf(Tr("未知参数：%s（是否想写 %s？）\n"),
+                            a[i].c_str(), hint.c_str());
+            else
+                std::printf(Tr("未知参数：%s\n"),
+                            a[i].c_str());
+            std::printf(Tr("**本次未执行任何操作**。正确用法：\n\n"));
+            PrintCmdUsage(cmd.c_str());
+            return false;
+        }
+    }
+    return true;
+}
+
+// 单行进度（\r 刷新）+ 进度文件，供外部工具读取。返回 true 暂不支持取消。
+std::string g_phase = "idle";
+std::chrono::steady_clock::time_point g_start =
+    std::chrono::steady_clock::now();
+
+std::string FmtElapsed() {
+    auto s = std::chrono::duration_cast<std::chrono::seconds>(
+                 std::chrono::steady_clock::now() - g_start)
+                 .count();
+    char b[32];
+    if (s >= 3600)
+        snprintf(b, sizeof(b), "%ld:%02ld:%02ld", (long)(s / 3600),
+                 (long)((s % 3600) / 60), (long)(s % 60));
+    else
+        snprintf(b, sizeof(b), "%02ld:%02ld", (long)(s / 60), (long)(s % 60));
+    return b;
+}
+
+bool ConsoleProgress(int pct, const std::string& stage) {
+    if (InterlockedCompareExchange(&g_cancel, 0, 0) != 0)
+        return true;  // 用户 Ctrl+C → 干净中止
+    static int last = -1;
+    static std::string lastStage;
+    static std::string lastElapsed;
+    std::string el = FmtElapsed();
+    if (pct == last && stage == lastStage && el == lastElapsed)
+        return false;
+    last = pct;
+    lastStage = stage;
+    lastElapsed = el;
+    std::printf(Tr("\r  %3d%%  %s   已用 %s   "), pct, stage.c_str(), el.c_str());
+    fflush(stdout);
+    sysrecover::ProgressUpdate(g_phase, pct, stage);
+    return false;
+}
+
+int CmdBackup(const std::vector<std::string>& a) {
+    std::string dest = Opt(a, "--dest");
+    if (dest.empty()) {
+        std::printf(Tr("缺少 --dest <wim路径>\n"));
+        PrintCmdUsage("backup");
+        return 2;
+    }
+    sysrecover::BackupRequest req;
+    req.source = ToWide(Opt(a, "--source", "C:/"));
+    req.dest = ToWide(dest);
+    req.compress = Opt(a, "--compress", "fast");
+    if (req.compress != "fast" && req.compress != "maximum" &&
+        req.compress != "recovery") {
+        std::printf(Tr("--compress 只支持 fast/maximum/recovery\n"));
+        return 2;
+    }
+    req.name = ToWide(Opt(a, "--name", "Backup"));
+    req.append = Has(a, "--append");
+    req.verify = Has(a, "--verify");
+    req.snapshot = Has(a, "--snapshot");
+    req.noSnapshot = Has(a, "--no-snapshot");  // 冷备：PE/离线卷/VHD 卷上 VSS 不可用
+    req.esp = Has(a, "--esp");
+    // 加密备份（docs/30）：口令非空 → RunBackup 收尾加密成 .zje（删明文）
+    req.password = ToWide(Opt(a, "--password"));  // ESP 并入主镜像（方案 C：子镜像名 ESP，用户 2026-09-30）
+    DWORD attr = GetFileAttributesW(req.dest.c_str());
+    if (attr != INVALID_FILE_ATTRIBUTES && !req.append && !Has(a, "--yes") &&
+        !Has(a, "-y")) {
+        std::printf(Tr("目标文件已存在，覆盖需加 --yes 确认（追加请用 --append）\n"));
+        PrintCmdUsage("backup");
+        return 2;
+    }
+    std::string err;
+    sysrecover::ErrAdvice adv = sysrecover::ADV_NONE;
+    g_phase = "backup";  // ConsoleProgress 按 g_phase 写 progress.json（否则是 idle）
+    g_start = std::chrono::steady_clock::now();
+    std::vector<std::wstring> skipped;
+    int rc = sysrecover::RunBackup(req, ConsoleProgress, err, &adv, &skipped);
+    std::printf("\n");
+    if (rc != 0) {
+        std::printf("%s\n", err.c_str());
+        std::string advice = sysrecover::ErrorAdvice(rc, adv);  // P8（按建议码取词）
+        if (!advice.empty())
+            std::printf("%s\n", advice.c_str());
+        if (g_cancel) {
+            std::printf(Tr("已取消\n"));
+            return 6;  // §9 退出码 6=取消
+        }
+        return rc == 5 ? 5 : 1;
+    }
+    if (!skipped.empty()) {
+        std::printf(Tr("备份不完整：以下 %d 个文件未能读取（未写入镜像）：\n"),
+                    static_cast<int>(skipped.size()));
+        const size_t shown = skipped.size() < 50 ? skipped.size() : 50;
+        for (size_t i = 0; i < shown; ++i)
+            std::printf("  %s\n", W2U8(skipped[i]).c_str());
+        if (skipped.size() > shown)
+            std::printf(Tr("\n… 另有 %d 个文件\n"),
+                        static_cast<int>(skipped.size() - shown));
+        std::printf(Tr("完整清单见日志：%s\n"),
+                    W2U8(sysrecover::LogBaseDir() + L"\\logs").c_str());
+    }
+    std::printf(Tr("%s，用时 %s。\n"),
+                req.verify ? Tr("备份并校验完成") : Tr("备份完成"),
+                FmtElapsed().c_str());
+    return 0;
+}
+
+int CmdRestore(const std::vector<std::string>& a) {
+    std::string image = Opt(a, "--image");
+    std::string diskS = Opt(a, "--disk");
+    std::string partS = Opt(a, "--part");
+    if (image.empty() || diskS.empty() || partS.empty()) {
+        std::printf(Tr("缺少 --image/--disk/--part\n"));
+        PrintCmdUsage("restore");
+        return 2;
+    }
+    if (!Has(a, "--yes") && !Has(a, "-y")) {
+        std::printf(Tr("还原将覆盖目标分区，需加 --yes 确认\n"));
+        return 2;
+    }
+    int disk = 0, part = 0, index = 1;
+    if (!OptInt(a, "--disk", 0, disk) || disk < 0 ||
+        !OptInt(a, "--part", 0, part) || part < 1 ||
+        !OptInt(a, "--index", 1, index) || index < 1) {
+        std::printf(Tr("--disk/--part/--index 必须是有效正整数\n"));
+        PrintCmdUsage("restore");
+        return 2;
+    }
+    bool repairBoot = !Has(a, "--no-repair-boot");
+    // 默认：暂存模式（重启进 Linux 执行；ops 层：安检→_zjresy 日志→
+    // 任务文件→引导层→BCD bootsequence，契约对齐旧 C# StageRestoreAsync）
+    sysrecover::RestoreRequest req;
+    req.image = ToWide(image);
+    req.disk = disk;
+    req.part = part;
+    req.index = index;
+    req.repairBoot = repairBoot;
+    // PIT-202（用户 2026-11-01 需求）：默认**不保留**旧系统（~old 由救援层直接删）；
+    // `--keep-old` = 保留，用于"还原后还能返回旧系统"。
+    req.keepOld = Has(a, "--keep-old") && !Has(a, "--no-keep-old");
+    // 0.7（docs/23）：--engine swap = A 引擎（Windows 原生解压 + Linux 仅改名交换）
+    // 默认 swap（A 引擎）；--engine block 回退 B 引擎（Linux apply）。
+    req.engine = Opt(a, "--engine");
+    if (req.engine.empty()) req.engine = "swap";
+    // 异机还原（0.9）：仅 Win10/11；--drivers 可选（用户驱动文件夹）。
+    req.universal = Has(a, "--universal");
+    req.password = ToWide(Opt(a, "--password"));
+    if (req.universal) {
+        req.driverDir = ToWide(Opt(a, "--drivers"));
+        // 与 GUI 同口径（2026-10-30）：没给 --drivers 就自动用程序目录下的
+        // `Drivers\`（「导出本机硬盘驱动供异机还原」写的就是这里）。
+        if (req.driverDir.empty()) {
+            const std::wstring autoDir = sysrecover::DriversRoot();
+            int an = 0;
+            std::wstring aerr;
+            if (GetFileAttributesW(autoDir.c_str()) != INVALID_FILE_ATTRIBUTES &&
+                sysrecover::ValidateDriverFolder(autoDir, &an, aerr)) {
+                req.driverDir = autoDir;
+                std::printf(Tr("提示：自动使用程序目录 Drivers\\ 下的 %d 个 .inf。\n"),
+                            an);
+            }
+        }
+        if (req.engine != "swap")
+            std::printf(Tr("提示：异机还原只能配合「还原后重启」（--engine swap）"
+                           "或 PE 就地还原；当前引擎会被拒绝。\n"));
+    }
+    // 1019 案 W3（2026-10-19）：特殊镜像提示前移到选择时刻 —— block 引擎的
+    // Linux apply 写不了特殊重解析点（rc=58）也还原不了 EFS（文件变空），
+    // 暂存预检（W2）会直接拒绝；这类镜像只能用默认的 --engine swap / PE 就地还原。
+    if (req.engine == "block")
+        std::printf(Tr("提示：含 EFS 加密文件或特殊重解析点的镜像只能用「还原后重启」"
+                       "（--engine swap，默认）；「重启后还原」会被自动拒绝。\n"));
+    std::string err;
+    bool needReboot = true;
+    // BitLocker 提醒（同 GUI 规格）：有加密卷就醒目提示（脚本场景不阻塞，只提示）
+    {
+        auto bl = sysrecover::BitLockerVolumes();
+        if (!bl.empty()) {
+            std::string list;
+            for (const auto& v : bl) {
+                if (!list.empty())
+                    list += " ";
+                list += W2U8(v);
+            }
+            std::printf(
+                Tr("警告：本机存在 BitLocker 加密卷（%s）——\n" "      如果没有密码 / 恢复密钥，还原后这些卷的数据将无法恢复。\n"),
+                list.c_str());
+        }
+    }
+    // 目标盘健康提醒（PIT-086，用户 2026-09-26）：坏盘 → 醒目警告（脚本场景不阻塞）
+    {
+        std::string hw = sysrecover::CheckDiskHealth(disk);
+        if (!hw.empty())
+            std::printf("%s\n", hw.c_str());
+    }
+    sysrecover::ErrAdvice adv = sysrecover::ADV_NONE;
+    int rc = sysrecover::StageRestore(req, err, &needReboot, nullptr, &adv);
+    if (rc != 0) {
+        std::printf("%s\n", err.c_str());
+        std::string advice = sysrecover::ErrorAdvice(rc, adv);  // P8（按建议码取词）
+        if (!advice.empty())
+            std::printf("%s\n", advice.c_str());
+        return (rc == 2 || rc == 4 || rc == 5) ? rc : 1;
+    }
+    if (needReboot) {
+        std::printf(Tr("已暂存还原任务，重启后由引导层执行。\n"));
+        // PIT-205（用户 2026-11-01）：命令行默认**不自动重启**（脚本可控），
+        // 加 --reboot 才 5 秒后重启（同 GUI 口径，不带 shutdown 通知文本）。
+        if (Has(a, "--reboot")) {
+            std::string sout;
+            const int src = sysrecover::RunProcess(
+                sysrecover::SysToolPath(L"shutdown.exe"), L"/r /t 5", sout);
+            if (src == 0)
+                std::printf(Tr("将在 5 秒后重启（反悔：shutdown /a）。\n"));
+            else
+                std::printf(Tr("自动重启失败（rc=%d），请手动重启。\n"), src);
+        } else {
+            std::printf(Tr("请手动重启以执行（或加 --reboot 让它自动重启）。\n"));
+        }
+    }
+    // PIT-202 安全提示：不保留旧系统 = 交换成功后旧系统当场删除，**没有后悔药**。
+    // 首次换系统建议 --keep-old，确认新系统能起来再删 ~old。
+    if (needReboot && !req.keepOld)
+        std::printf(
+            Tr("提示：本次**不保留旧系统**——还原成功后旧系统将被删除，无法"
+               "「返回旧系统」。\n"
+               "      若想保留可回退，请加 --keep-old 重新暂存。\n"));
+    else
+        std::printf(Tr("还原已完成（目标分区未被占用，直接就地还原，无需重启）。\n"));
+    // Q1 settle 警告（2026-10-18）：程序目录在目标盘上但没找到安全分区
+    {
+        const auto& sr = sysrecover::LastSettleResult();
+        if (sr.noSafeDrive)
+            std::fprintf(stderr, "%s\n",
+                         Tr("警告：程序目录在目标盘上且无法安全搬迁——还原后程序可能丢失。"));
+    }
+    return 0;
+}
+
+// repair-boot（docs/15 · P5）：修"引导坏了、起不来"的机器 —— 不用重装。
+// 全流程 = 找系统盘 → 找 ESP（含回退）→ bcdboot（可用时）→ 失败/缺失则用随包
+// 资产自足（2026-10-27，PIT-184）→ 产物断言。
+int CmdRepairBoot(const std::vector<std::string>& a) {
+    int disk = -1, part = -1;
+    if (!OptInt(a, "--disk", -1, disk) || !OptInt(a, "--part", -1, part)) {
+        std::printf(Tr("--disk/--part 必须是有效数字\n"));
+        return 2;
+    }
+    std::printf("%s\n", Tr("正在修复引导（bcdboot，缺失时用内置引导资产）……"));
+    std::string msg;
+    int rc = sysrecover::RepairBoot(disk, part, msg);
+    std::printf("%s\n", msg.c_str());
+    sysrecover::ProgressDone("repair-boot", rc == 0 ? "done" : "failed");
+    return rc;
+}
+
+// 立即重启（暂存任务的收尾）。用 ExitWindowsEx 直接触发，不用 shutdown.exe 的
+// /t —— 那会弹「一分钟后关闭」对话框。两条路都记返回码（PIT-110 R4）。
+void CmdRebootNow() {
+    HANDLE hToken = nullptr;
+    if (::OpenProcessToken(::GetCurrentProcess(),
+                           TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) {
+        TOKEN_PRIVILEGES tp = {};
+        tp.PrivilegeCount = 1;
+        if (::LookupPrivilegeValueW(nullptr, SE_SHUTDOWN_NAME,
+                                    &tp.Privileges[0].Luid)) {
+            tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+            ::SetLastError(0);
+            if (!::AdjustTokenPrivileges(hToken, FALSE, &tp, 0, nullptr,
+                                         nullptr) ||
+                ::GetLastError() == ERROR_NOT_ALL_ASSIGNED)
+                sysrecover::LogWarn(
+                    "reboot: enable SeShutdownPrivilege failed err=" +
+                    std::to_string(::GetLastError()));
+        }
+        ::CloseHandle(hToken);
+    }
+    if (!::ExitWindowsEx(EWX_REBOOT | EWX_FORCEIFHUNG,
+                         SHTDN_REASON_MAJOR_APPLICATION |
+                             SHTDN_REASON_MINOR_MAINTENANCE |
+                             SHTDN_REASON_FLAG_PLANNED)) {
+        DWORD e1 = ::GetLastError();
+        std::string out;
+        int rc = sysrecover::RunProcess(sysrecover::SysToolPath(L"shutdown.exe"),
+                                        L"/r /t 0", out);
+        sysrecover::LogWarn("reboot: ExitWindowsEx failed err=" +
+                            std::to_string(e1) + "; shutdown.exe rc=" +
+                            std::to_string(rc) + " out=" + out);
+    } else {
+        sysrecover::LogInfo("reboot: ExitWindowsEx ok");
+    }
+}
+
+// returnold（PIT-139）：把 ~old 的旧系统搬回根目录。
+// Windows 侧只暂存契约(action=returnold) + 部署引导 + 单次启动；目录反向交换
+// 一律在 Linux 救援层完成（在 Windows 里改名正在运行的系统树不可回滚）。
+int CmdReturnOld(const std::vector<std::string>& a) {
+    int disk = -1, part = -1;
+    if (!OptInt(a, "--disk", -1, disk) || !OptInt(a, "--part", -1, part)) {
+        std::printf(Tr("--disk/--part 必须是有效数字\n"));
+        return 2;
+    }
+    const bool yesFlag = Has(a, "--yes") || Has(a, "-y");
+    bool hasConsole = false;
+    {
+        DWORD mode = 0;
+        hasConsole = GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mode);
+    }
+    if (!yesFlag && !hasConsole) {
+        // stdin 非控制台：不能悄悄替用户重启机器。
+        std::fprintf(stderr,
+                     Tr("非交互式运行：请加 --yes 确认「返回旧系统」并重启。\n"));
+        return 2;
+    }
+    if (!yesFlag) {
+        std::fprintf(stderr,
+                     Tr("返回旧系统 = 重启进恢复环境，把 ~old 的旧系统搬回根目录。\n"
+                        "当前新系统将被丢弃，无法再使用。\n"
+                        "确认执行？[y/N]: "));
+        char line[32] = {0};
+        if (!std::fgets(line, sizeof(line), stdin) ||
+            !(line[0] == 'y' || line[0] == 'Y')) {
+            std::fprintf(stderr, Tr("已取消（未做任何改动）。\n"));
+            return 6;
+        }
+    }
+    std::string err;
+    bool needReboot = false;
+    int rc = sysrecover::StageReturnOldByDiskPart(disk, part, err, &needReboot);
+    if (rc != 0) {
+        std::fprintf(stderr, "%s\n", err.c_str());
+        return rc;
+    }
+    std::printf(Tr("暂存完成，正在重启执行……\n"));
+    CmdRebootNow();
+    return 0;
+}
+
+int CmdVerify(const std::vector<std::string>& a) {
+    std::string image = Opt(a, "--image");
+    if (image.empty()) {
+        std::printf(Tr("缺少 --image\n"));
+        PrintCmdUsage("verify");
+        return 2;
+    }
+    const std::wstring wimg = ToWide(image);
+    if (sysrecover::ImageIsEncrypted(wimg))
+        sysrecover::SetImagePassword(wimg, ToWide(Opt(a, "--password")));
+    std::wstring perr;
+    bool ptmp = false;
+    const std::wstring plain =
+        sysrecover::ResolveImagePlain(wimg, {}, perr, &ptmp);
+    if (plain.empty()) {
+        std::printf(Tr("打开镜像失败：%ls\n"), perr.c_str());
+        return 1;
+    }
+    sysrecover::WimEngine engine;
+    if (!engine.ok()) {
+        std::printf(Tr("wimlib 初始化失败\n"));
+        return 1;
+    }
+    g_phase = "verify";
+    g_start = std::chrono::steady_clock::now();
+    // 打开阶段（CHECK_INTEGRITY 全文件扫描）注册不了回调 → 先手动亮一次阶段名，
+    // 否则大镜像前几十秒毫无输出（PIT-098）。
+    ConsoleProgress(0, "verify");
+    int rc = engine.Verify(plain, ConsoleProgress);
+    if (ptmp)
+        sysrecover::ReleaseImagePlain(wimg);
+    std::printf("\n");
+    std::printf(rc == 0 ? Tr("校验通过\n") : Tr("校验失败\n"));
+    return rc == 0 ? 0 : 5;
+}
+
+int CmdExportDrivers(const std::vector<std::string>& a) {
+    std::wstring dest = ToWide(Opt(a, "--dest"));
+    if (dest.empty()) {
+        SYSTEMTIME st = {};
+        GetLocalTime(&st);
+        wchar_t sub[96] = {};
+        swprintf(sub, 96, L"\\Drivers\\boot-%04u%02u%02u-%02u%02u%02u",
+                 st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        dest = sysrecover::DriversRoot() + sub;
+    }
+    std::wstring err;
+    int n = 0;
+    const int rc = sysrecover::ExportBootCriticalDrivers(dest, &n, err);
+    if (rc != 0) {
+        std::printf(Tr("导出失败：%ls\n"), err.c_str());
+        return 1;
+    }
+    std::printf(Tr("已导出 %d 个启动关键驱动到：%ls\n"), n, dest.c_str());
+    return 0;
+}
+
+int CmdImages(const std::vector<std::string>& a) {
+    std::string file = Opt(a, "--file");
+    if (file.empty()) {
+        std::printf(Tr("缺少 --file\n"));
+        PrintCmdUsage("images");
+        return 2;
+    }
+    const std::wstring wfile = ToWide(file);
+    if (sysrecover::ImageIsEncrypted(wfile))
+        sysrecover::SetImagePassword(wfile, ToWide(Opt(a, "--password")));
+    std::vector<sysrecover::ImageDesc> list;
+    // 加密镜像走容器 meta（只需密码，不必先解密整个文件）
+    int rc = sysrecover::ImageList(wfile, list);
+    if (rc != 0) {
+        std::printf(Tr("读取失败：%d（加密镜像请用 --password 提供口令）\n"), rc);
+        return 1;
+    }
+    for (const auto& img : list) {
+        // 大小 = 实际占用（TOTALBYTES−HARDLINKBYTES，见 PIT-073）；日期 = FILETIME→本地时间
+        wchar_t dateBuf[40] = L"";
+        if (img.creationTime) {
+            FILETIME ft, lft;
+            SYSTEMTIME st;
+            ft.dwLowDateTime = (DWORD)(img.creationTime & 0xFFFFFFFFull);
+            ft.dwHighDateTime = (DWORD)(img.creationTime >> 32);
+            if (FileTimeToLocalFileTime(&ft, &lft) &&
+                FileTimeToSystemTime(&lft, &st))
+                swprintf(dateBuf, 40, L"%04u-%02u-%02u %02u:%02u", st.wYear,
+                         st.wMonth, st.wDay, st.wHour, st.wMinute);
+        }
+        std::wprintf(L"%d | %ls | %.2f GB | %ls\n", img.index,
+                     img.name.c_str(), img.sizeBytes / 1073741824.0,
+                     dateBuf[0] ? dateBuf : L"-");
+        if (!img.description.empty())
+            std::wprintf(L"      %ls\n", img.description.c_str());
+    }
+    return 0;
+}
+
+}  // namespace
+
+int CmdExtract(const std::vector<std::string>& a) {
+    std::string file = Opt(a, "--file");
+    if (file.empty())
+        file = Opt(a, "--image");  // images 用 --file、restore 用 --image，这里两个都收
+    std::string dest = Opt(a, "--dest");
+    int index = 1;
+    if (!OptInt(a, "--index", 1, index) || index < 1) {
+        std::printf(Tr("--index 必须是有效正整数\n"));
+        PrintCmdUsage("extract");
+        return 2;
+    }
+    // --path 可重复（Opt 只取第一个匹配，所以自己扫一遍）
+    std::vector<std::wstring> paths;
+    for (size_t i = 0; i + 1 < a.size(); ++i)
+        if (a[i] == "--path")
+            paths.push_back(ToWide(a[i + 1]));
+    // --all（0.7 A 引擎解压器，docs/21/22）：整镜像提取到 --dest 目录 —— 走
+    // Windows 侧 wimlib（flags=0，目录模式），reparse/EA/ACL/时间戳全原生保真。
+    // 与 --path 互斥；用于"Windows 原生解压 + Linux 仅改名交换"的新还原架构。
+    bool all = false;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (a[i] == "--all") all = true;
+    if (file.empty() || dest.empty() || (!all && paths.empty())) {
+        std::printf(
+            Tr("用法: SysRecover.exe extract --file <镜像> [--index N] " "--path <镜像内路径> [--path ...] --dest <输出目录>\n" "     或: SysRecover.exe extract --file <镜像> [--index N] --all --dest <输出目录>\n" "  --path 用 Windows 风格、以 \\ 开头，支持通配符，例如：\n" "    --path \"\\Windows\\win.ini\"\n" "    --path \"\\Users\\*\\Desktop\\*.txt\"\n" "  --all：提取整个子镜像（Windows 原生元数据全保真；与 --path 互斥）\n"));
+        return 2;
+    }
+    // 输出目录：不存在就建（父目录需已存在）。**盘符根（`X:\`）视为已存在** ——
+    // `CreateDirectoryW("X:\\")` 会失败并报"找不到路径"，让 `extract --dest X:\` 用不了
+    //（docs/15 §7-P7a，实测踩到）。
+    {
+        std::wstring wdest = ToWide(dest);
+        DWORD attr = ::GetFileAttributesW(wdest.c_str());
+        bool isDir = attr != INVALID_FILE_ATTRIBUTES &&
+                     (attr & FILE_ATTRIBUTE_DIRECTORY);
+        if (!isDir && !CreateDirectoryW(wdest.c_str(), nullptr) &&
+            ::GetLastError() != ERROR_ALREADY_EXISTS) {
+            std::printf(Tr("无法创建输出目录（父目录需已存在）\n"));
+            return 1;
+        }
+    }
+    const std::wstring wfile = ToWide(file);
+    if (sysrecover::ImageIsEncrypted(wfile))
+        sysrecover::SetImagePassword(wfile, ToWide(Opt(a, "--password")));
+    std::wstring perr2;
+    bool ptmp2 = false;
+    const std::wstring plain =
+        sysrecover::ResolveImagePlain(wfile, {}, perr2, &ptmp2);
+    if (plain.empty()) {
+        std::printf(Tr("打开镜像失败：%ls\n"), perr2.c_str());
+        return 1;
+    }
+    sysrecover::WimEngine engine;
+    if (!engine.ok()) {
+        std::printf(Tr("wimlib 初始化失败\n"));
+        return 1;
+    }
+    int rc = all ? engine.Apply(plain, index, ToWide(dest), {})
+                 : engine.ExtractPaths(plain, index, paths, ToWide(dest));
+    if (ptmp2)
+        sysrecover::ReleaseImagePlain(wfile);
+    if (rc != 0) {
+        std::printf(Tr("提取失败：%ls\n"), sysrecover::WimEngine::ErrorString(rc));
+        return 1;
+    }
+    if (all)
+        std::printf(Tr("已整镜像提取到 %s\n"), dest.c_str());
+    else
+        std::printf(Tr("已提取 %zu 个路径到 %s\n"), paths.size(), dest.c_str());
+    return 0;
+}
+
+// 导出诊断包：diag 文本 + logs/ 下的文件 + 契约文件 + version.json → 一个 zip。
+// 用自写的 ZipWriter（store 模式，零依赖；见 src/common/zip.h）。
+int CmdDiagZip(const std::vector<std::string>& a) {
+    std::wstring exeDir = sysrecover::ExeDir();
+    std::wstring logsDir = sysrecover::LogBaseDir() + L"\\logs";
+    std::wstring outPath;
+    std::string outOpt = Opt(a, "--out");
+    if (!outOpt.empty()) {
+        outPath = ToWide(outOpt);
+    } else {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        wchar_t nm[128];
+        swprintf(nm, 128, L"\\SysRecover-diag-%04u%02u%02u-%02u%02u%02u.zip",
+                 st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute,
+                 st.wSecond);
+        CreateDirectoryW(logsDir.c_str(), nullptr);
+        outPath = logsDir + nm;
+    }
+    sysrecover::ZipWriter zip(outPath);
+    if (!zip.ok()) {
+        std::printf(Tr("无法创建诊断包：%ls\n"), outPath.c_str());
+        return 1;
+    }
+    int n = 0;
+    {  // 1) diag 文本
+        std::string t;
+        sysrecover::DiagReportText(t);
+        if (zip.AddData(t.data(), t.size(), "diag.txt"))
+            ++n;
+    }
+    {  // 2) logs 目录下的文件（不递归）
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((logsDir + L"\\*").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                    continue;
+                std::wstring full = logsDir + L"\\" + fd.cFileName;
+                char u8[512] = {};
+                WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, u8,
+                                    sizeof(u8), nullptr, nullptr);
+                std::string zn = std::string("logs/") + u8;
+                if (zip.AddFile(full, zn))
+                    ++n;
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+    }
+    {  // 3) 契约文件与版本（有才加）
+        const wchar_t* extra[] = {L"\\restore-task.conf", L"\\restore-task.json",
+                                  L"\\version.json"};
+        for (const wchar_t* f : extra) {
+            std::wstring full = exeDir + f;
+            if (GetFileAttributesW(full.c_str()) == INVALID_FILE_ATTRIBUTES)
+                continue;
+            char u8[512] = {};
+            WideCharToMultiByte(CP_UTF8, 0, f + 1, -1, u8, sizeof(u8), nullptr,
+                                nullptr);
+            if (zip.AddFile(full, u8))
+                ++n;
+        }
+    }
+    if (!zip.Close()) {
+        std::printf(Tr("写诊断包失败\n"));
+        return 1;
+    }
+    std::printf(Tr("已导出诊断包（%d 个文件）：%ls\n"), n, outPath.c_str());
+    return 0;
+}
+
+// 历史记录（P7）：打印 logs\history.jsonl 的最后 N 行
+int CmdHistory(const std::vector<std::string>& a) {
+    int n = 20;
+    if (!OptInt(a, "--last", 20, n) || n <= 0) {
+        std::printf(Tr("--last 必须是有效正整数\n"));
+        return 2;
+    }
+    std::wstring path = sysrecover::LogBaseDir() + L"\\logs\\history.jsonl";
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        std::printf(Tr("还没有历史记录（备份或还原成功后会写 %ls）\n"), path.c_str());
+        return 0;
+    }
+    LARGE_INTEGER sz = {};
+    GetFileSizeEx(h, &sz);
+    std::string all(static_cast<size_t>(sz.QuadPart), 0);
+    DWORD got = 0;
+    if (!all.empty())
+        ReadFile(h, &all[0], static_cast<DWORD>(all.size()), &got, nullptr);
+    CloseHandle(h);
+    std::vector<std::string> lines;
+    for (size_t p = 0; p < all.size();) {
+        size_t e = all.find('\n', p);
+        if (e == std::string::npos)
+            break;
+        lines.push_back(all.substr(p, e - p));
+        p = e + 1;
+    }
+    size_t start = lines.size() > static_cast<size_t>(n)
+                       ? lines.size() - static_cast<size_t>(n)
+                       : 0;
+    for (size_t i = start; i < lines.size(); ++i)
+        std::printf("%s\n", lines[i].c_str());
+    return 0;
+}
+
+// scan-ea [--root <目录>] [--out <文件>]：列出带 NTFS 扩展属性（EA）的文件
+//（客户 2026-10-05：Linux 侧还原丢 EA；在 PE 还原后的系统上跑一次即可取证）。
+static int CmdScanEa(const std::vector<std::string>& args) {
+    std::wstring root = L"C:\\", out;
+    for (size_t i = 1; i < args.size(); ++i) {
+        if (args[i] == "--root" && i + 1 < args.size())
+            root = ToWide(args[++i]);
+        else if (args[i] == "--out" && i + 1 < args.size())
+            out = ToWide(args[++i]);
+    }
+    std::string err;
+    int n = sysrecover::ScanEaFiles(root, out, err);
+    if (n < 0) {
+        std::fprintf(stderr, "%s\n", err.c_str());
+        return 1;
+    }
+    std::printf("%s%d\n", Tr("带扩展属性(EA)的文件数："), n);
+    return 0;
+}
+
+int CmdList(const std::vector<std::string>& a) {
+    const auto disks = sysrecover::EnumerateDisks();
+    if (Has(a, "--json")) {
+        std::printf("{\n  \"disks\": [");
+        for (size_t di = 0; di < disks.size(); ++di) {
+            const auto& d = disks[di];
+            std::printf("%s\n    {\"index\":%u,\"model\":\"%s\",\"serial\":\"%s\","
+                        "\"sizeBytes\":%llu,\"style\":\"%s\",\"removable\":%s,"
+                        "\"partitions\":[",
+                        di ? "," : "", d.index, JsonEsc(d.model).c_str(),
+                        JsonEsc(d.serial).c_str(),
+                        (unsigned long long)d.sizeBytes,
+                        sysrecover::StyleName(d.style),
+                        d.isRemovable ? "true" : "false");
+            for (size_t pi = 0; pi < d.parts.size(); ++pi) {
+                const auto& p = d.parts[pi];
+                std::printf("%s{\"number\":%u,\"letter\":\"%s\",\"label\":\"%s\","
+                            "\"fs\":\"%s\",\"guid\":\"%s\",\"offsetBytes\":%llu,"
+                            "\"sizeBytes\":%llu,\"freeBytes\":%llu,"
+                            "\"system\":%s,\"esp\":%s,\"msr\":%s,"
+                            "\"recovery\":%s}",
+                            pi ? "," : "", p.partNumber,
+                            JsonEsc(p.letter).c_str(),
+                            JsonEsc(p.label).c_str(), JsonEsc(p.fs).c_str(),
+                            JsonEsc(p.guid).c_str(),
+                            (unsigned long long)p.offsetBytes,
+                            (unsigned long long)p.sizeBytes,
+                            (unsigned long long)p.freeBytes,
+                            p.isSystem ? "true" : "false",
+                            p.isEsp ? "true" : "false",
+                            p.isMsr ? "true" : "false",
+                            p.isRecovery ? "true" : "false");
+            }
+            std::printf("]}");
+        }
+        std::printf("\n  ]\n}\n");
+        return 0;
+    }
+    const double gb = 1024.0 * 1024 * 1024;
+    for (const auto& d : disks) {
+        std::wprintf(L"Disk %u  %ls  %.0fGB  %hs%s\n", d.index,
+                     d.model.empty() ? L"?" : d.model.c_str(),
+                     d.sizeBytes / gb,
+                     sysrecover::StyleName(d.style),
+                     d.isRemovable ? "  [Removable]" : "");
+        for (const auto& p : d.parts) {
+            std::wprintf(
+                L"  Part %u  %ls  %ls  %.0fGB free %.0fGB%ls%ls%ls\n",
+                p.partNumber, p.letter.empty() ? L"-" : p.letter.c_str(),
+                p.fs.empty() ? L"?" : p.fs.c_str(), p.sizeBytes / gb,
+                p.freeBytes / gb, p.isSystem ? L"  [System]" : L"",
+                p.isEsp ? L"  [ESP]" : L"",
+                p.isRecovery ? L"  [Recovery]" : L"");
+        }
+    }
+    return 0;
+}
+
+int CmdShortcut(const std::vector<std::string>& a) {
+    std::string name = Opt(a, "--name", Tr("一键还原"));
+    std::string target = Opt(a, "--target");
+    std::string targetArgs = Opt(a, "--args");
+    if (target.empty()) {
+        std::printf(Tr("缺少 --target <exe路径>\n"));
+        PrintCmdUsage("shortcut");
+        return 2;
+    }
+    wchar_t folder[MAX_PATH] = {};
+    if (Has(a, "--startmenu")) {
+        if (FAILED(SHGetFolderPathW(nullptr, CSIDL_PROGRAMS, nullptr, 0,
+                                    folder))) {
+            std::printf(Tr("取开始菜单目录失败\n"));
+            return 1;
+        }
+    } else {
+        if (FAILED(SHGetFolderPathW(nullptr, CSIDL_DESKTOP, nullptr, 0,
+                                    folder))) {
+            std::printf(Tr("取桌面目录失败\n"));
+            return 1;
+        }
+    }
+    std::wstring out;
+    if (!sysrecover::CreateShortcut(folder, ToWide(name), ToWide(target),
+                                    ToWide(targetArgs), out)) {
+        std::printf(Tr("创建快捷方式失败\n"));
+        return 1;
+    }
+    char narrow[MAX_PATH * 2] = {};
+    WideCharToMultiByte(CP_UTF8, 0, out.c_str(), -1, narrow, sizeof(narrow),
+                        nullptr, nullptr);
+    std::printf(Tr("已创建：%s\n"), narrow);
+    return 0;
+}
+
+// 支持包（「日志」按钮的 CLI 版）：各盘日志 + explorer 转储 + 事件日志 → zip。
+int CmdSupport(const std::vector<std::string>& a) {
+    std::string out = Opt(a, "--out");
+    sysrecover::SupportBundle r = sysrecover::BuildSupportBundle(
+        out.empty() ? std::wstring() : ToWide(out));
+    if (r.zipPath.empty()) {
+        std::printf(Tr("导出诊断包失败：%s\n"), W2U8(r.error).c_str());
+        return 1;
+    }
+    std::printf(Tr("已导出诊断包：%s\n"), W2U8(r.zipPath).c_str());
+    return 0;
+}
+
+// ── 帮助（问题清单 C1：原来只有一行 Usage，学生没法自学命令）──
+struct CmdHelp {
+    const char* cmd;
+    const char* text;
+};
+const CmdHelp* CmdHelpTable(size_t* n) {
+    // ⚠️ 表体必须是**函数内 static**：放命名空间作用域时 `Tr()` 在静态初始化阶段
+    // 就求值，而 InitI18n() 要到 main() 里才跑 → 词典没加载、恒返回源文本，
+    // 表现为 `--lang en help` 总览是英文、`help restore` 却还是中文（实测）。
+    // 函数内 static 首次调用时才初始化，已经在 InitI18n 之后。
+    static const CmdHelp k[] = {
+    {"list", Tr("list\n  列出磁盘/分区/文件系统/盘符/ESP 与系统标记。")},
+    {"diag",
+     Tr("diag [--zip [--out <zip>]]\n" "  自检（管理员/固件/Secure Boot/启动项/wimlib）。\n" "  --zip 导出诊断包（diag 文本 + logs/ + 契约文件），排错时直接发回。")},
+    {"support",
+     Tr("support [--out <zip>]\n"
+        "  一键收集诊断资料：各盘日志 + explorer 转储 + 事件日志 → 打包成一个 zip\n"
+        "  （不给 --out 时输出到桌面 SysRecover-logs-<时间>.zip）。")},
+    {"images", Tr("images --file <镜像>\n  列出镜像里的子镜像：<index> - <名称>（<大小>）。")},
+    {"backup",
+     Tr("backup --dest <文件> [--source <目录>] [--compress fast|maximum|recovery]\n" "       [--name <名>] [--append] [--verify] [--esp] [--no-snapshot] [--password <pwd>] [--yes]\n" "  --source 写盘符根（`C:` 或 `C:/` 都行）即自动走 VSS 热备；\n" "  --compress 决定体积/速度；--verify 写完立即校验；--append 追加为同一 WIM 的新子镜像；\n" "  --esp 把 ESP 分区并入同一镜像（子镜像名 ESP，还原系统时自动恢复回 ESP）；\n" "  --no-snapshot 冷备（PE/离线卷/VHD 卷上 VSS 不可用时用）；\n" "  本机没有 ESP 时自动跳过（不算失败）。")},
+    {"restore",
+     Tr("restore --image <文件> --disk N --part M [--index N] [--keep-old]\n"
+        "        [--no-keep-old] [--reboot] [--no-repair-boot] [--engine block|swap]\n"
+        "        [--universal [--drivers <目录>]] [--yes]\n"
+        "  什么时候「重启后还原」：**自动判定**——目标是正在运行的系统盘就暂存并\n"
+        "  重启进恢复环境执行；目标是其它分区（或在 PE 里）就就地还原、不重启。\n"
+        "  --keep-old      保留旧系统（C:\\~old），之后可「返回旧系统」；\n"
+        "  --no-keep-old   **默认**：交换成功后当场删除旧系统（省空间、无后悔药）。\n"
+        "  --reboot        暂存成功后立即重启（默认不自动重启，等你手动重启；\n"
+        "                  5 秒倒计时，反悔用 shutdown /a）。\n"
+        "  --no-repair-boot 不修引导（只允许就地还原；暂存路径会直接拒绝）。\n"
+        "  --engine swap | block  换 swap=Windows 解压+Linux 交换（默认、快）；\n"
+        "                  block=旧路径（Linux 直接 apply，慢但兼容性强）。\n"
+        "  --universal [--drivers <目录>]  异机还原（仅 Win10/11；自动注入存储/输入驱动）。\n"
+        "  --yes           跳过确认；--index 选子镜像（默认 1）。\n"
+        "  例：restore --image D:\\SYSTEM.WIM --disk 0 --part 3 --yes --reboot\n"
+        "      restore --image D:\\SYSTEM.WIM --disk 0 --part 3 --yes --keep-old")},
+    {"pack-self",
+     Tr("pack-self --out <输出文件>\n"
+        "  把当前程序目录打包成一个**自解压单文件**（带图标；双击开界面，\n"
+        "  带参数就是命令行）。等价于 GUI「更多功能>> 打包成单文件…」\n"
+        "  例：pack-self --out D:\\九转大还原.exe")},
+    {"unpack-self",
+     Tr("unpack-self --dest <目标目录>\n"
+        "  把当前程序目录复制到指定文件夹（跳过 logs），得到一个可直接运行的\n"
+        "  「绿色版」目录。等价于 GUI「更多功能>> 解压到文件夹…」")},
+    {"verify", Tr("verify --image <文件>\n  校验镜像完整性（成功 0，失败 5）。")},
+    {"repair-boot",
+     Tr("repair-boot [--disk N --part M]\n" "  修复引导（ESP 上的 BCD/bootmgfw）：给**引导坏了的机器**用，不必重装。\n" "  不给 --disk/--part 时自动找系统盘；流程 = bcdboot（缺失时用内置引导资产）+ 产物校验（docs/15）。")},
+    {"returnold",
+     Tr("returnold [--disk N --part M] [--yes]\n"
+        "  返回旧系统：把 ~old 的旧系统搬回根目录，当前新系统被丢弃。\n"
+        "  暂存后重启进 Linux 救援层执行反向交换（在 Windows 里改名正在运行\n"
+        "  的系统树不可回滚）；不给 --disk/--part 时自动找带 ~old\\Windows 的盘。\n"
+        "  非交互式（批处理/管道）必须加 --yes；交互式会先问一次，取消=退出码 6。")},
+    {"extract",
+     Tr("extract --file <镜像> --path <路径> [--path ...] --dest <目录> [--index N]\n"
+        "        [--all] [--image <镜像>]\n"
+        "  从镜像里取单个/一组文件（--path 支持通配符、可重复）；--all 取整个子镜像。")},
+    {"history", Tr("history [--last N]\n  列出操作历史（logs/history.jsonl），默认最近 20 条。")},
+    {"shortcut", Tr("shortcut --target <exe> [--args <...>] [--name <名>] [--startmenu]\n"
+                    "  在桌面建快捷方式；--startmenu 改放开始菜单。")},
+    {"version", Tr("version\n  显示版本号。")},
+    };
+    *n = sizeof(k) / sizeof(k[0]);
+    return k;
+}
+
+void PrintAllUsage() {
+    std::printf(
+        Tr("SysRecover 九转还原 · 命令行\n"
+           "\n"
+           "用法: SysRecover.exe <命令> [选项]      （`SysRecover.exe help <命令>` 看单项）\n"
+           "\n"
+           "命令:\n"
+           "  list                         列出磁盘/分区/文件系统/盘符/ESP/系统标记\n"
+           "  diag [--zip [--out <zip>]]   自检（固件/Secure Boot/启动项/wimlib）；--zip 导出诊断包\n"
+           "  support [--out <zip>]        一键收集诊断资料（各盘日志+转储+事件日志）打包\n"
+           "  images --file <镜像>         列出镜像里的子镜像（含大小/描述）\n"
+           "  backup --dest <文件> [--source <目录>] [--compress fast|maximum|recovery]\n"
+           "         [--name <名>] [--append] [--verify] [--esp] [--no-snapshot] [--password <pwd>] [--yes]\n"
+           "  restore --image <文件> --disk N --part M [--index N] [--keep-old|--no-keep-old]\n"
+           "          [--reboot] [--no-repair-boot] [--engine block|swap] [--universal [--drivers <目录>]] [--yes]\n"
+           "  verify --image <文件>        校验镜像完整性\n"
+           "  repair-boot [--disk N --part M]   修复引导（BCD/启动项；引导坏了不用重装）\n"
+           "  returnold [--disk N --part M] [--yes]  返回旧系统（需上次还原保留了旧系统）\n"
+           "  extract --file <镜像> --path <路径> [--path ...] --dest <目录> [--index N]\n"
+           "                               从镜像里取单个/一组文件（支持通配符）\n"
+           "  history [--last N]           列出操作历史（logs/history.jsonl）\n"
+           "  export-drivers [--dest <目录>]  导出本机启动关键驱动（供异机还原）\n"
+           "  check-staged                 检查“暂存待重启”的数据是否完整（契约/~new/启动项）\n"
+           "  scan-ea                      扫描本机 EFS 加密文件（异机还原前的预检）\n"
+           "  pack-self --out <文件>       把当前程序目录打包成自解压单文件\n"
+           "  unpack-self --dest <目录>    把当前程序目录解压成绿色版文件夹\n"
+           "  shortcut --target <exe> [--args <...>] [--name <名>] [--startmenu]   建快捷方式\n"
+           "  version                      显示版本\n"
+           "  help [命令]                  本帮助（`help restore` 等看单项的全部参数）\n"
+           "\n"
+           "全局选项:\n"
+           "  --password <pwd>             加密镜像口令（.zje 的备份/还原/校验/提取）\n"
+           "  --lang <zh|en>               界面语言（如: SysRecover.exe --lang en help）\n"
+           "  --yes                        跳过确认（危险操作仍受安全门禁约束）\n"
+           "\n"
+           "退出码: 0 成功 / 1 通用失败 / 2 参数错 / 3 需管理员 / 4 危险目标被拒 / 5 镜像校验失败 / 6 取消\n"
+           "注意: 还原系统盘会自动重启进救援层；镜像必须放在**本地分区**（救援层访问不到网络）。\n"));
+}
+
+// 返回 true = 找到了该命令的说明。
+bool PrintCmdUsage(const char* cmd) {
+    size_t n = 0;
+    const CmdHelp* t = CmdHelpTable(&n);
+    for (size_t i = 0; i < n; ++i)
+        if (std::strcmp(cmd, t[i].cmd) == 0) {
+            std::printf("%s\n", t[i].text);
+            return true;
+        }
+    return false;
+}
+
+int Usage() {
+    PrintAllUsage();
+    return 2;  // 无参数 = 用法错误（退出码 2）
+}
+
+}  // namespace
+
+int main() {
+    // 位数自举：32 位程序在 64 位 Windows 上换成 <ExeDir>\x64\<同名> 再跑
+    // （Windows 侧位数跟随系统；见 src/common/selfarch.h）。返回 false = 无需切换。
+    {
+        int reexecCode = 0;
+        if (sysrecover::ReexecX64IfNeeded(&reexecCode, /*wait=*/true))
+            return reexecCode;
+    }
+    // 崩溃处理：装在最前面（真实进程），崩溃时把 dump+文本写到 <日志根>\logs\crash\。
+    sysrecover::InstallCrashHandler(sysrecover::LogBaseDir());
+    // 控制台输出切到 UTF-8（否则中文提示在 GBK 控制台是乱码）；退出时还原原代码页。
+    struct CpGuard {
+        UINT out;
+        ~CpGuard() { SetConsoleOutputCP(out); }
+    } cpGuard{GetConsoleOutputCP()};
+    SetConsoleOutputCP(CP_UTF8);
+
+    std::vector<std::string> args = Utf8Args();
+    // --lang xx | --lang=xx：显式指定界面语言（机器可读标记，本身不翻译）。
+    // 不给则由 InitI18n(nullptr) 按 SYSRECOVER_LANG / 系统界面语言自动判定。
+    // 必须在 Usage()/任何 Tr() 之前 —— 帮助文本也是翻过的。
+    std::string langArg;
+    // ⚠️ Utf8Args() 已经丢掉 argv[0]（见 201 行），所以从 i=0 开始扫 ——
+    // 从 1 开始会正好跳过位于首位的 `--lang`，表现为"开关完全没生效"。
+    for (size_t i = 0; i < args.size();) {
+        if (args[i] == "--lang" && i + 1 < args.size()) {
+            langArg = args[i + 1];
+            args.erase(args.begin() + (long)i, args.begin() + (long)i + 2);
+        } else if (args[i].rfind("--lang=", 0) == 0) {
+            langArg = args[i].substr(7);
+            args.erase(args.begin() + (long)i);
+        } else {
+            ++i;
+        }
+    }
+    // PIT-200：单横线长参数自动纠正（`-image` → `--image`）；`-y`/`-h` 保持原样
+    for (auto& a : args) {
+        if (a.size() > 2 && a[0] == '-' && a[1] != '-') a = "-" + a;
+    }
+    sysrecover::InitI18n(langArg.empty() ? nullptr : langArg.c_str());
+    sysrecover::EnsureTempDir();  // 同 GUI（PIT-192）
+    // （Q1「先落盘后搬家」，用户 2026-10-18：启动搬迁块已删除 —— 搬家等用户
+    //  点「确定还原」后再做。SettleHome 由 StageRestoreImpl 在确认后自动调用，
+    //  仅还原/返回旧系统触发；无安全盘时在 CmdRestore 结束后打印警告。）
+    if (args.empty())
+        return Usage();
+    // 帮助（问题清单 C1）：`help [命令]` / `--help` / `-h`，以及 `<命令> --help`。
+    if (args[0] == "help" || args[0] == "--help" || args[0] == "-h") {
+        if (args.size() > 1) {
+            if (!PrintCmdUsage(args[1].c_str()))
+                PrintAllUsage();
+        } else {
+            PrintAllUsage();
+        }
+        return 0;
+    }
+    if (args.size() > 1 && (args[1] == "--help" || args[1] == "-h")) {
+        PrintCmdUsage(args[0].c_str());
+        return 0;
+    }
+    // 未知选项/缺值在写日志、枚举磁盘之前就拒绝（退出码 2）。
+    if (!ValidateCommandArgs(args))
+        return 2;
+    // PIT-200：需要管理员的命令，先确保提权 —— 提不上就**明确报错**，
+    // 绝不"什么都不做"（用户 2026-11-01 规格）。
+    if (CliNeedsAdmin(args[0]) && !IsElevatedNow()) {
+        int code = 3;
+        if (RelaunchElevated(&code))
+            return code;  // UAC 通过 → 子进程已跑完，透传退出码
+        std::printf("%s\n",
+                    Tr("该命令需要管理员权限（要写引导/分区/固件变量）。\n"
+                       "请右键「以管理员身份运行」，或从管理员命令行执行。\n"
+                       "**本次未执行任何操作**。"));
+        return 3;
+    }
+    // PIT-198：「暂存任务自检」必须在**启动清理之前**跑 —— 启动流程会把
+    // logs\pending-restore.txt 当"已提示过"消费掉，之后再查就永远"没有待执行任务"。
+    if (args[0] == "pack-self" || args[0] == "unpack-self") {
+        // PIT-207：自我打包 / 解包（GUI「更多功能>>」同一套实现；也方便脚本化）
+        const bool pack = (args[0] == "pack-self");
+        std::string err;
+        int n = 0;
+        bool ok = false;
+        if (pack) {
+            const std::wstring out = ToWide(Opt(args, "--out"));
+            if (out.empty()) {
+                std::printf("%s\n",
+                            Tr("缺少 --out <输出文件>；例：pack-self --out "
+                               "D:\\九转大还原.exe"));
+                std::printf(Tr("**本次未执行任何操作**。正确用法：\n\n"));
+                PrintCmdUsage("pack-self");
+                return 2;
+            }
+            std::wstring stubPath =
+                sysrecover::AppDir() + L"\\bootfiles\\portable-stub.exe";
+            const std::string stubOpt = Opt(args, "--stub");
+            if (!stubOpt.empty()) stubPath = ToWide(stubOpt);
+            ok = sysrecover::PackSelfToSingleFile(sysrecover::AppDir(), out,
+                                                  stubPath, err, &n);
+            if (ok)
+                std::printf(Tr("已打包 %d 个文件 -> %ls\n"), n, out.c_str());
+        } else {
+            const std::wstring dest = ToWide(Opt(args, "--dest"));
+            if (dest.empty()) {
+                std::printf("%s\n",
+                            Tr("缺少 --dest <目标目录>；例：unpack-self --dest "
+                               "D:\\SysRecover"));
+                std::printf(Tr("**本次未执行任何操作**。正确用法：\n\n"));
+                PrintCmdUsage("unpack-self");
+                return 2;
+            }
+            ok = sysrecover::ExtractSelfToFolder(sysrecover::AppDir(), dest, err, &n);
+            if (ok)
+                std::printf(Tr("已解压 %d 个文件 -> %ls\n"), n, dest.c_str());
+        }
+        if (!ok) {
+            std::printf("%s%s\n", Tr("失败："), err.c_str());
+            return 1;
+        }
+        return 0;
+    }
+    if (args[0] == "check-staged") {
+        std::string detail;
+        const sysrecover::StagedTaskState st =
+            sysrecover::CheckStagedTaskState(&detail);
+        const char* name = "none";
+        switch (st) {
+            case sysrecover::StagedTaskState::Ok: name = "ok"; break;
+            case sysrecover::StagedTaskState::MissingNew: name = "missing-new"; break;
+            case sysrecover::StagedTaskState::NoContract: name = "no-contract"; break;
+            case sysrecover::StagedTaskState::NoBootEntry: name = "no-boot-entry"; break;
+            default: break;
+        }
+        std::printf("staged: %s (%s)\n", name, detail.c_str());
+        if (st == sysrecover::StagedTaskState::Ok ||
+            st == sysrecover::StagedTaskState::None)
+            return 0;
+        return 3;
+    }
+    std::wstring logsDir = sysrecover::LogBaseDir() + L"\\logs";
+    sysrecover::LogInit(logsDir);
+    sysrecover::ProgressInit(logsDir);
+    // PIT-156（2026-10-18）：每次运行先归纳日志（救援残留里的日志先搬进日志根），
+    // **再**收痕迹、**最后**清散件 —— 顺序不能反：清理器要能整个删掉还原残留的
+    // C:\ZJRESTORE 壳，前提是里面的日志已被归纳/收集（分类保护程序的家/启动菜单，
+    // 见 relocate.cpp::ClassifyZjrResidue）。守卫（PE / 暂存待还原）见 relocate.cpp。
+    {
+        const std::string mig = sysrecover::MigrateLogsToLogHome();
+        if (!mig.empty()) sysrecover::LogInfo(mig);
+    }
+    // 自诊断与痕迹收集（用户 2026-10-03 规格）：启动即把 diag.txt/list.txt 写进 logs，
+    // 并收集各盘上我们留下的部署文件 —— 用户排错只需发 logs 文件夹。
+    // 磁盘表**只枚举一次**，diag/list/收集共用（问题 2，2026-10-12：每个盘符
+    // 各枚举一遍的话，插着慢速 USB2 盘时 CLI 启动也会跟着卡几十秒）。
+    // 枚举单独打点：它是最可能被慢盘拖住的一步（对每个 PhysicalDriveN 开句柄
+    // 发 IOCTL），现场拿日志一眼就能看出是不是它。
+    {
+        std::vector<sysrecover::DiskInfo> disks = sysrecover::EnumerateDisks();
+        sysrecover::StartupPhase("enumerate-disks");
+        sysrecover::WriteDiagFiles(logsDir, &disks);
+        sysrecover::CollectDeployArtifacts(logsDir + L"\\collected", 0, &disks);
+    }
+    sysrecover::StartupPhase("diag+collect");
+    // PIT-137（用户 2026-10-08 规格）：每次运行"收完即清"——黑匣子已进
+    // logs\collected，各盘根的散件立即清掉（不再到处乱放）。契约/引导文件不动。
+    sysrecover::CleanupStrayLogs();
+    sysrecover::StartupPhase("cleanup-stray");
+    // 救援层失败回执（黑匣子，用户 2026-10-04 规格 2）：上次还原失败且还没提示过
+    // → 启动就提醒（日志已收进 logs\collected）。P3（PIT-148）：A/B 类失败附
+    // "可一键重试"提示（GUI 里是按钮；CLI 静默场景走 GUI 或重新执行 restore）。
+    {
+        sysrecover::RescueNotice notice = sysrecover::CheckLastRescueFailure();
+        if (!notice.msg.empty()) {
+            std::fprintf(stderr, "%s\n", W2U8(notice.msg).c_str());
+            if (notice.retryable)
+                std::fprintf(stderr, "%s\n",
+                             sysrecover::Tr(
+                                 "（可在图形界面选择「一键重试」，或重新执行 "
+                                 "restore）"));
+        }
+    }
+    // A 引擎残留分流（0.7，用户 2026-10-09 规格；决策表 docs/23 §5）：
+    //   Delete → 立即删；Reuse/Redo → 只记日志（还原 swap 分支再接着处理）；
+    //   AskUndo → 询问（PIT-139：「返回旧系统」= 暂存契约 + 重启进救援层；
+    //   **--yes 不再静默撤销** —— 撤销会重启机器，只能由用户显式选，
+    //   提示改用 `SysRecover.exe returnold`；非控制台一律保留不动并警告）。
+    {
+        const bool yesFlag = Has(args, "--yes") || Has(args, "-y");
+        bool hasConsole = false;
+        {
+            DWORD mode = 0;
+            hasConsole = GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mode);
+        }
+        for (const auto& it : sysrecover::ScanSwapLeftovers()) {
+            const sysrecover::SwapLeftVerdict v =
+                sysrecover::DecideSwapLeftover(it);
+            const std::string tag =
+                std::string(it.isNew ? "~new" : "~old") +
+                std::string(" on ") + (char)it.drive + ":";
+            if (v.action == sysrecover::SwapLeftAction::Delete) {
+                sysrecover::LogInfo("swap leftover: " + tag +
+                                    " -> delete (" + v.reason + ")");
+                sysrecover::DeleteSwapLeftover(it);
+            } else if (v.action == sysrecover::SwapLeftAction::AskUndo) {
+                // 备返保留的 ~old（.zj-keepold）：--yes 也保留不动（保留是
+                // 用户当初的显式选择，绝不能被 --yes 静默改动）。
+                const bool keepOld = it.keepOldMarker && !it.isNew;
+                bool ret = false, del = false;
+                if (keepOld) {
+                    if (yesFlag) {
+                        std::fprintf(stderr,
+                                     Tr("[残留] %s 备返旧系统保留不动（--yes）\n"),
+                                     tag.c_str());
+                    } else if (hasConsole) {
+                        std::fprintf(stderr,
+                                     Tr("检测到备返保留的旧系统 %s：%s\n"
+                                        "  r = 返回旧系统（暂存并重启），d = 删除（释放空间），"
+                                        "其它键 = 保留不动\n"
+                                        "选择 [keep]: "),
+                                     tag.c_str(), v.reason.c_str());
+                        char line[32] = {0};
+                        if (std::fgets(line, sizeof(line), stdin)) {
+                            ret = (line[0] == 'r' || line[0] == 'R');
+                            del = !ret && (line[0] == 'd' || line[0] == 'D');
+                        }
+                    } else {
+                        std::fprintf(stderr,
+                                     Tr("[残留] %s 备返旧系统保留不动（非交互式运行）\n"),
+                                     tag.c_str());
+                    }
+                } else if (yesFlag) {
+                    // PIT-139：不再 --yes 自动撤销。撤销 = 重启进救援层，
+                    // 静默触发会让批量脚本把机器重启，所以只提示。
+                    std::fprintf(stderr,
+                                 Tr("[残留] %s 保留不动（--yes 不会自动重启；"
+                                    "如需返回旧系统请运行: SysRecover.exe returnold）\n"),
+                                 tag.c_str());
+                    sysrecover::LogInfo("swap leftover kept (--yes): " + tag +
+                                        " (" + v.reason + ")");
+                } else if (hasConsole) {
+                    std::fprintf(stderr,
+                                 Tr("检测到还原残留 %s：%s\n"
+                                    "  y = 返回旧系统（暂存并重启），其它键 = 保留不动\n"
+                                    "选择 [y/N]: "),
+                                 tag.c_str(), v.reason.c_str());
+                    char line[32] = {0};
+                    if (std::fgets(line, sizeof(line), stdin))
+                        ret = (line[0] == 'y' || line[0] == 'Y');
+                } else {
+                    std::fprintf(stderr,
+                                 Tr("[残留] %s 保留不动（非交互式运行）：%s\n"),
+                                 tag.c_str(), v.reason.c_str());
+                    sysrecover::LogInfo("swap leftover kept (non-interactive): " +
+                                        tag + " (" + v.reason + ")");
+                }
+                if (ret) {
+                    // 按盘符定位（SwapLeftInfo 只记盘符）→ 走 StageReturnOld。
+                    sysrecover::PartitionInfo target;
+                    bool found = false;
+                    for (const auto& dd : sysrecover::EnumerateDisks())
+                        for (const auto& pp : dd.parts)
+                            if (pp.letter.size() == 1 &&
+                                ::towupper(pp.letter[0]) ==
+                                    ::towupper(it.drive)) {
+                                target = pp;
+                                found = true;
+                            }
+                    if (!found) {
+                        std::fprintf(stderr,
+                                     Tr("找不到 %c: 分区，保留不动。\n"),
+                                     (char)it.drive);
+                        continue;
+                    }
+                    std::string err;
+                    bool needReboot = false;
+                    int rc = sysrecover::StageReturnOld(target, err,
+                                                        &needReboot);
+                    if (rc != 0)
+                        std::fprintf(stderr, "%s\n", err.c_str());
+                    else
+                        CmdRebootNow();
+                } else if (del) {
+                    sysrecover::LogInfo("swap leftover: " + tag +
+                                        " -> delete (user chose, keepold)");
+                    sysrecover::DeleteSwapLeftover(it);
+                } else {
+                    sysrecover::LogInfo("swap leftover kept by user: " + tag +
+                                        (keepOld ? " (keepold)" : "") + " (" +
+                                        v.reason + ")");
+                }
+            } else {
+                sysrecover::LogInfo("swap leftover: " + tag + " -> " + v.reason);
+            }
+        }
+    }
+    SetConsoleCtrlHandler(OnCtrl, TRUE);  // Ctrl+C → 干净取消（备份/还原应用）
+    std::string cmdline = "cmd:";
+    for (const auto& a : args) {
+        cmdline += " ";
+        cmdline += a;
+    }
+    sysrecover::LogInfo(cmdline);
+    // 启动耗时自检（进程创建 → 命令分发）：排障用，设 `SYSRECOVER_STARTUP_TIMING=1` 打开。
+    if (sysrecover::StartupTimingEnabled())
+        sysrecover::LogInfo("startup: " +
+                            std::to_string(sysrecover::MsSinceProcessStart()) +
+                            " ms (process -> dispatch)");
+    if (args[0] == "version")
+        return CmdVersion();
+    if (args[0] == "diag") {
+        for (const auto& s : args)
+            if (s == "--zip")
+                return CmdDiagZip(args);  // diag --zip [--out x.zip]
+        return CmdDiag();
+    }
+    if (args[0] == "support")
+        return CmdSupport(args);
+    if (args[0] == "list")
+        return CmdList(args);
+    if (args[0] == "scan-ea")
+        return CmdScanEa(args);
+    if (args[0] == "backup")
+        return CmdBackup(args);
+    if (args[0] == "restore")
+        return CmdRestore(args);
+    if (args[0] == "verify")
+        return CmdVerify(args);
+    if (args[0] == "repair-boot")
+        return CmdRepairBoot(args);
+    if (args[0] == "returnold")
+        return CmdReturnOld(args);
+    if (args[0] == "images")
+        return CmdImages(args);
+    if (args[0] == "extract")
+        return CmdExtract(args);
+    if (args[0] == "export-drivers")
+        return CmdExportDrivers(args);
+    if (args[0] == "history")
+        return CmdHistory(args);
+    if (args[0] == "shortcut")
+        return CmdShortcut(args);
+    return Usage();
+}

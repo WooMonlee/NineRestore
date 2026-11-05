@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SysRecover 主窗口（经典 Duilib，1:1 对齐老项目 MainWindow.xaml / 界面1.png）。
+     几何值 = 对 界面1.png 的逐像素实测（绝对坐标 - 2，即面板内部坐标系）。
+     ★ 2026-09-17：整窗宽度由 870 收窄到 745（-125）：所有「靠右锚定」的元素
+       右边界与左边界各 -125，靠左元素不动。见 docs/ui-design.md §6 与
+       src/gui/ui_skin.cpp、src/gui/main_form.cpp ApplyModeUi()。
+
+     经典 Duilib 语义提醒（与 nim_duilib / WPF 不同，详见 docs/25-PIT坑位册.md）：
+       1) float 子控件：pos="left,top,right,bottom"（后两个是右下角坐标，不是宽高）
+       2) 控件级圆角用 borderround="cx,cy"（椭圆直径 = 2×半径），roundcorner 只认 <Window>
+       3) inset 是「给子元素的内边距」，不是外边距
+       4) Button/Combo 无图回退：DoPaint 继承自 CControlUI，靠 bkcolor/border 才看得见
+       5) 字体必须用 <Font id=N> 声明，font="N" 才有意义（自绘控件不走这套） -->
+<Window size="745,410" caption="0,0,0,52" roundcorner="24,24" mininfo="745,410">
+  <Font id="1" name="Microsoft YaHei UI" size="14" />
+  <Font id="2" name="Microsoft YaHei UI" size="15" />
+
+  <!-- 最外层 #EEF1F6 = 窗口圆角处的露底色（1px 环） -->
+  <VerticalLayout bkcolor="#FF000000" inset="1,1,1,1">
+
+    <!-- 面板：#FFFFFF + 1px #DFE5EE 边框 + 圆角 12（borderround = 直径 24） -->
+    <VerticalLayout name="Panel" bkcolor="#FFFFFFFF" bordersize="1" bordercolor="#FFE1E7EF" borderround="24,24" inset="1,1,1,1">
+      <!-- Content：浮动定位原点（绝对 (2,2)，尺寸 741x406） -->
+      <VerticalLayout name="Content">
+
+        <!-- ══════ 顶栏（蓝色渐变，高 52） ══════ -->
+        <TopBar float="true" pos="0,0,741,52" />
+
+        <TabOption   name="ModeRestore" float="true" pos="17,2,127,44"  text="文件>系统" icon="restore" group="true" selected="true" bold="true" />
+        <TabOption   name="ModeBackup"  float="true" pos="142,2,252,44" text="系统>文件" icon="backup"  group="true" bold="true" />
+        <TitleLabel  float="true" pos="316,0,618,52" text="九转还原" />
+
+        <WinBtn name="MinBtn"   float="true" pos="618,0,658,51" glyph="min" />
+        <WinBtn name="MaxBtn"   float="true" pos="659,0,699,51" glyph="max" />
+        <WinBtn name="CloseBtn" float="true" pos="700,0,740,51" glyph="close" />
+
+        <!-- ══════ 第一步卡片（白卡，y64..140） ══════ -->
+        <VerticalLayout name="Card1" float="true" pos="16,64,725,140" bkcolor="#FFFFFFFF" bordersize="1" bordercolor="#FFF4F6F9" borderround="20,20" />
+        <SkinLabel name="Step1Badge" float="true" pos="30,88,92,111" text="第一步" bkcolor="#FFE08A2E" borderround="8,8" color="#FFFFFFFF" fontsize="13" align="center" />
+        <SkinButton name="BrowseBtn" float="true" pos="100,77,240,115" text="浏览系统镜像" fontsize="14" bkcolor="#FFFFFFFF" bordercolor="#FFEEF1F6" borderround="14,14" textcolor="#FF1B2432" shortcut="B" />
+        <!-- ImagePath 缩短到 630：右边让位给「搜索」（2026-09-30 用户规格）。
+             搜索规则见 src/gui/imgsearch.h；备份模式隐藏按钮（ApplyModeUi） -->
+        <SkinEdit   name="ImagePath" float="true" pos="249,77,630,115" fontsize="14" bkcolor="#FFFFFFFF" bordercolor="#FFC9D6F2" borderround="16,16" textcolor="#FF1B2432" nativebkcolor="#FFFFFFFF" textpadding="10,9,10,9" />
+        <SkinButton name="SearchBtn" float="true" pos="639,77,710,115" text="搜索" fontsize="14" bkcolor="#FFFFFFFF" bordercolor="#FFEEF1F6" borderround="14,14" textcolor="#FF1B2432" shortcut="S"
+                tooltip="扫描附近的 .esd/.wim 镜像并自动填入最新一个；点击输入框可从已找到的结果中选择" />
+        <!-- 「ESP」勾选（备份专属，2026-09-30 用户规格）：2026-09-30 二次调整——
+             与第三步的「类型」下拉**互换位置**：ESP 移到原「格式：」处（第三步），
+             按模式互斥显示（ApplyModeUi）。无 group → 独立开关，不与「静默模式」
+             互相取消（COptionUI 只有 m_sGroupName 非空才进组）。
+             shortcut：2026-10-11 二轮由 E 改 **P** —— Alt+E 归主按钮「开始」
+             （用户拍板，备份模式两个 E 只能留一个）；P 落在词内 E S P 的 P 上
+             （DrawShortcutGroup 词内画线），Alt+P 切换本开关。 -->
+        <GlyphCheck name="EspChk" float="true" pos="388,298,510,331" text="同时备份ESP" visible="false" shortcut="P"
+                tooltip="备份时把ESP分区一并写入镜像（子镜像名ESP）；恢复系统时将自动把ESP一并恢复到ESP分区。" />
+        <!-- 2026-10-02 已删除「允许降级」选项：目录写会系统性丢/篡改 Windows 元数据
+             （ACL/属性/ADS/短名/创建时间/重解析点，见 PIT-102），不提供降级方案 ——
+             block 失败即明确报错（fail-closed），提示改用 PE 就地还原。 -->
+        <SkinLabel name="NoteLabel" float="true" pos="112,118,232,132" text="镜像说明：" color="#FF5F6C80" fontsize="13" align="right" />
+
+        <!-- ══════ 第二步卡片（蓝卡，y149..284） ══════ -->
+        <VerticalLayout name="Card2" float="true" pos="16,149,725,284" bkcolor="#FFE6EEFF" bordersize="1" bordercolor="#FFF8F8FB" borderround="20,20" />
+        <SkinLabel name="Step2Badge" float="true" pos="30,160,92,183" text="第二步" bkcolor="#FFE08A2E" borderround="8,8" color="#FFFFFFFF" fontsize="13" align="center" />
+        <SkinLabel name="PartTitle" float="true" pos="102,164,300,182" text="系统安装位置" color="#FF1B2432" fontsize="13" />
+        <SkinLabel name="PartHint"  float="true" pos="189,164,575,182" text="选择要安装恢复镜像的目标分区（移动盘已隐藏）" color="#FF5F6C80" fontsize="13" />
+
+        <!-- 表头带 #E8EFFB（y191..222）+ 四列表头 -->
+        <Control   name="TableHead" float="true" pos="33,191,710,223" bkcolor="#FFE8EFFB" />
+        <SkinLabel name="Th1" float="true" pos="87,191,180,223"  text="盘符•系统类型" color="#FF5F6C80" fontsize="13" bold="true" />
+        <SkinLabel name="Th2" float="true" pos="292,191,360,223" text="磁盘"           color="#FF5F6C80" fontsize="13" bold="true" />
+        <SkinLabel name="Th3" float="true" pos="399,191,440,223" text="分区"           color="#FF5F6C80" fontsize="13" bold="true" />
+        <SkinLabel name="Th4" float="true" pos="472,191,570,223" text="容量 · 可用"    color="#FF5F6C80" fontsize="13" bold="true" />
+
+        <PartitionCombo name="PartitionBox" float="true" pos="33,228,710,271" bkcolor="#FFFFFFFF" bordersize="1" bordercolor="#FFC9D6F2" borderround="16,16" textpadding="0,0,0,0" />
+        <SkinLabel name="PartLoadingText" float="true" pos="45,240,300,258" text="正在读取分区信息……" color="#FF98A2B3" fontsize="13" visible="false" />
+
+        <!-- ══════ 第三步行（无卡片，y293..332） ══════ -->
+        <SkinLabel name="Step3Badge" float="true" pos="30,301,92,324" text="第三步" bkcolor="#FFE08A2E" borderround="8,8" color="#FFFFFFFF" fontsize="13" align="center" />
+        <!-- 主按钮：shortcut="E"（2026-10-11 二轮，用户拍板）= Alt+E 开始
+             备份/开始恢复（两模式同一位置同一字母）；回车不再触发开始
+             （main_form.cpp 的 WM_KEYDOWN 处理只吞「焦点在主按钮上」的回车）。
+             与 EspChk 的 P 不冲突（同一行 P/E 各一）。 -->
+        <SkinButton name="MainAction" float="true" pos="105,296,225,335" text="开始恢复" fontsize="16" bold="true" bkcolor="#FFE2E6EE" bordercolor="#FFE4E8EF" borderround="12,12" textcolor="#FF9AA3B2" enabled="false" shortcut="E" />
+        <!-- tooltip：鼠标悬停解释（Win32 Tooltip，300px 自动换行；LoadSkinXml 会翻属性值） -->
+    <GlyphCheck name="Silent" float="true" pos="248,302,330,326" text="静默" shortcut="Q"
+                tooltip="不弹任何确认框，直接暂存任务并重启（无人值守/批量部署用）" />
+    <!-- 「备返」勾选已取消（2026-10-14 用户规格：客户抱怨太占位置）。
+         保留旧系统的能力改由还原确认框的「还原后重启」选项隐含提供
+         （A 引擎 swap + keepOld=true，仅写标记、不再部署程序/快捷方式）。 -->
+    <!-- 「异机」勾选框（还原模式专属，2026-10-21，0.9）：仅 Win10/11。
+         勾选后自动使用程序目录 `Drivers\` 下的驱动（有 .inf 就注入），
+         没有则只启用内置启动存储驱动（零体积）。 -->
+    <!-- 「使用异机还原」勾选框（还原模式专属，2026-10-21，0.9）：仅 Win10/11。
+         2026-10-27 用户规格：控件本体**隐藏**，开关移进「更多功能>>」菜单，
+         状态仍由本控件（COptionUI 派生，IsSelected 可用）持有。 -->
+    <GlyphCheck name="Universal" float="true" pos="336,302,398,326" text="异机" shortcut="U" visible="false"
+                tooltip="异机还原（仅 Win10/11）：自动使用程序目录 Drivers 文件夹里的驱动；没有则只启用内置启动驱动" />
+    <!-- 「修复引导」（还原模式专属，2026-10-20 用户规格）：等价于命令行
+         repair-boot —— 自动找系统盘与 ESP，bcdboot 重建并校验引导。
+         2026-10-27 起移进「更多功能>>」菜单，控件隐藏、仅作代码入口。 -->
+    <SkinButton name="FixBootBtn" float="true" pos="471,298,541,331" text="修复引导" fontsize="14" bkcolor="#FFFFFFFF" bordercolor="#FFFFFFFF" borderround="14,14" textcolor="#FF1B2432" shortcut="R" visible="false"
+            tooltip="修复 Windows 引导（自动找系统盘与 ESP，重建启动文件）" />
+    <!-- 「打包日志」按钮（还原模式专属，2026-10-03 用户规格；2026-10-27 改名）：
+         一键搜集 各盘日志 + explorer 转储 + 事件日志 → 打包到桌面；
+         结果框里可重启进/出安全模式。 -->
+    <SkinButton name="LogBtn" float="true" pos="340,298,438,331" text="打包日志" fontsize="14" bkcolor="#FFFFFFFF" bordercolor="#FFFFFFFF" borderround="14,14" textcolor="#FF1B2432" shortcut="L"
+            tooltip="搜集还原日志与诊断信息并打包到桌面（含 explorer 转储、事件日志）" />
+        <SkinLabel name="FormatLabel" float="true" pos="350,302,388,326" text="格式：" color="#FF1B2432" fontsize="13" align="right" visible="false" />
+        <!-- 「类型」下拉（备份专属，2026-09-30 用户规格）：2026-09-30 二次调整——
+             从第三步移到第一步「浏览」右侧（与「搜索」按钮同位置同尺寸 71×38）；
+             收起框固定显示「类型」(collapsedtext)，展开仍是原来的三个格式选项。
+             shortcut="T"（2026-10-11 用户规格）：Alt+T 弹出下拉（WM_SYSCHAR →
+             CComboUI::Activate）；收起框字母 T + 下划线由 CTextItemUI::DrawItemText
+             画（取父下拉的 shortcut）。还原模式 FormatBox 隐藏 → Alt+T 不触发。 -->
+        <Combo name="FormatBox" float="true" pos="639,77,710,115" bkcolor="#FFFFFFFF" bordersize="1" bordercolor="#FFC9D6F2" borderround="16,16" textpadding="0,0,0,0" visible="false" shortcut="T"
+                tooltip="备份格式：esd(慢)=慢速压缩、体积最小；wim(中)=正常大小；wim(快)=最快、体积最大">
+          <TextItem text="esd(慢)" height="30" collapsedtext="类型" />
+          <TextItem text="wim(中)" height="30" collapsedtext="类型" />
+          <TextItem text="wim(快)" height="30" collapsedtext="类型" />
+        </Combo>
+        <!-- 「更多功能M>>」下拉按钮（还原模式专属，2026-10-27 用户规格）：
+             把原来散在第三行的「异机」「修复引导」「清除菜单」收进菜单，
+             并新增「镜像检查」（全量校验 wim/esd）。原生 TrackPopupMenu。
+             2026-10-27 需求 1：文案由「更多功能>>」改为「更多功能M>>」—— 快捷键
+             字母 M 写进词内（skin 文案即最终显示，ShortcutHit 命中词内只画下划线、
+             不再追加尾随字母，见 ui_skin.cpp::ShortcutPrefixW）。 -->
+        <SkinButton name="MoreBtn" float="true" pos="570,298,721,331" text="更多功能M>>" fontsize="14" bkcolor="#FFFFFFFF" bordercolor="#FFFFFFFF" borderround="14,14" textcolor="#FF1B2432" shortcut="M"
+                tooltip="更多功能：使用异机还原 / 修复引导 / 清除启动中还原菜单 / 镜像检查" />
+        <!-- 「安装到启动」（还原模式专属，2026-10-27 由「安装菜单」改名）：
+             仅负责安装；已安装时置灰，删除入口统一在「更多功能>>」里。 -->
+        <SkinButton name="BootMenuBtn"   float="true" pos="446,298,562,331" text="安装到启动" fontsize="14" bkcolor="#FFFFFFFF" bordercolor="#FFFFFFFF" borderround="14,14" textcolor="#FF1B2432" shortcut="N" />
+        <!-- 备份模式专用：占用还原模式按钮的位置（还原模式下不显示）。
+             选中即把本进程 CPU 硬上限设成所选值（Windows Job 对象，见 cpucap.cpp）。
+             shortcut="C"（2026-10-11 二轮）：C=CPU 语义；备份模式下「更多功能」
+             隐藏 → 两模式都无冲突。收起框画法同
+             CTextItemUI::DrawShortcutGroup（选「CPU 50%」时 C 画在词内）。 -->
+        <Combo name="CpuCapBox" float="true" pos="530,298,612,331" bkcolor="#FFFFFFFF" bordersize="0" bordercolor="#FFFFFFFF" borderround="14,14" textpadding="0,0,0,0" visible="false" shortcut="C"
+                tooltip="备份时把程序 CPU 占用率限制在所选值以内（随时可改）">
+          <TextItem text="不限速" height="30" align="center" />
+          <TextItem text="CPU 75%" height="30" align="center" />
+          <TextItem text="CPU 50%" height="30" align="center" />
+          <TextItem text="CPU 25%" height="30" align="center" />
+        </Combo>
+
+        <!-- ══════ 状态栏（分隔线 1px + #FAFBFE，y370..405） ══════ -->
+        <Control float="true" pos="0,370,741,371" bkcolor="#FFEEF1F6" />
+        <Control float="true" pos="0,371,741,406" bkcolor="#FFFAFBFE" />
+        <SkinLabel name="StatusText" float="true" pos="17,371,196,406" text="执行进度" color="#FF5F6C80" fontsize="13" />
+    <!-- 进度条只在任务执行中显示（ShowProgress）：静止时整行让给状态文字，
+         否则状态文字会被 179px 的 StatusText 卡住、并被进度条横穿（中英都溢出）。 -->
+    <RoundProgress name="Progress" float="true" pos="200,385,560,392" value="0" visible="false" />
+    <!-- 异机还原驱动注入阶段（0.9.33）：主进度已 100%，再用一条独立小进度条
+         表示程序仍在工作；具体阶段写在 StatusText，避免 100% 后像死机。 -->
+    <RoundProgress name="PostProgress" float="true" pos="200,397,560,404" value="0" visible="false" />
+    <SkinLabel name="PercentText" float="true" pos="566,371,620,406" text="" color="#FF5F6C80" fontsize="13" align="right" visible="false" />
+        <!-- 右下角「讨论」链接（用户规格 2026-09-23）。注意两点踩过的坑：
+             ① 必须避开 PercentText（它声明在后=在顶层，会抢走点击 → 链接放它右边）；
+             ② 不能用全透明 bkcolor：ui_skin.cpp:699 把 0 当"未设置"→画成白底 ✗，
+                这里用状态栏同色 #fafbfe（视觉隐形，hover 时 tint 一下仍能看出反馈）。
+             URL 在 src/gui/main_form.cpp 的 kSiteUrl。 -->
+        <SkinButton name="SiteLink" float="true" pos="663,374,736,402" text="讨论" fontsize="13" bkcolor="#FFFAFBFE" bordercolor="#FFFAFBFE" textcolor="#FF2B5CE0" shortcut="D" />
+
+        <!-- 备份模式备注输入（还原模式隐藏） -->
+        <SkinEdit name="NoteInput" float="true" pos="249,116,710,136" fontsize="14" bordercolor="#FFC9D6F2" underline="true" textcolor="#FF1B2432" nativebkcolor="#FFFFFFFF" textpadding="10,5,10,5" visible="false" shortcut="N" />
+
+        <!-- 子镜像下拉（还原模式显示在备注行）：无外框，只在下方留一根待输入横线
+             （老图实测「镜像说明：」文字在 y120..131，其右侧无输入框；
+               横线收在第一步卡片内：卡片底边 y142，此处底线 y137） -->
+        <Combo name="ImageIndexBox" float="true" pos="249,116,710,136" textpadding="0,0,0,0" />
+        <Control float="true" pos="249,135,710,136" bkcolor="#FFC9D6F2" />
+        <SkinLabel name="NoteText" float="true" pos="560,118,710,132" text="" color="#FF5F6C80" fontsize="13" />
+
+      </VerticalLayout>
+    </VerticalLayout>
+  </VerticalLayout>
+</Window>

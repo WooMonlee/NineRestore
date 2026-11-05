@@ -1,0 +1,120 @@
+#pragma once
+// 还原任务暂存：restore-task.json + restore-task.conf（key=value sidecar）
+//             + 目标分区根目录 _zjresy*.log（restore.sh 主契约）。
+// 字段契约见 AGENTS.md §5，改字段需双端发版（contract_version=1）。
+#include <cstdint>
+#include <string>
+
+namespace sysrecover {
+
+struct RestoreTask {
+    // 任务动作（PIT-139，2026-10-13）："restore"=还原（默认）；
+    // "returnold"=返回旧系统（A 引擎 keepOld 备返的撤销，方案 C）——
+    //   Windows 侧只暂存 + 部署引导 + 单次启动 + 重启，**目录反向交换一律在
+    //   Linux 救援层完成**（Windows 里改名正在运行的系统树不可回滚，见 docs/23 §5）。
+    // 只是**新增取值**、不是新增字段 → 增量键，不升 contract_version；
+    // 旧救援层不认识 returnold 会落进 engine=swap → zjswap.sh 查不到 ~new/.zj-done
+    // → exit 2 报"old system untouched"（fail-closed，绝不 mkntfs）。
+    std::string action = "restore";
+    std::wstring imagePath;      // 镜像绝对路径
+    std::wstring imagePartGuid;  // 镜像所在分区 GUID（MBR 下可空）
+    std::wstring imageRelPath;   // 镜像相对路径（正斜杠，供 Linux 侧）
+    int imageIndex = 1;
+    // ESP 子镜像在镜像文件里的 index（方案 C，2026-09-30）：0=镜像里没有。
+    // Windows 暂存时从镜像内容发现（名含 "ESP"），写进 conf + _zjresy 日志；
+    // 救援层 apply 完主系统后把该子镜像恢复到 ESP 分区（纯增量键，不升
+    // contract_version：老任务缺键 → 救援层当 0 跳过，两边互相兼容）。
+    int espIndex = 0;
+    // EA 修复子镜像在镜像文件里的 index（PIT-122，2026-10-06）：0=镜像里没有。
+    // Linux 侧 wimlib apply 丢 Windows EA（PIT-120）；备份时把带 EA 的文件
+    // （路径+名字+值）打包成 eapack.dat 并入主镜像为子镜像 "ZJEA"；Windows
+    // 暂存时从镜像内容发现后写进 conf + _zjresy 日志；救援层把它连同补写器
+    // 投放进目标并安装首启钩子（纯增量键，不升 contract_version，同 esp_index）。
+    int eaIndex = 0;
+    // 加密镜像（ZJENC1）专用：Windows 暂存阶段已把 ESP/EA 子镜像解到
+    // **目标分区**的相对目录（Linux 救援层读不了加密容器，只做拷贝）。
+    // 空 = 旧行为（救援层用 wimlib 直接 apply esp_index/ea_index）。
+    // 增量键，不升 contract_version。
+    std::wstring espFixDir;
+    std::wstring eaFixDir;
+    // 镜像文件字节数（1019 案，2026-10-19）：救援层"契约认证"用 —— 与暂存侧
+    // 完全一致才走快路径（跳过救援层自带的重解析点扫描）。增量键。
+    uint64_t imageSize = 0;
+    // 暂存侧"不可写回重解析点"预检结果（1019 案）：-1=未扫描（老任务/A 引擎）；
+    // 0=已扫描且干净（救援层信任并跳过重扫）；2=扫描不可用（救援层兜底自行
+    // 扫描，fail-closed）。增量键，不升 contract_version（老任务缺键→救援层扫描）。
+    int reparseScan = -1;
+    // 暂存侧 EFS 加密内容预检结果（1019 案 W2，2026-10-19）：-1=未扫描
+    // （老任务/A 引擎）；0=已扫描且干净；2=扫描不可用。语义同 reparseScan ——
+    // 救援层 fast path 要求**两个键都是 0**（0.7.70 版 exe 只写 reparse_scan，
+    // 缺 efs_scan → 救援层全量扫描，防"旧暂存证书"漏掉 EFS）。
+    // Linux wimlib 无法还原 EFS（实测 apply rc=0 但加密文件变 0 字节）。
+    // 增量键，不升 contract_version。
+    int efsScan = -1;
+    std::wstring targetGuid;     // 目标分区 GUID（MBR 下可空）
+    uint64_t targetOffset = 0;
+    uint64_t targetSize = 0;
+    std::wstring targetDiskSerial;
+    int targetDisk = 0;
+    int targetPart = 0;
+    std::string ptType = "mbr";  // mbr | gpt
+    bool repairBoot = true;
+    uint32_t partCount = 1;
+    // 还原引擎（0.7，docs/23）：""/block = B 引擎（Linux apply）；swap = A 引擎
+    // （救援层只做改名交换，不 apply —— 见 bootfiles/zjswap.sh）。
+    std::string engine;
+    // 备返（PIT-122 后 A 引擎保留 ~old）：true = 交换后保留 ~old + 管理快捷方式；
+    // false = 开机 RunOnce 静默删 ~old。Windows 侧消费（PIT-148 一键重试用），
+    // Linux 救援层不读 —— 增量键，不升 contract_version。
+    bool keepOld = false;
+    // PIT-211：Linux 侧目标处理方式：format（默认 mkntfs）| keep（保留文件系统，
+    // 清空内容后 apply）。增量键，不升 contract_version。
+    std::string targetMode = "format";
+    // PIT-211：还原后要设置的计算机名（B 引擎由首启助手落地；空 = 不改）。
+    std::wstring computerName;
+    // _zjresy 恢复日志附加字段（对齐旧 C# WriteRestoreLog，Phase 5 补）
+    std::wstring targetDiskName;   // 磁盘型号
+    uint64_t targetDiskSize = 0;   // 整盘字节数
+    std::wstring targetFs;         // 目标文件系统（NTFS...）
+    std::wstring targetVolLabel;   // 目标卷标
+    std::wstring softwarePath;     // 本程序 exe 全路径
+    // 诊断日志目录（PIT-059）：一般是软件所在目录；软件在目标盘/只读介质上时
+    // 回退到数据盘 <数据盘>\ZJRESTORE。Linux 侧按它把日志写进去（成功后保留）。
+    std::wstring softwareDir;
+};
+
+// 写任务到 dir（json + conf 各一份）。成功返回 true。
+// conf 含 image_path 键（restore.sh 第 7 步 get image_path 依赖）。
+bool WriteRestoreTask(const std::wstring& dir, const RestoreTask& t,
+                      std::string& log);
+
+// —— 以下三个是**纯函数**（不碰文件系统），抽出来便于单元测试契约文本 ——
+// 任务 sidecar（key=value，Linux restore.sh 读）。
+std::string BuildTaskConf(const RestoreTask& t);
+// 任务的 JSON 形态（同内容，供 Windows 侧/GUI 读）。
+std::string BuildTaskJson(const RestoreTask& t);
+// _zjresy 恢复日志文本（主发现契约，AGENTS.md §5）。
+// isoTimestamp 由调用方给（便于测试；生产用当前本地时间）。
+std::string BuildRestoreLogText(const RestoreTask& t,
+                                const std::string& isoTimestamp);
+
+// 写 _zjresy{日时分}.log 到目标分区根目录，写前先清同模式旧文件。
+// letter=目标盘符（如 L"C"）。这是 restore.sh 的主发现契约：
+// Linux 侧扫描各分区根目录，含 action=restore 的日志所在分区即还原目标。
+// 失败返回 false（暂存流程应视为致命，缺日志则 Linux 侧找不到目标）。
+bool WriteRestoreLog(wchar_t letter, const RestoreTask& t, std::string& log);
+
+// 清掉**所有固定盘/可移动盘根目录**上的旧契约文件
+//（_zjresy*.log / restore-task.conf / restore-task.json）——用户 2026-10-04
+// 规格：暂存前清场，全系统只保留即将写入的唯一一份，杜绝救援层挑到别处残留
+// 日志把目标指错（参照机日志实证过该劫持）。不碰 <盘>\ZJRESTORE\ 与软件目录。
+// 返回删除的文件数。
+int CleanupStrayContracts(std::string& log);
+
+// 从 restore-task.conf 文本里取一个键的值（第一个匹配；找不到 → 空串）。
+// 纯逻辑（不碰文件系统），可单测。首字符 '#' 的行与空行跳过；值**不做 trim**
+//（路径可能带空格），只去掉行尾 \r。
+// 用途：GUI 判断"已安装的菜单项绑定的是哪个镜像/目标分区"（ops.cpp::ReadMenuBinding）。
+std::string TaskConfGet(const std::string& confText, const std::string& key);
+
+}  // namespace sysrecover

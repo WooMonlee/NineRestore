@@ -1,0 +1,146 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install MinGW-w64
+        shell: pwsh
+        run: |
+          choco install mingw --no-progress -y
+          $mingw = "C:\ProgramData\mingw64\mingw64"
+          if (-not (Test-Path "$mingw\bin\g++.exe")) {
+            $g = Get-ChildItem "C:\ProgramData" -Recurse -Filter g++.exe |
+                 Select-Object -First 1
+            if (-not $g) { throw "g++.exe not found after choco install" }
+            $mingw = Split-Path (Split-Path $g.FullName)
+          }
+          "MINGW64=$mingw" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "$mingw\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Build and test
+        shell: pwsh
+        run: |
+          $env:PYTHON = (Get-Command python).Source
+          $env:PYTHONUTF8 = "1"
+          $env:PYTHONIOENCODING = "utf-8"
+          mingw32-make -f Makefile SHELL=cmd.exe check
+          mingw32-make -f Makefile SHELL=cmd.exe all
+          python tools/smoke-cli.py dist/x64/SysRecover.exe
+
+      - name: Upload x64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SysRecover-x64-${{ github.sha }}
+          path: dist/x64
+          if-no-files-found: error
+  windows-x86:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install make
+        shell: pwsh
+        run: |
+          choco install mingw --no-progress -y
+
+      - name: Install i686 UCRT toolchain
+        shell: pwsh
+        run: |
+          # 产品 x86 构建使用 mingw-builds i686 UCRT（与 x64 同源、同 libc）；
+          # MSYS2 MINGW32 默认是 MSVCRT，与 third_party/ucrt 和本地工具链不一致。
+          $zip = Join-Path $env:RUNNER_TEMP "mingw32.7z"
+          $url = "https://github.com/niXman/mingw-builds-binaries/releases/download/14.2.0-rt_v12-rev0/i686-14.2.0-release-posix-dwarf-ucrt-rt_v12-rev0.7z"
+          Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+          $seven = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
+          if (-not $seven) { $seven = "C:\Program Files\7-Zip\7z.exe" }
+          New-Item -ItemType Directory -Path "C:\mingw32" -Force | Out-Null
+          & $seven x $zip -oC:\mingw32 -y | Out-Null
+          $g = Get-ChildItem "C:\mingw32" -Recurse -Filter i686-w64-mingw32-g++.exe |
+               Select-Object -First 1
+          if (-not $g) { throw "i686 UCRT compiler not found after extraction" }
+          $mingw = $g.Directory.Parent.FullName
+          "MINGW32=$mingw" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "$mingw\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Build x86
+        shell: pwsh
+        run: |
+          $env:PYTHON = (Get-Command python).Source
+          $env:PYTHONUTF8 = "1"
+          $env:PYTHONIOENCODING = "utf-8"
+          mingw32-make -f Makefile SHELL=cmd.exe ARCH=x86 all
+
+      - name: Upload x86 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SysRecover-x86-${{ github.sha }}
+          path: dist/SysRecover.exe
+          if-no-files-found: error
+
+  static:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install analyzers
+        shell: pwsh
+        run: |
+          choco install cppcheck shellcheck --no-progress -y
+
+      - name: Cppcheck
+        shell: pwsh
+        run: |
+          $cpp = "C:\Program Files\Cppcheck\cppcheck.exe"
+          $out = & $cpp --enable=warning,performance --inconclusive `
+            --platform=win64 --std=c++17 `
+            --suppress=missingIncludeSystem --suppress=missingInclude `
+            --inline-suppr `
+            -Isrc -Ithird_party/wimlib `
+            -Ithird_party/duilib-master/DuiLib `
+            -Ithird_party/duilib-master/DuiLib/Control `
+            -Ithird_party/duilib-master/DuiLib/Core `
+            -Ithird_party/duilib-master/DuiLib/Layout `
+            -Ithird_party/duilib-master/DuiLib/Utils src 2>&1
+          $out | Write-Host
+          if ($out -match ": error:") { exit 1 }
+
+      - name: ShellCheck
+        shell: pwsh
+        run: |
+          $sc = Get-ChildItem "C:\ProgramData\chocolatey" -Recurse -Filter shellcheck.exe |
+                Select-Object -First 1
+          if (-not $sc) { throw "shellcheck.exe not found" }
+          # Windows checkout may still materialize CRLF despite .gitattributes;
+          # ShellCheck treats literal \r as an error (SC1017). Normalize each
+          # script to LF before analysis so the gate checks content, not EOL.
+          $bad = $false
+          $files = @(
+            "bootfiles/zjrestore-lite.sh", "bootfiles/zjswap.sh",
+            "bootfiles/zjswap-undo.sh", "bootfiles/setup-swap.sh",
+            "bootfiles/zjlog.sh", "bootfiles/alpine/init"
+          )
+          foreach ($f in $files) {
+            $text = [IO.File]::ReadAllText((Join-Path $PWD $f)).Replace("`r`n", "`n")
+            $tmp = Join-Path $env:RUNNER_TEMP ((Split-Path $f -Leaf) + ".sh")
+            [IO.File]::WriteAllText($tmp, $text, [Text.UTF8Encoding]::new($false))
+            & $sc.FullName -S error $tmp
+            if ($LASTEXITCODE -ne 0) { $bad = $true }
+          }
+          if ($bad) { exit 1 }
+

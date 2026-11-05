@@ -1,0 +1,111 @@
+#include "pathutil.h"
+
+#include <windows.h>
+
+#include "selfarch.h"  // AppDir()（PIT-206 驱动导出目录）
+
+#include <cwctype>
+
+namespace sysrecover {
+namespace {
+
+std::wstring TrimSpaces(const std::wstring& s) {
+    size_t b = 0, e = s.size();
+    while (b < e && iswspace(s[b])) ++b;
+    while (e > b && iswspace(s[e - 1])) --e;
+    return s.substr(b, e - b);
+}
+
+}  // namespace
+
+bool IsVolumeRoot(const std::wstring& p0) {
+    std::wstring p = TrimSpaces(p0);
+    if (p.size() < 2 || p[1] != L':')
+        return false;
+    if (p.size() == 2)
+        return true;
+    return p.size() == 3 && (p[2] == L'\\' || p[2] == L'/');
+}
+
+std::wstring NormalizeVolumeRoot(const std::wstring& p0) {
+    if (!IsVolumeRoot(p0))
+        return p0;
+    std::wstring p = TrimSpaces(p0);
+    if (p[0] >= L'a' && p[0] <= L'z')
+        p[0] = static_cast<wchar_t>(p[0] - (L'a' - L'A'));
+    return p.substr(0, 2) + L"/";
+}
+
+std::wstring ParentDir(const std::wstring& path) {
+    size_t i = path.find_last_of(L"\\/");
+    if (i == std::wstring::npos)
+        return std::wstring();
+    if (i == 2 && path.size() > 2 && path[1] == L':')
+        return path.substr(0, 3);  // `D:\a.wim` → `D:\`（盘符根目录要带分隔符）
+    return path.substr(0, i);
+}
+
+bool MakeDirTree(const std::wstring& dir) {
+    if (dir.empty())
+        return false;
+    DWORD attr = GetFileAttributesW(dir.c_str());
+    if (attr != INVALID_FILE_ATTRIBUTES)
+        return (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    std::wstring parent = ParentDir(dir);
+    if (!parent.empty() && parent != dir && !MakeDirTree(parent))
+        return false;
+    if (!CreateDirectoryW(dir.c_str(), nullptr) &&
+        GetLastError() != ERROR_ALREADY_EXISTS)
+        return false;
+    return GetFileAttributesW(dir.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+
+bool IsPortableRuntime() {
+    wchar_t origin[MAX_PATH + 1] = {};
+    return GetEnvironmentVariableW(L"ZJ_ORIGIN_DIR", origin, MAX_PATH) > 0 &&
+           origin[0] != 0;
+}
+
+std::wstring PortableOriginDir() {
+    wchar_t origin[MAX_PATH + 1] = {};
+    if (GetEnvironmentVariableW(L"ZJ_ORIGIN_DIR", origin, MAX_PATH) <= 0 ||
+        !origin[0])
+        return std::wstring();
+    std::wstring d(origin);
+    while (!d.empty() && (d.back() == L'\\' || d.back() == L'/'))
+        d.pop_back();
+    return d;
+}
+
+std::wstring CurrentUserName() {
+    wchar_t buf[256] = {};
+    DWORD n = 256;
+    if (GetUserNameW(buf, &n) && buf[0]) return buf;
+    return L"User";
+}
+
+std::wstring DriversRoot() {
+    // PIT-212：单文件"加驱动"版把驱动打在**包内**（AppDir\Drivers）——
+    // 便携运行时也要优先用它，否则异机还原的"自动调用"找不到刚打进去的驱动。
+    const std::wstring inApp = AppDir() + L"\\Drivers";
+    if (GetFileAttributesW(inApp.c_str()) != INVALID_FILE_ATTRIBUTES)
+        return inApp;
+    wchar_t origin[MAX_PATH + 1] = {};
+    if (GetEnvironmentVariableW(L"ZJ_ORIGIN_DIR", origin, MAX_PATH) > 0 &&
+        origin[0]) {
+        std::wstring d(origin);
+        while (!d.empty() && (d.back() == L'\\' || d.back() == L'/'))
+            d.pop_back();
+        if (!d.empty()) {
+            const std::wstring cand = d + L"\\Drivers";
+            // 可写判定：能建目录（或已存在）才算
+            if (GetFileAttributesW(cand.c_str()) != INVALID_FILE_ATTRIBUTES ||
+                CreateDirectoryW(cand.c_str(), nullptr))
+                return cand;
+        }
+    }
+    return AppDir() + L"\\Drivers";
+}
+
+}  // namespace sysrecover

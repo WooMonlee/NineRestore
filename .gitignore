@@ -1,0 +1,99 @@
+# 构建产物（make package 可重建）
+dist/
+dist-x86/
+build/*.exe
+# 构建/会话临时产物（字符串账本 tools/extract-strings.py、冒烟输出、草稿等）
+build/*.tsv
+build/*.txt
+build/*.log
+build/*.ps1
+build/*.c
+build/gui-smoke/
+# 手工导出的发布 zip 快照（交付物以 dist/ 为准；zip/sha256/NOTES 不入库）
+/release/
+build-x86/
+*.o
+*.d
+*.a
+__pycache__/
+# 崩溃探针产物（make crash-test）
+tests/crash-out/
+# BIOS/MBR 里程碑快照（含整份源码+dist 副本，103MB；要入库就删掉这行）
+BIOS版OK/
+# build/duilib.mk 是构建清单（Makefile include 依赖），须入库
+
+# QEMU 测试台产物：脚本/README 入库，虚拟盘/下载/日志/解包产物一律不入库
+# （base/drill.raw 2GB、testdisk.raw 512MB，直接 add 会撑爆仓库）
+tools/vmtest/base/
+tools/vmtest/dl/
+tools/vmtest/logs/
+tools/vmtest/stage/
+tools/vmtest/drill-images/
+tools/vmtest/__pycache__/
+tools/vmtest/**/__pycache__/
+# 归档的演练脚本同款（graveyard 只进脚本；测试盘/日志不入库，base 单个 4GB）
+graveyard/tools/vmtest/base/
+graveyard/tools/vmtest/logs/
+
+# 本机会话/截图产物
+.claude/
+tools/ui/*.png
+tools/ui/out/
+# 仓库根的演练/截图残留（bootfiles/ 下的才是随包资产）
+/crop-*.png
+/shot-*.png
+/grldr
+/grldr.mbr
+/menu.lst
+/restore-task.conf
+
+# 调研原始 PDF（正文已转 ESD备份还原工具调研.txt 入库，避免重复二进制）
+ESD备份还原工具调研.pdf
+
+# MOK 签名私钥（不能入库；丢了老客户的 MOK 就换不了新签名）
+keys/
+
+# 构建工具下载（osslsigncode 等，用时自动下，不入库）
+tools/sb/dl/
+# 本机日志拷贝（排查用）
+log/
+
+# 本机杂项：打包/外部工具留下的文件（不属于项目 → 别误入库）
+/dist.7z
+# 本机系统镜像素材（用户 2026-09-30 说明：仅素材/测试用、不是程序源，不入库；
+# git add -A 曾因这些几 GB 大文件超时）—— 只锚定仓库根，不影响 third_party
+/*.esd
+/*.7z
+/aqtinstall.log
+# 本机工具链/运行时误放仓库根（msys64 有 6.3 万个文件，git add -A 曾因此超时）
+/msys64/
+/Python313/
+# opencode 会话导出（用户自己导的，几十 MB，不入库）
+/导出.json
+
+# 第三方源码：只保留**实际编译**的部分；演示程序/归档/未采用的库留在本机、不入库
+third_party/nim_duilib-main/
+third_party/nim_duilib-main.zip
+third_party/duilib-master.zip
+third_party/duilib-master/*Demo/
+third_party/duilib-master/ScrCapture/
+third_party/duilib-master/FileTree/
+third_party/duilib-master/bin/
+third_party/duilib-master/doc/
+third_party/duilib-master/TestApp1/
+
+
+# customer evidence bundles (large, private)
+customer-material (removed)/
+故障用户的资料/
+
+# local support bundles / crash dumps / test binaries
+SysRecover-logs-*.zip
+*.dmp
+tools/vmtest/e2e/*.exe
+tools/vmtest/e2e/*.log
+
+
+# ��Ŀ����ʱĿ¼��2026-11-02 �û������ʱ����/�ļ�һ�ɷ� temp������⣩
+temp/*
+!temp/.gitkeep

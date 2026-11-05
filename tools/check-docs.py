@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""check-docs.py — 一致性校验（接进 `make check`）。只读不改，不一致即退出码 1。
+
+借自 DreamGrain 的"开工核指针"思路（AGENTS §17）：把**机器可校验**的约定钉死，
+避免"改了 A 忘了同步 B"这类静默漂移。检查项：
+  1) src/common/version.h 的版本号是合法 SemVer；
+  2) SYSRECOVER_CONTRACT_VERSION 与 AGENTS.md / docs 里写的 contract_version 一致；
+     ⚠️ 写文档时**别把举例写成 `contract_version=<数字>`** —— 检查项 2 会把它当成"声明"，
+     与该处真实契约号不符即 FAIL。举例请写"把值写成 2"这种不带 `=` 的措辞。
+  3) 救援脚本 `get_task <键>` 读的每个键，Windows 侧（src/boot/task.cpp）都有写
+     —— 跨层契约（AGENTS §5）的两端字段对齐；
+  4) dist/version.json（若存在）与 version.h 一致；
+  5) 救援层握手常量 ZJ_CONTRACT（zjrestore-lite.sh）与 SYSRECOVER_CONTRACT_VERSION 一致
+     —— 契约升版只改一头 = 还原被 fail-fast 拦住（PIT-085 P2）。
+"""
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+VERSION_H = ROOT / "src" / "common" / "version.h"
+TASK_CPP = ROOT / "src" / "boot" / "task.cpp"
+RESCUE = [ROOT / "bootfiles" / "zjrestore-lite.sh",
+          ROOT / "bootfiles" / "alpine" / "init"]
+DOCS_CONTRACT = [ROOT / "AGENTS.md", ROOT / "docs" / "04-跨层契约.md",
+                  ROOT / "docs" / "25-PIT坑位册.md"]
+
+fails = []
+# dist/version.json 是**构建产物**（`make package` 才刷新）；`make check` 可能跑在打包之前，
+# 所以默认只**警告**；`--strict-dist` 时才当失败（`make package` 末尾用严格模式再核一次）。
+strict_dist = "--strict-dist" in sys.argv
+
+
+def read(p):
+    return p.read_text(encoding="utf-8", errors="replace")
+
+
+def check_semver(v):
+    if not re.fullmatch(r"\d+\.\d+\.\d+", v):
+        fails.append("version.h 版本号不是 SemVer: %r" % v)
+
+
+def main():
+    vh = read(VERSION_H)
+    m = re.search(r'SYSRECOVER_VERSION\s+"([^"]+)"', vh)
+    if not m:
+        fails.append("version.h 里找不到 SYSRECOVER_VERSION")
+        return report()
+    ver = m.group(1)
+    check_semver(ver)
+
+    m = re.search(r"SYSRECOVER_CONTRACT_VERSION\s+(\d+)", vh)
+    if not m:
+        fails.append("version.h 里找不到 SYSRECOVER_CONTRACT_VERSION")
+        return report()
+    cver = int(m.group(1))
+
+    # 2) contract_version 指针一致
+    for p in DOCS_CONTRACT:
+        if not p.exists():
+            fails.append("缺文档: %s" % p.relative_to(ROOT))
+            continue
+        for mm in re.finditer(r"contract_version\s*=\s*(\d+)", read(p), re.I):
+            if int(mm.group(1)) != cver:
+                fails.append("%s: contract_version=%s 与 version.h 的 %d 不一致"
+                             % (p.relative_to(ROOT), mm.group(1), cver))
+
+    # 3) 契约键：救援脚本读的 ⊆ Windows 侧写的
+    written = set()
+    if TASK_CPP.exists():
+        # 提取格式串里的 "key=" 键名（BuildTaskConf / BuildRestoreLogText）
+        written = set(re.findall(r'"([a-z_]+)=', read(TASK_CPP)))
+    if not written:
+        fails.append("没能从 task.cpp 提取到契约键（格式串变了吗？）")
+    read_keys = set()
+    for p in RESCUE:
+        if p.exists():
+            read_keys |= set(re.findall(r"get_task\s+([a-z_]+)", read(p)))
+    missing = sorted(read_keys - written)
+    if missing:
+        fails.append("救援脚本读了 Windows 侧没写的键: %s" % ", ".join(missing))
+
+    # 4) dist/version.json 与 version.h 一致（默认只警告，见上；--strict-dist 当失败）
+    vj = ROOT / "dist" / "version.json"
+    if vj.exists():
+        mm = re.search(r'"version"\s*:\s*"([^"]+)"', read(vj))
+        if mm and mm.group(1) != ver:
+            msg = ("dist/version.json=%s 与 version.h=%s 不一致（未重新 make package？）"
+                   % (mm.group(1), ver))
+            if strict_dist:
+                fails.append(msg)
+            else:
+                print("  WARN: " + msg)
+
+    print("OK  version=%s contract_version=%d 契约键 %d 个（救援读 %d 个）"
+          % (ver, cver, len(written), len(read_keys)))
+    # 5) 救援层握手常量与 version.h 一致（PIT-085 P2）
+    for p in RESCUE:
+        if not p.exists():
+            continue
+        mm = re.search(r"ZJ_CONTRACT\s*=\s*(\d+)", read(p))
+        if mm and int(mm.group(1)) != cver:
+            fails.append("%s: ZJ_CONTRACT=%s 与 version.h 的 %d 不一致（只改了一头？）"
+                         % (p.relative_to(ROOT), mm.group(1), cver))
+    # 6) AGENTS.md 体积闸门（2026-10-28，PIT-187）：它是"每次会话都注入上下文"的文件，
+    #    曾经因为把 PIT 正文堆在里面涨到 422 KB。PIT 正文一律写 docs/25，
+    #    §13 只加"活跃约束"一行 —— 超过 80 KB 直接失败，逼新内容去 docs/25。
+    agents = ROOT / "AGENTS.md"
+    if agents.exists():
+        kb = agents.stat().st_size / 1024.0
+        if kb > 80:
+            fails.append("AGENTS.md 过大（%.1f KB > 80 KB）：PIT 正文请追加到 "
+                         "docs/25-PIT坑位册.md，AGENTS §13 只登记活跃约束" % kb)
+    return report()
+
+
+def report():
+    if fails:
+        print("check-docs: FAIL")
+        for f in fails:
+            print("  - " + f)
+        return 1
+    print("check-docs: PASS")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
