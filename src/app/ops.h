@@ -45,6 +45,10 @@ struct RestoreRequest {
     //（用户 2026-10-17 规格：先搬日志回程序目录，再弹「是否删除旧系统」）；
     // false = 开机 RunOnce 静默删 ~old。
     bool keepOld = false;
+    // H4（1.0）：还原前做**全量校验**（wimlib 读全文件，默认关闭）。
+    // 默认只做毫秒级快速结构预检；打开后走 WimEngine::Verify，耗时与镜像大小成正比，
+    // 跳过时日志/结果页会写明"镜像未校验"。
+    bool verifyImage = false;
     // 异机还原（2026-10-21，0.9）：仅 Win10/11；A 引擎/PE 就地生效。
     // 最小化 = 启用 in-box 启动存储驱动；driverDir 非空 = 再注用户驱动包。
     bool universal = false;

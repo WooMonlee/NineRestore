@@ -4,6 +4,7 @@
 #include "common/logger.h"
 #include "common/relocate.h"
 #include "wim.h"
+#include "wim_precheck.h"
 
 #include <windows.h>  // WideCharToMultiByte（XML 是 UTF-16LE，见 ImageSize）
 
@@ -395,6 +396,92 @@ int WimEngine::Verify(const std::wstring& imagePath, ProgressFn progress) {
 // ⚠️ PIT-106（2026-10-03）：**不做全文件校验** —— PIT-101 曾把 wimlib_verify_wim
 // 并进这里，结果还原前的"测试镜像"对大镜像要扫十几分钟，用户无法忍受。
 // 全量校验只保留给显式入口：`--verify` / `verify` 命令（WimEngine::Verify）。
+int WimEngine::QuickPrecheck(const std::wstring& imagePath, std::wstring& why) {
+    why.clear();
+    HANDLE h = CreateFileW(imagePath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                           nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        why = Tr(L"无法打开镜像文件");
+        return -1;
+    }
+    LARGE_INTEGER fsz{};
+    GetFileSizeEx(h, &fsz);
+    const unsigned long long fileSize =
+        static_cast<unsigned long long>(fsz.QuadPart);
+    WimHeaderRaw hdr{};
+    DWORD rd = 0;
+    ReadFile(h, &hdr, sizeof(hdr), &rd, nullptr);
+
+    // 头部读全了才去读 XML；文件被截断时这里读不满，交给纯逻辑判 kShortFile。
+    bool xmlReadable = false;
+    bool xmlTooLarge = false;
+    std::string xml;
+    if (rd >= sizeof(hdr)) {
+        const unsigned long long xmlSize = WimResSize(hdr.xmlSize);
+        const unsigned long long xmlOff = hdr.xmlOffset;
+        if (xmlSize > 256ull * 1024 * 1024) {
+            xmlTooLarge = true;
+        } else if (xmlSize != 0 && xmlOff <= fileSize &&
+                   xmlSize <= fileSize - xmlOff) {
+            std::vector<unsigned char> raw(static_cast<size_t>(xmlSize));
+            LARGE_INTEGER off{};
+            off.QuadPart = static_cast<LONGLONG>(xmlOff);
+            SetFilePointerEx(h, off, nullptr, FILE_BEGIN);
+            DWORD got = 0;
+            if (ReadFile(h, raw.data(), static_cast<DWORD>(raw.size()), &got,
+                         nullptr) &&
+                got == raw.size()) {
+                // WIM 元数据是 UTF-16LE，转成 UTF-8 再找标签
+                const int need = WideCharToMultiByte(
+                    CP_UTF8, 0, reinterpret_cast<const wchar_t*>(raw.data()),
+                    static_cast<int>(raw.size() / 2), nullptr, 0, nullptr,
+                    nullptr);
+                if (need > 0) {
+                    xml.resize(static_cast<size_t>(need));
+                    WideCharToMultiByte(
+                        CP_UTF8, 0,
+                        reinterpret_cast<const wchar_t*>(raw.data()),
+                        static_cast<int>(raw.size() / 2), &xml[0], need,
+                        nullptr, nullptr);
+                }
+                xmlReadable = true;
+            }
+        }
+    }
+    CloseHandle(h);
+
+    const WimPrecheckOutcome o = CheckWimStructure(
+        fileSize, reinterpret_cast<const unsigned char*>(&hdr), rd,
+        xmlReadable, xmlTooLarge, xml);
+    if (o.ok)
+        return 0;
+    namespace R = wim_precheck_reason;
+    if (o.reason == R::kBadMagic)
+        why = Tr(L"不是有效的 WIM/ESD 镜像（文件头魔数不匹配）");
+    else if (o.reason == R::kBadVersion)
+        why = Tr(L"镜像版本不受支持");
+    else if (o.reason == R::kBadHeaderSize)
+        why = Tr(L"镜像头长度异常");
+    else if (o.reason == R::kNoImages)
+        why = Tr(L"镜像里没有任何子镜像");
+    else if (o.reason == R::kResourceOutOfRange)
+        why = Tr(L"镜像资源表越界（文件被截断或拷贝不完整）");
+    else if (o.reason == R::kXmlTooLarge)
+        why = Tr(L"镜像元数据异常大，拒绝继续");
+    else if (o.reason == R::kXmlUnreadable)
+        why = Tr(L"镜像元数据读取失败");
+    else if (o.reason == R::kXmlNotParsable)
+        why = Tr(L"镜像元数据不完整（XML 无法解析）");
+    else if (o.reason == R::kImageCountMismatch)
+        why = Tr(L"镜像元数据与头部声明的子镜像数量不一致");
+    else if (o.reason == R::kIntegrityInvalid)
+        why = Tr(L"镜像完整性表声明异常");
+    else
+        why = Tr(L"镜像文件过小或无法读取头部");
+    return -1;
+}
+
 int WimEngine::Probe(const std::wstring& imagePath, std::wstring& why) {
     why.clear();
     if (!inited_) {

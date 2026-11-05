@@ -225,6 +225,8 @@ private:
     std::wstring m_backupPath;    // 备份保存位置（与还原路径分离）
     // 备份加密（docs/30）：非空 = 下次备份写成 .zje 容器（只在本进程内存里）。
     std::wstring m_backupPassword;
+    // H4（1.0）：还原前全量校验（「更多功能>>」里的勾选项；默认关）。
+    bool m_restoreVerifyImage = false;
     std::wstring m_lastLoadedWim;  // 上次已解析过子镜像的路径（避免手动输入时反复解析）
     sysrecover::SystemDescription m_sysDesc;  // 运行中系统的描述（InitWindow 里取）
     int m_selPart = -1;

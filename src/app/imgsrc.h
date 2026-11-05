@@ -27,6 +27,10 @@ bool ImageIsEncrypted(const std::wstring& path);
 
 // ── 只读查询（加密镜像走容器 meta，不解正文）──
 int ImageProbe(const std::wstring& path, std::wstring& why);
+// H4（1.0）：镜像快速结构预检（格式化前的强制前置）。
+// 普通 WIM/ESD 走 WimEngine::QuickPrecheck；加密容器额外校验
+// bodyOffset+plainSize 不越过文件实际大小（截断的 .zje 同样拦得住）。
+int ImageQuickPrecheck(const std::wstring& path, std::wstring& why);
 int ImageList(const std::wstring& path, std::vector<ImageDesc>& out);
 // 子镜像未压缩内容量（A 引擎空间预检用）。
 int ImageContentSize(const std::wstring& path, int index,

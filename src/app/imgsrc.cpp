@@ -78,6 +78,49 @@ int ImageProbe(const std::wstring& path, std::wstring& why) {
     return 0;
 }
 
+// H4（1.0）：快速结构预检（格式化前的强制前置；毫秒级）。
+int ImageQuickPrecheck(const std::wstring& path, std::wstring& why) {
+    why.clear();
+    if (!ImageIsEncrypted(path)) {
+        WimEngine eng;
+        return eng.QuickPrecheck(path, why);
+    }
+    // 加密容器：meta 已由 ZjeReadMeta 校验（含 HMAC）；这里再核对正文是否被截断。
+    const std::wstring pwd = PasswordFor(path);
+    if (pwd.empty()) {
+        why = Tr(L"这是加密镜像，需要先输入密码");
+        return -1;
+    }
+    ZjeInfo info;
+    std::vector<ZjeImage> imgs;
+    std::wstring err;
+    if (ZjeReadMeta(path, pwd, &info, &imgs, err) != 0) {
+        why = err;
+        return -1;
+    }
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        why = Tr(L"无法打开镜像文件");
+        return -1;
+    }
+    LARGE_INTEGER fsz{};
+    GetFileSizeEx(h, &fsz);
+    CloseHandle(h);
+    const unsigned long long fileSize =
+        static_cast<unsigned long long>(fsz.QuadPart);
+    if (info.bodyOffset > fileSize || info.plainSize == 0) {
+        why = Tr(L"加密镜像头声明异常");
+        return -1;
+    }
+    // 正文允许比明文略大（分块填充），但绝不能小于明文长度。
+    if (fileSize - info.bodyOffset < info.plainSize) {
+        why = Tr(L"加密镜像正文被截断（文件比声明的短）");
+        return -1;
+    }
+    return 0;
+}
+
 int ImageList(const std::wstring& path, std::vector<ImageDesc>& out) {
     out.clear();
     if (!ImageIsEncrypted(path)) {

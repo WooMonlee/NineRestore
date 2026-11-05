@@ -35,6 +35,7 @@
 #include "common/ea.h"
 #include "disk/partscript.h"
 #include "wim/exclude.h"
+#include "wim/wim_precheck.h"
 
 using namespace sysrecover;
 
@@ -1852,4 +1853,96 @@ TEST(crypt_zje_roundtrip_meta_and_failclosed) {
     DeleteFileW(src.c_str());
     DeleteFileW(enc.c_str());
     DeleteFileW(dec.c_str());
+}
+
+// ─────────────── H4（1.0）：WIM 快速结构预检（纯逻辑，不碰磁盘） ───────────────
+// 这几条是"格式化前必须拦住损坏镜像"的自动断言：全部喂合成字节，
+// 不依赖 wimlib、不依赖真实镜像（CI 上可跑）。
+static WimHeaderRaw MakeWimHeader(unsigned int images) {
+    WimHeaderRaw h{};
+    h.magic[0] = 'M';
+    h.magic[1] = 'S';
+    h.magic[2] = 'W';
+    h.magic[3] = 'I';
+    h.magic[4] = 'M';
+    h.cbSize = sizeof(WimHeaderRaw);
+    h.version = 0x010d00;  // 1.13（wimlib 常见版本）
+    h.partNumber = 1;
+    h.totalParts = 1;
+    h.imageCount = images;
+    h.xmlSize = 48;
+    h.xmlOffset = sizeof(WimHeaderRaw);
+    return h;
+}
+
+static WimPrecheckOutcome RunWimPrecheck(const WimHeaderRaw& h,
+                                         unsigned long long fileSize,
+                                         bool xmlReadable,
+                                         const std::string& xml,
+                                         std::size_t hdrBytes =
+                                             sizeof(WimHeaderRaw)) {
+    return CheckWimStructure(fileSize,
+                             reinterpret_cast<const unsigned char*>(&h),
+                             hdrBytes, xmlReadable, /*xmlTooLarge=*/false, xml);
+}
+
+TEST(wim_precheck_accepts_wellformed) {
+    const WimHeaderRaw h = MakeWimHeader(1);
+    const std::string xml = "<WIM><IMAGE INDEX=\"1\"></IMAGE></WIM>";
+    const WimPrecheckOutcome o = RunWimPrecheck(h, 4096, true, xml);
+    CHECK(o.ok);
+}
+
+TEST(wim_precheck_blocks_truncated_copy) {
+    // XML 偏移 208 + 48 字节，但文件只有 100 字节：典型"拷贝到一半中断"
+    const WimHeaderRaw h = MakeWimHeader(1);
+    const WimPrecheckOutcome o =
+        RunWimPrecheck(h, 100, true, "<WIM><IMAGE INDEX=\"1\"/></WIM>");
+    CHECK(!o.ok);
+    CHECK(o.reason == wim_precheck_reason::kResourceOutOfRange);
+}
+
+TEST(wim_precheck_blocks_bad_magic) {
+    WimHeaderRaw h = MakeWimHeader(1);
+    h.magic[0] = 'X';
+    CHECK(!RunWimPrecheck(h, 4096, true, "<WIM></WIM>").ok);
+}
+
+TEST(wim_precheck_blocks_bad_version) {
+    WimHeaderRaw h = MakeWimHeader(1);
+    h.version = 0x030000;
+    const WimPrecheckOutcome o = RunWimPrecheck(h, 4096, true, "<WIM></WIM>");
+    CHECK(!o.ok);
+    CHECK(o.reason == wim_precheck_reason::kBadVersion);
+}
+
+TEST(wim_precheck_blocks_short_file) {
+    const WimHeaderRaw h = MakeWimHeader(1);
+    const WimPrecheckOutcome o = RunWimPrecheck(
+        h, 4096, true, "<WIM></WIM>", /*hdrBytes=*/64);  // 头部都没读全
+    CHECK(!o.ok);
+    CHECK(o.reason == wim_precheck_reason::kShortFile);
+}
+
+TEST(wim_precheck_blocks_unreadable_xml) {
+    const WimHeaderRaw h = MakeWimHeader(1);
+    const WimPrecheckOutcome o = RunWimPrecheck(h, 4096, false, "");
+    CHECK(!o.ok);
+    CHECK(o.reason == wim_precheck_reason::kXmlUnreadable);
+}
+
+TEST(wim_precheck_blocks_unparsable_xml) {
+    const WimHeaderRaw h = MakeWimHeader(1);
+    const WimPrecheckOutcome o =
+        RunWimPrecheck(h, 4096, true, "<WIM><IMAGE INDEX=\"1\">");
+    CHECK(!o.ok);
+    CHECK(o.reason == wim_precheck_reason::kXmlNotParsable);
+}
+
+TEST(wim_precheck_blocks_image_count_mismatch) {
+    const WimHeaderRaw h = MakeWimHeader(2);  // 头说 2 个，XML 只有 1 个
+    const WimPrecheckOutcome o =
+        RunWimPrecheck(h, 4096, true, "<WIM><IMAGE INDEX=\"1\"/></WIM>");
+    CHECK(!o.ok);
+    CHECK(o.reason == wim_precheck_reason::kImageCountMismatch);
 }

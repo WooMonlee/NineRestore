@@ -828,6 +828,9 @@ void CMainForm::OnTaskComplete(int rc) {
             std::wstring doneMsg =
                 Tr(L"系统还原已完成，用时 ") + ElapsedText() +
                 Tr(L"。\n重启后即可进入恢复的系统。");
+            // H4（1.0）：全量校验默认关闭 —— 结果页必须明示"镜像未校验"。
+            if (!m_restoreVerifyImage)
+                doneMsg += Tr(L"\n本次未对镜像做全量校验（仅做了毫秒级结构预检）。");
             // 左=确定（安全项，回车/ESC 都落这里）、右=立即重启
             if (CConfirmDlg::Ask2(m_hWnd, Tr(L"还原成功"), doneMsg,
                                   Tr(L"确定"), Tr(L"立即重启"),
@@ -1674,6 +1677,12 @@ void CMainForm::ShowMoreMenu() {
                       Tr(L"清除启动中还原菜单"));
         ::AppendMenuW(hMenu, MF_STRING | (canVerify ? 0u : MF_GRAYED), 4,
                       Tr(L"镜像检查（完整校验）"));
+        // H4（1.0）：还原前全量校验开关（默认关；快速结构预检始终自动做）。
+        ::AppendMenuW(hMenu,
+                      MF_STRING |
+                          (m_restoreVerifyImage ? MF_CHECKED : 0u),
+                      10,
+                      Tr(L"还原前完整校验镜像（默认关，较耗时）"));
         // 导出本机启动关键驱动（异机还原用；只导存储/输入类）
         ::AppendMenuW(hMenu, MF_STRING, 7,
                       Tr(L"导出本机硬盘驱动供异机还原"));
@@ -1713,6 +1722,13 @@ void CMainForm::ShowMoreMenu() {
         ClearBootMenuEntry();
     } else if (cmd == 4) {
         StartVerifyImage();
+    } else if (cmd == 10) {
+        m_restoreVerifyImage = !m_restoreVerifyImage;
+        SetStatus(m_restoreVerifyImage
+                      ? Tr(L"已开启还原前完整校验（耗时与镜像大小成正比）")
+                      : Tr(L"已关闭还原前完整校验（仍会做毫秒级结构预检）"));
+        LogInfo(std::string("GUI restore verify: ") +
+                (m_restoreVerifyImage ? "on" : "off"));
     } else if (cmd == 5) {
         StartIncrementalBackup();
     } else if (cmd == 7) {
@@ -2900,6 +2916,7 @@ void CMainForm::StartRestoreAsync() {
     req.preserveOld = m_preserveOld;             // PIT-216
     req.targetMode = m_targetMode;               // "format" | "keep"
     req.computerName = m_computerName;           // 空 = 不改名
+    req.verifyImage = m_restoreVerifyImage;      // H4（1.0）：默认关
     // 加密镜像：口令来自本次运行输入（LoadWimImages 里问过并记在 imgsrc 表里）。
     if (sysrecover::ImageIsEncrypted(req.image))
         req.password = sysrecover::GetImagePassword(req.image);

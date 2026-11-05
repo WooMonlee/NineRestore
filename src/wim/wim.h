@@ -56,6 +56,12 @@ public:
     // 需要全量校验请显式调 Verify（--verify / verify 命令）。
     // 返回 0=可用；非 0=不可用（why 填原因，UTF-16）。
     int Probe(const std::wstring& imagePath, std::wstring& why);
+    // H4（1.0）：**快速结构预检**（毫秒级，只读头部/资源表/元数据 XML，
+    // 不读文件数据、不做块级校验）。只拦"不完整/被截断/拷贝中断"：
+    //   头魔数+版本、XML 可解析且子镜像数与头一致、资源表 offset+size 不越界、
+    //   完整性表存在性。**不保证内容正确** —— 块级损坏只有 Verify 能发现。
+    // 返回 0=通过；非 0=不通过（why 填原因，UTF-16）。
+    int QuickPrecheck(const std::wstring& imagePath, std::wstring& why);
     int ListImages(const std::wstring& imagePath,
                    std::vector<ImageDesc>& out);
     // 取某个子镜像的**未压缩**内容大小（字节）—— 还原前空间预检（P1）用。

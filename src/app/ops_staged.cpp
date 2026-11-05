@@ -39,6 +39,7 @@
 #include "../disk/disk.h"
 #include "../disk/mbrcode.h"
 #include "../wim/exclude.h"
+#include "../wim/wim.h"
 #include "safety.h"
 #include "selfdiag.h"
 #include "imgsrc.h"
@@ -119,6 +120,22 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
             LogError(err);
             return 5;
         }
+    }
+    // 0.1) H4（1.0）：**快速结构预检**（毫秒级）——格式化/写盘前的强制前置。
+    //      只拦"不完整/被截断/拷贝中断"（头魔数+版本、XML 可解析、资源表不越界、
+    //      完整性表存在性）；不承诺发现块级损坏（那要显式全量校验）。
+    {
+        std::wstring why;
+        if (ImageQuickPrecheck(req.image, why) != 0) {
+            if (adv) *adv = ADV_INCOMPLETE;
+            err = Tr("镜像结构预检未通过（可能拷贝不完整）：");
+            err += W2U(why);
+            LogError(err);
+            AppendHistory("restore-rejected", req.image, req.image, 0,
+                          "quick precheck failed");
+            return 5;
+        }
+        LogInfo("quick precheck: pass");
     }
     // 0.5) 子镜像检查（方案 C，用户 2026-09-30 规格 + PIT-122 EA 子镜像）：
     //   ① 名含 "ESP" 的子镜像 = ESP 分区备份，**不能单独当系统还原** → 拒绝
@@ -381,6 +398,40 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
             LogError("space precheck failed: " + spErr);
             return 1;
         }
+    }
+    // 2.15) H4（1.0）：**全量校验是显式入口**（GUI 勾选「还原前校验镜像」/
+    //       CLI --verify-image），默认关闭。跳过的必须在日志里写明"镜像未校验"，
+    //       结果页同样提示，不允许悄悄放过；开启时显示进度（wimlib 回调带速率/ETA）。
+    //       硬约束：无论开或关，这一步都必须在**任何格式化/写盘之前**完成。
+    if (req.verifyImage) {
+        std::wstring vpath = imagePath;
+        bool vtmp = false;
+        if (ImageIsEncrypted(imagePath)) {
+            std::wstring perr;
+            vpath = ResolveImagePlain(imagePath, progress, perr, &vtmp);
+            if (vpath.empty()) {
+                if (adv) *adv = ADV_INCOMPLETE;
+                err = Tr("加密镜像解密失败：") + W2U(perr);
+                LogError(err);
+                return 5;
+            }
+        }
+        ProgressUpdate("verify", 0, "start");
+        WimEngine veng;
+        const int vrc = veng.Verify(vpath, progress);
+        if (vtmp) ReleaseImagePlain(imagePath);
+        if (vrc != 0) {
+            if (adv) *adv = ADV_INCOMPLETE;
+            err = Tr("镜像全量校验未通过，已中止（目标分区尚未改动）：");
+            err += std::to_string(vrc);
+            LogError(err);
+            AppendHistory("restore-rejected", req.image, imagePath, 0,
+                          "full verify failed");
+            return 5;
+        }
+        LogInfo("image-verify: full pass");
+    } else {
+        LogWarn("image-verify: skipped (explicit opt-in off) — 镜像未校验");
     }
     // 2.2) 就地还原 vs「暂存+重启」**必须在 A 引擎解压之前判定**（2026-10-12
     //      问题 4）：旧顺序是先解压 ~new（几分钟）再判就地，而 PE / 非系统盘

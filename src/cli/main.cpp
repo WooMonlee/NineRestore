@@ -251,7 +251,8 @@ bool ValidateCommandArgs(const std::vector<std::string>& a) {
     } else if (cmd == "restore") {
         // --repair-boot 是默认行为的显式写法（网友常这么写）→ 接受且无操作
         flags = {"--no-repair-boot", "--repair-boot", "--universal", "--yes",
-                 "-y", "--keep-old", "--no-keep-old", "--reboot"};
+                 "-y", "--keep-old", "--no-keep-old", "--reboot",
+                 "--verify-image"};
         values = {"--image", "--disk", "--part", "--index", "--engine",
                   "--drivers", "--password"};
     } else if (cmd == "verify") {
@@ -479,6 +480,8 @@ int CmdRestore(const std::vector<std::string>& a) {
     // PIT-202（用户 2026-11-01 需求）：默认**不保留**旧系统（~old 由救援层直接删）；
     // `--keep-old` = 保留，用于"还原后还能返回旧系统"。
     req.keepOld = Has(a, "--keep-old") && !Has(a, "--no-keep-old");
+    // H4（1.0）：还原前全量校验镜像（默认关）。默认只做毫秒级快速结构预检。
+    req.verifyImage = Has(a, "--verify-image");
     // 0.7（docs/23）：--engine swap = A 引擎（Windows 原生解压 + Linux 仅改名交换）
     // 默认 swap（A 引擎）；--engine block 回退 B 引擎（Linux apply）。
     req.engine = Opt(a, "--engine");
@@ -559,15 +562,20 @@ int CmdRestore(const std::vector<std::string>& a) {
             std::printf(Tr("请手动重启以执行（或加 --reboot 让它自动重启）。\n"));
         }
     }
-    // PIT-202 安全提示：不保留旧系统 = 交换成功后旧系统当场删除，**没有后悔药**。
-    // 首次换系统建议 --keep-old，确认新系统能起来再删 ~old。
+    // H4.5（1.0）：keepOld=false 时旧系统不再"交换完当场删除"，而是保留到
+    // 新系统首次成功开机后由 RunOnce 清理 —— 这期间仍可用救援层回退。
     if (needReboot && !req.keepOld)
         std::printf(
-            Tr("提示：本次**不保留旧系统**——还原成功后旧系统将被删除，无法"
-               "「返回旧系统」。\n"
-               "      若想保留可回退，请加 --keep-old 重新暂存。\n"));
+            Tr("提示：本次**不保留可回退的旧系统**——新系统首次成功开机后 ~old "
+               "将自动清理，之后无法「返回旧系统」。\n"
+               "      若想长期保留可回退，请加 --keep-old 重新暂存。\n"));
     else
         std::printf(Tr("还原已完成（目标分区未被占用，直接就地还原，无需重启）。\n"));
+    // H4（1.0）：镜像全量校验默认关闭；跳过必须在输出里明示。
+    if (!req.verifyImage)
+        std::printf(
+            Tr("提示：镜像未校验（本次只做毫秒级结构预检）；加 --verify-image "
+               "可在还原前做全量校验。\n"));
     // Q1 settle 警告（2026-10-18）：程序目录在目标盘上但没找到安全分区
     {
         const auto& sr = sysrecover::LastSettleResult();
@@ -1107,11 +1115,12 @@ const CmdHelp* CmdHelpTable(size_t* n) {
     {"restore",
      Tr("restore --image <文件> --disk N --part M [--index N] [--keep-old]\n"
         "        [--no-keep-old] [--reboot] [--no-repair-boot] [--engine block|swap]\n"
-        "        [--universal [--drivers <目录>]] [--yes]\n"
+        "        [--universal [--drivers <目录>]] [--verify-image] [--yes]\n"
         "  什么时候「重启后还原」：**自动判定**——目标是正在运行的系统盘就暂存并\n"
         "  重启进恢复环境执行；目标是其它分区（或在 PE 里）就就地还原、不重启。\n"
         "  --keep-old      保留旧系统（C:\\~old），之后可「返回旧系统」；\n"
-        "  --no-keep-old   **默认**：交换成功后当场删除旧系统（省空间、无后悔药）。\n"
+        "  --no-keep-old   **默认**：旧系统保留到新系统首次成功开机后自动清理。\n"
+        "  --verify-image  还原前做全量校验（默认关；默认只做毫秒级结构预检）。\n"
         "  --reboot        暂存成功后立即重启（默认不自动重启，等你手动重启；\n"
         "                  5 秒倒计时，反悔用 shutdown /a）。\n"
         "  --no-repair-boot 不修引导（只允许就地还原；暂存路径会直接拒绝）。\n"
@@ -1166,7 +1175,7 @@ void PrintAllUsage() {
            "  backup --dest <文件> [--source <目录>] [--compress fast|maximum|recovery]\n"
            "         [--name <名>] [--append] [--verify] [--esp] [--no-snapshot] [--password <pwd>] [--yes]\n"
            "  restore --image <文件> --disk N --part M [--index N] [--keep-old|--no-keep-old]\n"
-           "          [--reboot] [--no-repair-boot] [--engine block|swap] [--universal [--drivers <目录>]] [--yes]\n"
+           "          [--reboot] [--no-repair-boot] [--engine block|swap] [--universal [--drivers <目录>]] [--verify-image] [--yes]\n"
            "  verify --image <文件>        校验镜像完整性\n"
            "  repair-boot [--disk N --part M]   修复引导（BCD/启动项；引导坏了不用重装）\n"
            "  returnold [--disk N --part M] [--yes]  返回旧系统（需上次还原保留了旧系统）\n"
