@@ -1946,3 +1946,13 @@ TEST(wim_precheck_blocks_image_count_mismatch) {
     CHECK(!o.ok);
     CHECK(o.reason == wim_precheck_reason::kImageCountMismatch);
 }
+
+TEST(wim_append_space_precheck) {
+    // H5：临时文件约等于镜像大小；空间不足必须提前失败（返回 -2 的判据）。
+    CHECK(HasSpaceForWimTemp(10ull * 1024 * 1024 * 1024,
+                             4ull * 1024 * 1024 * 1024));
+    CHECK(HasSpaceForWimTemp(4ull * 1024 * 1024 * 1024,
+                             4ull * 1024 * 1024 * 1024));  // 相等可以
+    CHECK(!HasSpaceForWimTemp(3ull * 1024 * 1024 * 1024,
+                              4ull * 1024 * 1024 * 1024));
+}

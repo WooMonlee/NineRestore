@@ -59,6 +59,14 @@ struct WimPrecheckOutcome {
     std::string reason = wim_precheck_reason::kOk;
 };
 
+// H5（1.0）：追加前的空间预检判据。
+// wimlib_overwrite 会先写一个约等于整个镜像大小的临时文件，再原子改名；
+// 因此空闲空间必须 >= 镜像文件大小（相等也允许：临时文件与原文件并存）。
+inline bool HasSpaceForWimTemp(unsigned long long freeBytes,
+                               unsigned long long imageBytes) {
+    return freeBytes >= imageBytes;
+}
+
 // 输入：
 //   fileSize  —— 镜像文件实际字节数（GetFileSizeEx 结果）
 //   hdrLen    —— 已读到的头部字节数（不足 sizeof(WimHeaderRaw) 视为"文件过小"）

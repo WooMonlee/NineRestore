@@ -23,6 +23,21 @@
 namespace sysrecover {
 namespace {
 
+// 把宽字符路径转成 UTF-8（仅用于日志；wim 层不依赖 app 层的 W2U）。
+std::string Utf8Of(const std::wstring& w) {
+    if (w.empty())
+        return std::string();
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(),
+                                      static_cast<int>(w.size()), nullptr, 0,
+                                      nullptr, nullptr);
+    std::string s(n > 0 ? static_cast<std::size_t>(n) : 0, '\0');
+    if (n > 0)
+        WideCharToMultiByte(CP_UTF8, 0, w.c_str(),
+                            static_cast<int>(w.size()), &s[0], n, nullptr,
+                            nullptr);
+    return s;
+}
+
 // wimlib 不允许重名子镜像（否则返回 rc=11 "name already in use"）。
 // 追加备份时默认名都是 "Backup"，必须自动加序号，否则 --append 永远失败。
 std::wstring UniqueImageName(WIMStruct* w, const std::wstring& desired) {
@@ -351,8 +366,53 @@ int WimEngine::Append(const std::wstring& source,
             wimlib_set_image_descripton(h.w, static_cast<int>(wi.image_count),
                                         desc.c_str());  // wimlib 拼写如此
     }
-    return wimlib_overwrite(h.w, WIMLIB_WRITE_FLAG_CHECK_INTEGRITY,
-                            ThreadCount());
+    // H5（1.0）：wimlib_overwrite 默认就是"写临时文件 + 原子改名"，失败不会毁掉
+    // 原镜像和历史子镜像，所以**不做 .bak、也不手写替换流程**（那是误报驱动的多余改动）。
+    // 只补两个小项：
+    //   ① 追加前做空间预检——临时文件约等于整个镜像大小，空间不够必然中途失败；
+    //   ② 追加失败后清理残留临时文件，避免占着空间还让下次追加误判。
+    LARGE_INTEGER imgSize{};
+    imgSize.QuadPart = 0;
+    {
+        HANDLE ih = CreateFileW(imagePath.c_str(), GENERIC_READ,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (ih != INVALID_HANDLE_VALUE) {
+            GetFileSizeEx(ih, &imgSize);
+            CloseHandle(ih);
+        }
+    }
+    const unsigned long long needBytes =
+        static_cast<unsigned long long>(imgSize.QuadPart);
+    if (needBytes > 0) {
+        const std::size_t slash = imagePath.find_last_of(L"\\/");
+        const std::wstring dir =
+            slash == std::wstring::npos ? std::wstring(L".")
+                                        : imagePath.substr(0, slash);
+        ULARGE_INTEGER freeBytes{};
+        if (GetDiskFreeSpaceExW(dir.c_str(), nullptr, nullptr, &freeBytes) &&
+            !HasSpaceForWimTemp(freeBytes.QuadPart, needBytes)) {
+            LogError("append: 空间不足（wimlib 临时文件约需镜像大小）: need=" +
+                     std::to_string(needBytes) + " free=" +
+                     std::to_string(freeBytes.QuadPart));
+            return -2;
+        }
+    }
+    const int arc = wimlib_overwrite(h.w, WIMLIB_WRITE_FLAG_CHECK_INTEGRITY,
+                                     ThreadCount());
+    if (arc != 0) {
+        // 尽力清理 wimlib 留下的临时文件；清理失败只告警，不掩盖原错误码。
+        const std::wstring tmpPath = imagePath + L".tmp";
+        if (GetFileAttributesW(tmpPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            if (DeleteFileW(tmpPath.c_str()))
+                LogWarn("append failed; removed leftover temp file");
+            else
+                LogWarn("append failed; leftover temp file could not be "
+                        "removed (delete it manually): " +
+                        Utf8Of(tmpPath));
+        }
+    }
+    return arc;
 }
 
 int WimEngine::Apply(const std::wstring& imagePath, int index,
