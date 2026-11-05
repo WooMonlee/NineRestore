@@ -16,6 +16,7 @@
 #include <string>
 
 #include "../disk/disk.h"
+#include "ops.h"
 
 namespace sysrecover {
 
@@ -56,5 +57,19 @@ bool AcquireEspRoot(std::wstring& espRoot, bool& guidMatched, std::string& log,
 bool BiosBcdLooksValid(wchar_t letter, std::string& detail);
 bool ToolAvailable(const wchar_t* exe);
 std::string BootWriteBlockedHint();
+
+// ── ops_inplace.cpp ──
+bool SetComputerNameOffline(const std::wstring& winDir, const std::wstring& name,
+                            std::string& log);
+bool InjectOfflineRunOnce(const std::wstring& newDir, const wchar_t* hiveName,
+                          const wchar_t* valueName, const wchar_t* cmd,
+                          DWORD type, const char* what);
+bool InstallFirstBootCleanup(const std::wstring& newDir,
+                             const std::wstring& exeDir, std::string& log);
+// StageRestoreImpl 在「PE 里放行」分支直接调用就地还原（0.9.96 同一翻译单元，
+// ops.h 未导出；拆分后由本头文件承担跨模块声明）。
+int RunDirectRestore(const RestoreRequest& req, const PartitionInfo& target,
+                     const std::wstring& imagePath, int espIndex, int eaIndex,
+                     std::string& err, ProgressFn progress);
 
 }  // namespace sysrecover
