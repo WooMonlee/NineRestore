@@ -57,6 +57,13 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
                      bool* needReboot, ProgressFn progress, ErrAdvice* adv,
                      bool menuEntry) {
     if (adv) *adv = ADV_NONE;
+    // H7：入口即取操作锁（RAII），让 A 引擎解压 ~new、格式化/清空、移镜像全部
+    // 落在锁内；任何 return 路径都由 OpLockGuard 释放，不再手工配对。
+    OpLockGuard opLock;
+    if (!opLock.ok()) {
+        err = Tr("已有备份/还原实例在运行");
+        return 1;
+    }
     if (req.image.empty()) {
         err = Tr("缺少镜像路径");
         return 1;
@@ -451,10 +458,6 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
     if (inPlace) {
         if (req.engine == "swap" && !swapLeftGuard())
             return 4;
-        if (!AcquireOpLock()) {
-            err = Tr("已有备份/还原实例在运行");
-            return 1;
-        }
         ProgressUpdate("restore", 0, "start");
         LogInfo("restore stage image=" + W2U(imagePath) + " disk=" +
                 std::to_string(req.disk) + " part=" + std::to_string(req.part));
@@ -469,7 +472,6 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
             plainImage = ResolveImagePlain(imagePath, progress, perr, &plainTemp);
             if (plainImage.empty()) {
                 err = W2U(perr);
-                ReleaseOpLock();
                 ProgressDone("restore", "failed");
                 return 1;
             }
@@ -480,7 +482,6 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
             ReleaseImagePlain(imagePath);
         if (needReboot)
             *needReboot = false;
-        ReleaseOpLock();
         AppendHistory("restore-inplace", req.image,
                       target.letter.empty() ? L"?" : target.letter + L":",
                       GetTickCount64() - t1, rc == 0 ? "ok" : "failed");
@@ -849,10 +850,6 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
             }
         }
     }
-    if (!AcquireOpLock()) {
-        err = Tr("已有备份/还原实例在运行");
-        return 1;
-    }
     ProgressUpdate("restore", 0, "start");
     LogInfo("restore stage image=" + W2U(imagePath) + " disk=" +
             std::to_string(req.disk) + " part=" + std::to_string(req.part));
@@ -877,7 +874,6 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
             LogError("staged restore rejected: image on network path");
             AppendHistory("restore-rejected", req.image, imagePath, 0,
                           "image on network path");
-            ReleaseOpLock();
             ProgressDone("restore", "failed");
             return 2;
         }
@@ -980,7 +976,6 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
     // 4) _zjresy 日志写目标分区根（restore.sh 主契约；缺日志 Linux 侧找不到
     //    目标，视为致命——较旧 C# 的 warn 更严格，fail-closed）
     if (target.letter.empty()) {
-        ReleaseOpLock();
         ProgressDone("restore", "failed");
         err = Tr("目标分区无盘符，无法写恢复日志（Linux 侧将无法定位目标）");
         LogError(err);
@@ -997,7 +992,6 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
                 " removed (" + clog.substr(0, clog.size() - 1) + ")");
     }
     if (!WriteRestoreLog(target.letter[0], t, tlog)) {
-        ReleaseOpLock();
         ProgressDone("restore", "failed");
         if (adv) *adv = ADV_ADMIN;
         err = Tr("写恢复日志失败（需管理员权限写 ") + W2U(target.letter) + Tr(":\\）");
@@ -1065,7 +1059,6 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
     // 却照样写契约、返回成功、提示"重启后执行"，重启必然回到旧系统，
     // 且连回滚都不武装（rollbackArmed=req.repairBoot）。必须前置拒绝。
     if (!req.repairBoot) {
-        ReleaseOpLock();
         ProgressDone("restore", "failed");
         err = Tr("「不修复引导」只能用于就地还原（PE/非系统盘）。"
                  "还原正在运行的系统盘必须先装引导交接，请取消该选项后重试。");
@@ -1093,7 +1086,6 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
                 // 此时重启会被 MokManager 拦住，还原根本不会跑（看起来"什么都没
                 // 发生"）。必须在**动目标分区之前**先拦住并说清怎么注册。
                 // （走 bootapp 链不需要注册，见 PIT-063。）
-                ReleaseOpLock();
                 ProgressDone("restore", "failed");
                 err = Tr("本机开启了 Secure Boot，但还没注册启动密钥：请先点" "「安装菜单」，重启一次，在蓝底界面选 " "Enroll key -> 选 zj-mok.cer -> 注册，之后回来再还原");
                 LogError(err);
@@ -1104,7 +1096,6 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
             if (!AcquireEspRoot(espRoot, guidMatched, blog,
                                  (int)target.diskIndex)) {
                 LogError("ESP acquire log (staged):\n" + blog);
-                ReleaseOpLock();
                 ProgressDone("restore", "failed");
                 err = Tr("UEFI 机器未找到可用的 ESP 引导分区，无法部署引导层。\n"
                          "常见原因：DiskGenius 重建分区时漏建 ESP，或把 ESP 标成了"
@@ -1192,7 +1183,6 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
                                     wlog);
                         if (!sok) {
                             UnmountEsp(espRoot, blog);
-                            ReleaseOpLock();
                             ProgressDone("restore", "failed");
                             err = Tr("写入 ESP 引导失败（无法生成引导配置）：") + serr;
                             LogError(err);
@@ -1203,7 +1193,6 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
                     //    + 该条目**指向本次目标分区**（PIT-208）
                     if (!VerifyEspBcd(espRoot, winDir, detail)) {
                         UnmountEsp(espRoot, blog);
-                        ReleaseOpLock();
                         ProgressDone("restore", "failed");
                         err = Tr("ESP 引导校验未通过（未真正修好，已中止，未动目标分区）：") +
                               detail;
@@ -1246,7 +1235,6 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
             LogInfo(std::string("uefi boot entry: ") + (ok ? "ok" : "FAIL") +
                     " / " + blog);
             if (!ok) {
-                ReleaseOpLock();
                 ProgressDone("restore", "failed");
                 err = Tr("安装 UEFI 引导层失败: ") + blog;
                 LogError(err);
@@ -1258,7 +1246,6 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
             std::wstring deployDrive = std::wstring(1, target.letter[0]) + L":\\";
             // 每次都重装（幂等）：确保 menu.lst/bootfiles/initramfs 随本版本刷新。
             if (!InstallBootLayer(deployDrive, exeDir, blog, !menuEntry)) {
-                ReleaseOpLock();
                 ProgressDone("restore", "failed");
                 err = Tr("安装引导层失败: ") + blog;
                 LogError(err);
@@ -1295,7 +1282,6 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
                 int cur = BcdGetBootmgrTimeout(tlog);
                 if (cur < 1) {
                     if (!BcdSetBootmgrTimeout(1, tlog)) {
-                        ReleaseOpLock();
                         ProgressDone("restore", "failed");
                         err = Tr("设置启动菜单停留时间失败（菜单将无法被选中）: ") +
                               tlog + BootWriteBlockedHint();
@@ -1317,7 +1303,6 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
             // 现场只能看到"entry installed"，看不到 BootNext 到底成没成）。
             std::string nlog;
             if (!SetUefiBootNext(nlog, true)) {
-                ReleaseOpLock();
                 ProgressDone("restore", "failed");
                 err = Tr("设置固件单次启动失败: ") + nlog +
                       BootWriteBlockedHint();
@@ -1344,7 +1329,6 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
             }
             if (!bootOk) {
                 UnmountEsp(espRoot, blog);
-                ReleaseOpLock();
                 ProgressDone("restore", "failed");
                 err = Tr("无法确保下次启动进入恢复环境（启动项没有生效：") + vd +
                       Tr("）。\n本次已取消、**没有重启**，目标分区一个字节都没动。\n"
@@ -1358,7 +1342,6 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
         } else if (!useUefi || CurrentSbMode() == SbMode::Bootapp) {
             std::string slog;
             if (!BcdSetBootsequence(TemporaryGuid(), slog)) {
-                ReleaseOpLock();
                 ProgressDone("restore", "failed");
                 err = Tr("设置单次启动失败（重启后可能进不了还原环境）: ") + slog +
                       BootWriteBlockedHint();
@@ -1389,7 +1372,6 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
     // 用户排错只需发 logs 文件夹（含这些 + diag.txt/list.txt + 救援日志）。
     CollectDeployArtifacts(logsDir + L"\\collected",
                            target.letter.empty() ? 0 : target.letter[0]);
-    ReleaseOpLock();
     // ⚠️ 只有**菜单项模式**不重启；暂存+重启模式必须保留 needReboot=true，
     // 否则 GUI/CLI 走"就地完成"分支：显示"还原完成"且**不自动重启**（用户必须
     // 手动重启，看起来像"中途停止"）。此 bug 自 ≤0.6.4 起存在，0.6.21 修复：
