@@ -49,7 +49,7 @@ namespace sysrecover {
 
 
 // ── PIT-211：格式化目标分区（A 引擎"先格式化再解压"用）──────────────
-bool FormatTargetVolume(wchar_t letter, std::string& log) {
+static bool FormatTargetVolume(wchar_t letter, std::string& log) {
     std::string out;
     const int rc = RunProcess(SysToolPath(L"format.com"),
                               std::wstring(1, letter) + L": /FS:NTFS /Q /Y",
@@ -61,7 +61,7 @@ bool FormatTargetVolume(wchar_t letter, std::string& log) {
 // PIT-214：「不格式化」= 保留文件系统/卷标，只清空根目录内容（wimlib 卷模式
 // 要求空卷；这也正是救援层 target_mode=keep 的语义）。
 // 返回 0 = 干净；>0 = 有 N 项删不掉（SVI/$RECYCLE.BIN 正常，不阻断）。
-int WipeVolumeContents(const std::wstring& root, std::string& log) {
+static int WipeVolumeContents(const std::wstring& root, std::string& log) {
     int failed = 0, removed = 0;
     WIN32_FIND_DATAW fd = {};
     HANDLE h = FindFirstFileW((root + L"*").c_str(), &fd);
@@ -84,6 +84,31 @@ int WipeVolumeContents(const std::wstring& root, std::string& log) {
     log = "wipe: removed=" + std::to_string(removed) +
           " left=" + std::to_string(failed);
     return failed;
+}
+
+// 目标卷准备的**唯一入口**（阶段 2 收敛；行为与 0.9.96 的三处调用完全一致）：
+//   · formatIt=true  → format.com /FS:NTFS /Q /Y（不传 /V，保留原卷标语义）；
+//   · formatIt=false → 保留文件系统、只清空根目录内容（救援层 target_mode=keep
+//     同语义，PIT-214）。
+// 返回值与旧函数保持一一对应：0 成功；-1 失败（format 失败或清空无法列目录）；
+// >0 = 清空后仍有 N 项删不掉（SVI/$RECYCLE.BIN 常见，调用方按非致命告警处理）。
+// rawOut（可选）：回传未加前缀的原始输出（format 模式为 format.com 输出，
+// keep 模式同 log），供调用方拼错误文案时不丢细节。
+// 注意：阶段 3 会在这里加「破坏性操作前置检查」；本提交只做结构收敛，不改行为。
+int PrepareTargetVolume(const std::wstring& root, wchar_t letter, bool formatIt,
+                        std::string& log, std::string* rawOut) {
+    if (formatIt) {
+        std::string out;
+        const int rc = RunProcess(SysToolPath(L"format.com"),
+                                  std::wstring(1, letter) + L": /FS:NTFS /Q /Y",
+                                  out);
+        log = "format.com rc=" + std::to_string(rc) + " / " + out;
+        if (rawOut) *rawOut = out;
+        return rc == 0 ? 0 : -1;
+    }
+    const int left = WipeVolumeContents(root, log);
+    if (rawOut) *rawOut = log;
+    return left;
 }
 
 }  // namespace sysrecover

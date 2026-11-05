@@ -133,7 +133,12 @@ $(OBJDIR)/app/%.o: src/%.cpp
 # 受影响的对象，否则「改了版本号、编译出来还是旧号」（版本号规则的隐形坑）。
 -include $(APP_OBJS:.o=.d)
 
+# 阶段 2 拆分修复：`ar rcs` 只会「添加/替换」成员，**不会删除**已从源清单移除的
+# 旧目标文件（如拆除 ops.cpp 后残留的 ops.o）。残留成员会把旧符号带进链接，
+# 轻则掩盖重复定义、重则引用已删除的函数导致 undefined reference。
+# 因此每次建库前先删掉归档，保证 libapp.a 与当前源清单严格一致。
 $(APP_LIB): $(APP_OBJS)
+	@if exist $(subst /,\,$@) del /Q $(subst /,\,$@)
 	$(AR) rcs $@ $(APP_OBJS)
 
 $(CLI_RC_OBJ): $(CLI_RC) src/cli/SysRecover.manifest resources/SysRecover.ico | $(OBJDIR)

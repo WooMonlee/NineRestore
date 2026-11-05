@@ -552,7 +552,9 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
         if (req.formatSwap) {
             std::string flog;
             LogInfo("A-engine: format target before extract");
-            if (!FormatTargetVolume(target.letter[0], flog)) {
+            // 阶段 2：与就地还原共用同一入口（行为不变）。
+            if (PrepareTargetVolume(target.letter + L":\\", target.letter[0],
+                                    /*formatIt=*/true, flog, nullptr) != 0) {
                 err = Tr("A 引擎：格式化目标分区失败（已中止，未解压任何文件）：") +
                       flog;
                 LogError(err);

@@ -149,35 +149,39 @@ int RunDirectRestore(const RestoreRequest& req, const PartitionInfo& target,
             return 1;
         }
         oldPreserved = true;
-    } else if (req.formatTarget) {
-        std::string out;
-        int rc = RunProcess(SysToolPath(L"format.com"),
-                            letter + L": /FS:NTFS /Q /Y", out);
-        LogInfo("format.com rc=" + std::to_string(rc) + " / " + out);
-        if (rc != 0) {
-            if (oldPreserved) {
-                std::string rlog;
-                RollbackPreservedOld(letter + L":\\", rlog);
-                LogWarn(rlog);
-            }
-            err = Tr("就地还原：格式化目标分区失败（") + out + Tr("）");
-            LogError(err);
-            ProgressDone("restore", "failed");
-            return 1;
-        }
     } else {
-        std::string wlog;
-        const int left = WipeVolumeContents(letter + L":\\", wlog);
-        LogInfo("no-format restore: " + wlog);
-        if (left < 0) {
-            err = Tr("就地还原：无法清空目标分区（") + wlog + Tr("）");
-            LogError(err);
-            ProgressDone("restore", "failed");
-            return 1;
+        // 阶段 2 收敛：格式化与「只清空内容」走同一个入口 PrepareTargetVolume，
+        // 与 A 引擎的 formatSwap 共用实现（PIT-211 / PIT-214）。行为保持不变：
+        // 日志文案、错误文案、残余项告警均按原样保留；前置校验在阶段 3 加入。
+        std::string plog;
+        std::string raw;
+        const int prep = PrepareTargetVolume(letter + L":\\", letter[0],
+                                             req.formatTarget, plog, &raw);
+        if (req.formatTarget) {
+            LogInfo(plog);
+            if (prep != 0) {
+                if (oldPreserved) {
+                    std::string rlog;
+                    RollbackPreservedOld(letter + L":\\", rlog);
+                    LogWarn(rlog);
+                }
+                err = Tr("就地还原：格式化目标分区失败（") + raw + Tr("）");
+                LogError(err);
+                ProgressDone("restore", "failed");
+                return 1;
+            }
+        } else {
+            LogInfo("no-format restore: " + plog);
+            if (prep < 0) {
+                err = Tr("就地还原：无法清空目标分区（") + plog + Tr("）");
+                LogError(err);
+                ProgressDone("restore", "failed");
+                return 1;
+            }
+            if (prep > 0)
+                LogWarn("no-format restore: " + std::to_string(prep) +
+                        " item(s) could not be removed (usually SVI/$RECYCLE.BIN)");
         }
-        if (left > 0)
-            LogWarn("no-format restore: " + std::to_string(left) +
-                    " item(s) could not be removed (usually SVI/$RECYCLE.BIN)");
     }
     // 2) 应用镜像（目录模式）
     WimEngine wim;

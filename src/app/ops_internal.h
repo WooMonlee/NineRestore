@@ -37,8 +37,10 @@ void AppendHistory(const char* action, const std::wstring& image,
                    const char* detail);
 
 // ── ops_format.cpp ──
-bool FormatTargetVolume(wchar_t letter, std::string& log);
-int WipeVolumeContents(const std::wstring& root, std::string& log);
+// 目标卷准备的唯一入口（格式化 / 只清空内容）。实现细节（FormatTargetVolume /
+// WipeVolumeContents）留在 ops_format.cpp 内部，防止调用方绕过统一入口。
+int PrepareTargetVolume(const std::wstring& root, wchar_t letter, bool formatIt,
+                        std::string& log, std::string* rawOut);
 
 // ── ops_preserve.cpp ──
 int PreserveOldSystem(const std::wstring& root, std::string& log);
