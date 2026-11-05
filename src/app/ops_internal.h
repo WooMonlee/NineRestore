@@ -43,4 +43,18 @@ int WipeVolumeContents(const std::wstring& root, std::string& log);
 int PreserveOldSystem(const std::wstring& root, std::string& log);
 void RollbackPreservedOld(const std::wstring& root, std::string& log);
 
+// ── ops_boot.cpp ──
+void EspDiagAppendAt(const std::wstring& dir, const std::string& text);
+void EspDiagLine(const std::string& s);
+void EspDiagVolumes();
+PartitionStyle DiskStyleOf(uint32_t diskIndex);
+bool MountEspByGuid(const std::wstring& volumeOrGuid, std::wstring& root,
+                    std::string& log);
+std::wstring FindEspDriveByLabel(const PartitionInfo& esp);
+bool AcquireEspRoot(std::wstring& espRoot, bool& guidMatched, std::string& log,
+                    int targetDisk = -1);
+bool BiosBcdLooksValid(wchar_t letter, std::string& detail);
+bool ToolAvailable(const wchar_t* exe);
+std::string BootWriteBlockedHint();
+
 }  // namespace sysrecover
