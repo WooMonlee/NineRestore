@@ -58,6 +58,15 @@ jobs:
         shell: pwsh
         run: |
           choco install mingw --no-progress -y
+          # choco 安装后不会自动进 PATH；mingw32-make 需要它
+          $mingw = "C:\ProgramData\mingw64\mingw64"
+          if (-not (Test-Path "$mingw\bin\mingw32-make.exe")) {
+            $g = Get-ChildItem "C:\ProgramData" -Recurse -Filter mingw32-make.exe |
+                 Select-Object -First 1
+            if (-not $g) { throw "mingw32-make not found after choco install" }
+            $mingw = Split-Path (Split-Path $g.FullName)
+          }
+          "$mingw\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 
       - name: Install i686 UCRT toolchain
         shell: pwsh
@@ -84,13 +93,19 @@ jobs:
           $env:PYTHON = (Get-Command python).Source
           $env:PYTHONUTF8 = "1"
           $env:PYTHONIOENCODING = "utf-8"
+          # x86 也跑同一套逻辑单测与门禁（32 位下的指针/整型宽度问题会被抓到）
+          mingw32-make -f Makefile SHELL=cmd.exe ARCH=x86 check
           mingw32-make -f Makefile SHELL=cmd.exe ARCH=x86 all
+          python tools/smoke-cli.py dist\SysRecover_x86.exe dist\SysRecoverCheck_x86.exe
 
       - name: Upload x86 artifact
         uses: actions/upload-artifact@v4
         with:
           name: SysRecover-x86-${{ github.sha }}
-          path: dist/SysRecover.exe
+          path: |
+            dist/SysRecover_x86.exe
+            dist/SysRecoverUI_x86.exe
+            dist/SysRecoverCheck_x86.exe
           if-no-files-found: error
 
   static:
@@ -143,4 +158,63 @@ jobs:
             if ($LASTEXITCODE -ne 0) { $bad = $true }
           }
           if ($bad) { exit 1 }
+
+  # 发布闸门（L2）：两套工具链全量打包 + SHA256SUMS + dist 指针严格校验。
+  # 只产制品、不签名：无代码签名证书时用户首次运行会看到 SmartScreen，
+  # 见 docs/（已知问题）说明。
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install x64 toolchain
+        shell: pwsh
+        run: |
+          choco install mingw --no-progress -y
+          $mingw = "C:\ProgramData\mingw64\mingw64"
+          if (-not (Test-Path "$mingw\bin\g++.exe")) {
+            $g = Get-ChildItem "C:\ProgramData" -Recurse -Filter g++.exe |
+                 Select-Object -First 1
+            if (-not $g) { throw "g++.exe not found after choco install" }
+            $mingw = Split-Path (Split-Path $g.FullName)
+          }
+          "MINGW64=$mingw" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "$mingw\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Install i686 UCRT toolchain
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP "mingw32.7z"
+          $url = "https://github.com/niXman/mingw-builds-binaries/releases/download/14.2.0-rt_v12-rev0/i686-14.2.0-release-posix-dwarf-ucrt-rt_v12-rev0.7z"
+          Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+          $seven = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
+          if (-not $seven) { $seven = "C:\Program Files\7-Zip\7z.exe" }
+          New-Item -ItemType Directory -Path "C:\mingw32" -Force | Out-Null
+          & $seven x $zip -oC:\mingw32 -y | Out-Null
+          $g = Get-ChildItem "C:\mingw32" -Recurse -Filter i686-w64-mingw32-g++.exe |
+               Select-Object -First 1
+          if (-not $g) { throw "i686 UCRT compiler not found after extraction" }
+          "MINGW32=$($g.Directory.Parent.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Package + SHA256
+        shell: pwsh
+        run: |
+          $env:PYTHON = (Get-Command python).Source
+          $env:PYTHONUTF8 = "1"
+          $env:PYTHONIOENCODING = "utf-8"
+          $vars = @("MINGW64=$env:MINGW64", "MINGW32=$env:MINGW32")
+          mingw32-make -f Makefile SHELL=cmd.exe $vars package
+          mingw32-make -f Makefile SHELL=cmd.exe $vars sha256
+          mingw32-make -f Makefile SHELL=cmd.exe $vars dist-check
+
+      - name: Upload release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: SysRecover-release-${{ github.sha }}
+          path: dist
+          if-no-files-found: error
 
