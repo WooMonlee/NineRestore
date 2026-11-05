@@ -26,6 +26,8 @@
 构建注意：
 - **必须在 cmd/PowerShell 环境下调用 make**。Makefile 的配方使用了 `if not exist`、`copy /Y` 等 cmd 内建命令；若把 `bash` 放进了 `PATH`（Make 会改用 `sh` 作为 shell），配方会因 cmd 语法直接失败。
 - `make check` 的 `tools/check-shell.py` 需要 `bash` 在 `PATH` 上（或装在 Git for Windows 默认路径）。因此推荐：构建用纯净 PATH，门禁时再把 bash 目录加入 PATH。
+- **`make smoke-cli` 之前必须先跑 `make package`**：CLI 冒烟会执行 `check --lang en help`，需要 `dist/lang/` 语言包已被部署；只跑 `all` 时 `dist/` 没有语言包，冒烟会失败。这不是产品缺陷，是构建顺序要求。
+- 具体命令、期望输出与实测记录见 `docs/BUILD-REPORT.md`（阶段 1 基线留档）。
 
 实测（2026-11-05，本机）：
 
