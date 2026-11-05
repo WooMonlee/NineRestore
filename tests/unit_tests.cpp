@@ -1057,6 +1057,17 @@ TEST(rescue_report_decision) {
     CHECK(DecideRescueReport(t) == RescueReport::None);
 }
 
+// ── H2（1.0）：降级回执不得被当成完全成功 ─────────────────────────────────
+TEST(rescue_status_ok_exact) {
+    using sysrecover::RescueStatusIsOk;
+    CHECK(!RescueStatusIsOk(""));
+    CHECK(!RescueStatusIsOk("result=OK_BOOT_UNFIXED\n"));  // 降级
+    CHECK(!RescueStatusIsOk("result=FAILED\n"));
+    CHECK(!RescueStatusIsOk("note=result=OK\n"));  // 前缀不算
+    CHECK(RescueStatusIsOk("result=OK\n"));
+    CHECK(RescueStatusIsOk("step=bootfix\r\nresult=OK \r\n"));  // CRLF/行尾空格
+}
+
 // ── PIT-148：A/B 类失败 → 可「一键重试」；C 类（已动盘）不提供 ──
 // 分类依据 rescue_decision.h 注释；单测守边界，防止有人往 A 类里塞
 // mkntfs/apply（那会把"重试"变成在半成品盘上重来）。

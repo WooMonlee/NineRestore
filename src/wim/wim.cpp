@@ -65,9 +65,14 @@ std::wstring UniqueImageName(WIMStruct* w, const std::wstring& desired) {
     return name;
 }
 
+// L6（1.0）：wimlib 线程数上限 8。0.9.96 直接用 hardware_concurrency()，
+// 高核数（32/64 核）机器在 PE 下线程过多会显著抬高峰值内存，甚至 OOM。
+// 4 核以下保持原值；实际使用的线程数在每次写入前记入日志（见 Capture）。
 unsigned ThreadCount() {
     unsigned n = std::thread::hardware_concurrency();
-    return n ? n : 4;
+    if (n == 0)
+        n = 4;
+    return n > 8 ? 8 : n;
 }
 
 enum wimlib_compression_type CompressType(const std::string& name,
@@ -315,8 +320,9 @@ int WimEngine::Capture(const std::wstring& source,
         LogError("capture: _open_osfhandle failed");
         return WIMLIB_ERR_OPEN;
     }
-    rc = wimlib_write_to_fd(h.w, ofd, WIMLIB_ALL_IMAGES, writeFlags,
-                            ThreadCount());
+    const unsigned threads = ThreadCount();
+    LogInfo("wim write: threads=" + std::to_string(threads) + " (cap 8)");
+    rc = wimlib_write_to_fd(h.w, ofd, WIMLIB_ALL_IMAGES, writeFlags, threads);
     _close(ofd);  // 关闭 fd（同时关闭上面的句柄）
     if (rc != 0) {
         DeleteFileW(tmp.c_str());

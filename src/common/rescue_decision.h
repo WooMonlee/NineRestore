@@ -10,6 +10,25 @@
 
 namespace sysrecover {
 
+// H2（1.0）：回执文本里 result 是否**严格等于 OK**（逐行匹配，容忍 CRLF/行尾空格）。
+// 0.9.96 用 strstr("result=OK")，会把 result=OK_BOOT_UNFIXED（系统已还原但引导
+// 未修好）误判成完全成功。纯函数，单测守边界。
+inline bool RescueStatusIsOk(const std::string& text) {
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t eol = text.find('\n', pos);
+        if (eol == std::string::npos)
+            eol = text.size();
+        std::string line = text.substr(pos, eol - pos);
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+            line.pop_back();
+        if (line == "result=OK")
+            return true;
+        pos = eol + 1;
+    }
+    return false;
+}
+
 struct RescueRunTimes {
     std::string latestStatusTime;  // 最新一条回执（OK/FAILED 都算）
     std::string pendingTime;       // 待执行标记（空 = 无）

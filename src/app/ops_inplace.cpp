@@ -160,11 +160,8 @@ int RunDirectRestore(const RestoreRequest& req, const PartitionInfo& target,
         if (req.formatTarget) {
             LogInfo(plog);
             if (prep != 0) {
-                if (oldPreserved) {
-                    std::string rlog;
-                    RollbackPreservedOld(letter + L":\\", rlog);
-                    LogWarn(rlog);
-                }
+                // L7（1.0）：此处 oldPreserved 恒为 false（只有 preserveOld 分支会
+                // 置 true，而那是上面的 if 分支），原回滚代码是死代码，删除。
                 err = Tr("就地还原：格式化目标分区失败（") + raw + Tr("）");
                 LogError(err);
                 ProgressDone("restore", "failed");

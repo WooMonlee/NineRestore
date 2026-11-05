@@ -14,6 +14,7 @@
 #include <windows.h>
 #include <shellapi.h>
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cwchar>
@@ -136,7 +137,39 @@ std::wstring OptionDesc(const std::vector<BYTE>& b) {
     return d;
 }
 
-int FindUefiEntry(const wchar_t* desc) {
+// L5（1.0）：取 EFI_LOAD_OPTION 里的设备路径（描述之后、FilePathListLength 字节）。
+std::vector<BYTE> OptionDevicePath(const std::vector<BYTE>& b) {
+    if (b.size() < 8) return {};
+    WORD fpll = 0;
+    memcpy(&fpll, &b[4], 2);
+    size_t off = 6;
+    while (off + 2 <= b.size()) {
+        wchar_t c = 0;
+        memcpy(&c, &b[off], 2);
+        off += 2;
+        if (c == 0) break;
+    }
+    if (off + fpll > b.size()) return {};
+    return std::vector<BYTE>(b.begin() + off, b.begin() + off + fpll);
+}
+
+// 设备路径里可打印的 ASCII 足够判归属（与 uefi.cpp 的 IsOurs 同一思路）。
+bool PathContains(const std::vector<BYTE>& p, const char* needle) {
+    if (p.empty()) return false;
+    std::string s;
+    s.reserve(p.size());
+    for (BYTE c : p)
+        if (c >= 0x20 && c < 0x7f) s.push_back((char)c);
+    std::string hay = s, pat = needle;
+    for (auto& c : hay) c = (char)tolower((unsigned char)c);
+    for (auto& c : pat) c = (char)tolower((unsigned char)c);
+    return hay.find(pat) != std::string::npos;
+}
+
+// L5：按「描述 + 设备路径」双条件匹配。0.9.96 只看描述，同名条目会误删。
+// requireOurs=true 时要求路径带本项目特征（ZJRESTORE/bootmgfw），用于清理
+// 我们自己创建的临时/菜单项；两条都满足才返回。
+int FindUefiEntry(const wchar_t* desc, bool requireOurs) {
     std::vector<BYTE> order;
     if (!ReadVar(L"BootOrder", order)) return -1;
     for (size_t i = 0; i + 1 < order.size(); i += 2) {
@@ -144,13 +177,23 @@ int FindUefiEntry(const wchar_t* desc) {
         memcpy(&v, &order[i], 2);
         std::vector<BYTE> b;
         if (!ReadVar(VarName(v), b)) continue;
-        if (OptionDesc(b) == desc) return v;
+        if (OptionDesc(b) != desc) continue;
+        if (requireOurs) {
+            const auto path = OptionDevicePath(b);
+            if (!PathContains(path, "zjrestore") &&
+                !PathContains(path, "bootmgfw"))
+                continue;
+        }
+        return v;
     }
     return -1;
 }
 
-void RemoveUefiEntry(int num) {
-    if (num < 0) return;
+// L5：返回值改为 bool —— NVRAM 写保护/写满时 WriteVar/DeleteVar 会失败，
+// 0.9.96 忽略返回值，失败后仍打 "removed" 日志且上层当成功。
+bool RemoveUefiEntry(int num) {
+    if (num < 0) return true;
+    bool ok = true;
     std::vector<BYTE> order;
     if (ReadVar(L"BootOrder", order)) {
         std::vector<WORD> keep;
@@ -162,14 +205,26 @@ void RemoveUefiEntry(int num) {
         std::vector<BYTE> nb(keep.size() * 2);
         for (size_t i = 0; i < keep.size(); ++i)
             memcpy(&nb[i * 2], &keep[i], 2);
-        WriteVar(L"BootOrder", nb.data(), (DWORD)nb.size());
+        if (!WriteVar(L"BootOrder", nb.data(), (DWORD)nb.size())) {
+            ok = false;
+            Log("ERROR: write BootOrder failed (NVRAM read-only/full?)");
+        }
     }
-    DeleteVar(VarName(num));
+    if (!DeleteVar(VarName(num))) {
+        ok = false;
+        Log("ERROR: delete Boot#### failed (NVRAM read-only/full?)");
+    }
     WORD next = 0;
     DWORD n = GetFirmwareEnvironmentVariableW(L"BootNext", kGlobalGuid,
                                               &next, sizeof(next));
-    if (n == sizeof(next) && next == (WORD)num) DeleteVar(L"BootNext");
-    Log("uefi temporary entry removed");
+    if (n == sizeof(next) && next == (WORD)num &&
+        !DeleteVar(L"BootNext")) {
+        ok = false;
+        Log("ERROR: delete BootNext failed");
+    }
+    Log(ok ? "uefi temporary entry removed"
+           : "uefi temporary entry removal FAILED");
+    return ok;
 }
 
 // 同步执行并抓 stdout（bcdedit 条目存在性、mountvol 不必抓）。
@@ -456,9 +511,15 @@ int wmain(int argc, wchar_t** argv) {
     EnableEnvPrivilege();
 
     ApplyComputerName();  // PIT-211：B 引擎的改机器名
-    const int temp = FindUefiEntry(kTempEntryDesc);
-    const bool menuUefi = FindUefiEntry(kMenuEntryDesc) >= 0;
-    RemoveUefiEntry(temp);
+    bool ok = true;
+    // L5：双条件匹配（描述 + 设备路径），避免误删同名但非本项目的条目。
+    const int temp = FindUefiEntry(kTempEntryDesc, true);
+    const bool menuUefi = FindUefiEntry(kMenuEntryDesc, true) >= 0;
+    if (!RemoveUefiEntry(temp)) {
+        // 写入失败（NVRAM 只读/写满）→ 明确记录，不假装清理成功。
+        ok = false;
+        Log("WARN: temporary UEFI entry could not be fully removed");
+    }
     RemoveBcdTemp();
 
     const bool menu = menuUefi || BcdMenuExists();
@@ -481,6 +542,8 @@ int wmain(int argc, wchar_t** argv) {
     WriteDoneMarker();
     RemoveStartupCmd();
     RemoveSelfAndRunOnce();
-    Log("restore-boot cleanup done (menu=" + std::string(menu ? "1" : "0") + ")");
-    return 0;
+    Log("restore-boot cleanup done (menu=" + std::string(menu ? "1" : "0") +
+        ", ok=" + std::string(ok ? "1" : "0") + ")");
+    // L5：把 NVRAM 写失败反映到退出码，上层（首启助手）可提示重试。
+    return ok ? 0 : 1;
 }

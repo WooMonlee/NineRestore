@@ -19,6 +19,7 @@
 #include <thread>
 
 #include "../common/logger.h"
+#include "../common/rescue_decision.h"  // H2：回执精确判定（纯函数，可单测）
 #include "../common/process.h"  // takeown/icacls/schtasks（权限兜底）
 #include "../common/relocate.h"
 
@@ -345,21 +346,8 @@ bool ReadRescueOk(const std::wstring& root) {
     DWORD rd = 0;
     ReadFile(h, buf, sizeof(buf) - 1, &rd, nullptr);
     CloseHandle(h);
-    // 逐行扫描；容忍 CRLF 与行尾空格。
-    std::string text(buf, rd);
-    size_t pos = 0;
-    while (pos < text.size()) {
-        size_t eol = text.find('\n', pos);
-        if (eol == std::string::npos)
-            eol = text.size();
-        std::string line = text.substr(pos, eol - pos);
-        while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
-            line.pop_back();
-        if (line == "result=OK")
-            return true;
-        pos = eol + 1;
-    }
-    return false;
+    // 判定逻辑抽到纯函数（common/rescue_decision.h）以便单测。
+    return sysrecover::RescueStatusIsOk(std::string(buf, rd));
 }
 
 // 探测一块盘上的 ~new(wantNew=true) / ~old；无残留返回 false
