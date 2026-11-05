@@ -4,6 +4,7 @@
 #include <windows.h>
 
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 #include "../common/version.h"
@@ -48,140 +49,179 @@ bool WriteTextFile(const std::wstring& path, const std::string& utf8) {
     return ok && written == utf8.size();
 }
 
+// M14：读回校验用（conf 写完后回读，确认关键键真的落盘）。
+bool ReadTextFile(const std::wstring& path, std::string& out) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return false;
+    DWORD size = GetFileSize(h, nullptr);
+    out.assign(size, '\0');
+    DWORD got = 0;
+    const BOOL ok = ReadFile(h, out.data(), size, &got, nullptr) != 0;
+    CloseHandle(h);
+    out.resize(ok ? got : 0);
+    return ok;
+}
+
+bool HasKeyLine(const std::string& text, const char* key) {
+    if (text.compare(0, strlen(key), key) == 0)
+        return true;
+    const std::string pat = std::string("\n") + key;
+    return text.find(pat) != std::string::npos;
+}
+
 }  // namespace
 
 // 任务 sidecar（key=value，Linux restore.sh 读取）。软件目录与目标分区根
 // 各写一份：日志写目标根、conf 写软件目录，二者可能不在同一分区，Linux 侧
 // 需能就近取到（PIT-035）。
+// M14（1.0）：契约/日志不再用 8192 固定缓冲 + snprintf —— 0.9.96 从不检查
+// snprintf 返回值，超长路径会把后面的 contract_version/keep_old/target_guid
+// 键截掉，Linux 侧就可能按默认策略选错目标。改用 std::string 逐步追加，
+// 从根上消除截断（单字段长度上限由调用方/系统路径限制决定）。
+namespace {
+void Kv(std::string& s, const char* key, const std::string& v) {
+    s += key;
+    s += v;
+    s += '\n';
+}
+std::string Num(long long n) {
+    char b[32];
+    snprintf(b, sizeof(b), "%lld", n);
+    return b;
+}
+std::string NumU(unsigned long long n) {
+    char b[32];
+    snprintf(b, sizeof(b), "%llu", n);
+    return b;
+}
+}  // namespace
+
 std::string BuildTaskConf(const RestoreTask& t) {
-    char buf[8192];
-    snprintf(
-        buf, sizeof(buf),
-        "action=%s\n"
-        "pt_type=%s\n"
-        "image_part_guid=%s\n"
-        "image_rel_path=%s\n"
-        "image_path=%s\n"
-        "image_index=%d\n"
-        "image_size=%llu\n"
-        "reparse_scan=%d\n"
-        "efs_scan=%d\n"
-        "esp_index=%d\n"
-        "ea_index=%d\n"
-        "esp_fix_dir=%s\n"
-        "ea_fix_dir=%s\n"
-        "target_guid=%s\n"
-        "target_offset=%llu\n"
-        "target_size=%llu\n"
-        "target_disk_serial=%s\n"
-        "repair_boot=%d\n"
-        "partition_count=%u\n"
-        "software_dir=%s\n"
-        "engine=%s\n"
-        "keep_old=%d\n"
-        "target_mode=%s\n"
-        "new_computer_name=%s\n"
-        "contract_version=%d\n",
-        (t.action.empty() ? "restore" : t.action.c_str()),
-        t.ptType.c_str(), W2U(t.imagePartGuid).c_str(),
-        W2U(t.imageRelPath).c_str(), W2U(t.imagePath).c_str(), t.imageIndex,
-        (unsigned long long)t.imageSize, t.reparseScan, t.efsScan,
-        t.espIndex, t.eaIndex, W2U(t.espFixDir).c_str(),
-        W2U(t.eaFixDir).c_str(),
-        W2U(t.targetGuid).c_str(),
-        (unsigned long long)t.targetOffset,
-        (unsigned long long)t.targetSize, W2U(t.targetDiskSerial).c_str(),
-        t.repairBoot ? 1 : 0, t.partCount, W2U(t.softwareDir).c_str(),
-        (t.engine.empty() ? "block" : t.engine.c_str()),
-        t.keepOld ? 1 : 0,
-        (t.targetMode.empty() ? "format" : t.targetMode.c_str()),
-        W2U(t.computerName).c_str(),
-        SYSRECOVER_CONTRACT_VERSION);
-    return buf;
+    std::string s;
+    Kv(s, "action=", t.action.empty() ? "restore" : t.action);
+    Kv(s, "pt_type=", t.ptType);
+    Kv(s, "image_part_guid=", W2U(t.imagePartGuid));
+    Kv(s, "image_rel_path=", W2U(t.imageRelPath));
+    Kv(s, "image_path=", W2U(t.imagePath));
+    Kv(s, "image_index=", Num(t.imageIndex));
+    Kv(s, "image_size=", NumU(t.imageSize));
+    Kv(s, "reparse_scan=", Num(t.reparseScan));
+    Kv(s, "efs_scan=", Num(t.efsScan));
+    Kv(s, "esp_index=", Num(t.espIndex));
+    Kv(s, "ea_index=", Num(t.eaIndex));
+    Kv(s, "esp_fix_dir=", W2U(t.espFixDir));
+    Kv(s, "ea_fix_dir=", W2U(t.eaFixDir));
+    Kv(s, "target_guid=", W2U(t.targetGuid));
+    Kv(s, "target_offset=", NumU(t.targetOffset));
+    Kv(s, "target_size=", NumU(t.targetSize));
+    Kv(s, "target_disk_serial=", W2U(t.targetDiskSerial));
+    Kv(s, "repair_boot=", Num(t.repairBoot ? 1 : 0));
+    Kv(s, "partition_count=", NumU(t.partCount));
+    Kv(s, "software_dir=", W2U(t.softwareDir));
+    Kv(s, "engine=", t.engine.empty() ? "block" : t.engine);
+    Kv(s, "keep_old=", Num(t.keepOld ? 1 : 0));
+    Kv(s, "target_mode=", t.targetMode.empty() ? "format" : t.targetMode);
+    Kv(s, "new_computer_name=", W2U(t.computerName));
+    Kv(s, "contract_version=", Num(SYSRECOVER_CONTRACT_VERSION));
+    return s;
 }
 
 std::string BuildTaskJson(const RestoreTask& t) {
-    char buf[8192];
-    snprintf(
-        buf, sizeof(buf),
-        "{\"schema\":1,\"action\":\"%s\",\"pt_type\":\"%s\","
-        "\"image_path\":\"%s\",\"image_rel_path\":\"%s\",\"image_index\":%d,"
-        "\"image_size\":%llu,\"reparse_scan\":%d,\"efs_scan\":%d,"
-        "\"esp_index\":%d,"
-        "\"ea_index\":%d,"
-        "\"esp_fix_dir\":\"%s\",\"ea_fix_dir\":\"%s\","
-        "\"target_disk\":%d,\"target_part\":%d,"
-        "\"target_offset\":%llu,\"target_size\":%llu,"
-        "\"repair_boot\":%s,\"partition_count\":%u,"
-        "\"target_mode\":\"%s\",\"new_computer_name\":\"%s\"}\n",
-        (t.action.empty() ? "restore" : t.action.c_str()),
-        t.ptType.c_str(), JsonEsc(W2U(t.imagePath)).c_str(),
-        W2U(t.imageRelPath).c_str(), t.imageIndex,
-        (unsigned long long)t.imageSize, t.reparseScan, t.efsScan,
-        t.espIndex, t.eaIndex, JsonEsc(W2U(t.espFixDir)).c_str(),
-        JsonEsc(W2U(t.eaFixDir)).c_str(),
-        t.targetDisk, t.targetPart, (unsigned long long)t.targetOffset,
-        (unsigned long long)t.targetSize, t.repairBoot ? "true" : "false",
-        t.partCount,
-        (t.targetMode.empty() ? "format" : t.targetMode.c_str()),
-        W2U(t.computerName).c_str());
-    return buf;
+    std::string s;
+    s += "{\"schema\":1,\"action\":\"";
+    s += (t.action.empty() ? "restore" : t.action);
+    s += "\",\"pt_type\":\"";
+    s += t.ptType;
+    s += "\",\"image_path\":\"";
+    s += JsonEsc(W2U(t.imagePath));
+    s += "\",\"image_rel_path\":\"";
+    s += W2U(t.imageRelPath);
+    s += "\",\"image_index\":";
+    s += Num(t.imageIndex);
+    s += ",\"image_size\":";
+    s += NumU(t.imageSize);
+    s += ",\"reparse_scan\":";
+    s += Num(t.reparseScan);
+    s += ",\"efs_scan\":";
+    s += Num(t.efsScan);
+    s += ",\"esp_index\":";
+    s += Num(t.espIndex);
+    s += ",\"ea_index\":";
+    s += Num(t.eaIndex);
+    s += ",\"esp_fix_dir\":\"";
+    s += JsonEsc(W2U(t.espFixDir));
+    s += "\",\"ea_fix_dir\":\"";
+    s += JsonEsc(W2U(t.eaFixDir));
+    s += "\",\"target_disk\":";
+    s += Num(t.targetDisk);
+    s += ",\"target_part\":";
+    s += Num(t.targetPart);
+    s += ",\"target_offset\":";
+    s += NumU(t.targetOffset);
+    s += ",\"target_size\":";
+    s += NumU(t.targetSize);
+    s += ",\"repair_boot\":";
+    s += (t.repairBoot ? "true" : "false");
+    s += ",\"partition_count\":";
+    s += NumU(t.partCount);
+    s += ",\"target_mode\":\"";
+    s += (t.targetMode.empty() ? "format" : t.targetMode);
+    s += "\",\"new_computer_name\":\"";
+    s += W2U(t.computerName);
+    s += "\"}\n";
+    return s;
 }
 
 std::string BuildRestoreLogText(const RestoreTask& t,
                                 const std::string& isoTimestamp) {
-    char buf[8192];
-    snprintf(buf, sizeof(buf),
-             "action=%s\n"
-             "log_time=%s\n"
-             "software_version=%s\n"
-             "software_path=%s\n"
-             "target_disk_name=%s\n"
-             "target_disk_serial=%s\n"
-             "target_disk_size=%llu\n"
-             "target_part_offset=%llu\n"
-             "target_part_size=%llu\n"
-             "target_fs=%s\n"
-             "target_vol_label=%s\n"
-             "image_path=%s\n"
-             "image_index=%d\n"
-             "image_size=%llu\n"
-             "reparse_scan=%d\n"
-             "efs_scan=%d\n"
-        "esp_index=%d\n"
-        "ea_index=%d\n"
-        "esp_fix_dir=%s\n"
-        "ea_fix_dir=%s\n"
-        "repair_boot=%d\n"
-        "pt_type=%s\n"
-        "engine=%s\n"
-        "keep_old=%d\n"
-        "contract_version=%d\n",
-        (t.action.empty() ? "restore" : t.action.c_str()),
-        isoTimestamp.c_str(), SYSRECOVER_VERSION,
-        W2U(t.softwarePath).c_str(),
-        W2U(t.targetDiskName).c_str(), W2U(t.targetDiskSerial).c_str(),
-        (unsigned long long)t.targetDiskSize,
-        (unsigned long long)t.targetOffset,
-        (unsigned long long)t.targetSize, W2U(t.targetFs).c_str(),
-        W2U(t.targetVolLabel).c_str(), W2U(t.imagePath).c_str(),
-        t.imageIndex, (unsigned long long)t.imageSize, t.reparseScan,
-        t.efsScan, t.espIndex, t.eaIndex, W2U(t.espFixDir).c_str(),
-        W2U(t.eaFixDir).c_str(),
-        t.repairBoot ? 1 : 0,
-        t.ptType.c_str(),
-        (t.engine.empty() ? "block" : t.engine.c_str()),
-        t.keepOld ? 1 : 0,
-        SYSRECOVER_CONTRACT_VERSION);
-    return buf;
+    std::string s;
+    Kv(s, "action=", t.action.empty() ? "restore" : t.action);
+    Kv(s, "log_time=", isoTimestamp);
+    Kv(s, "software_version=", SYSRECOVER_VERSION);
+    Kv(s, "software_path=", W2U(t.softwarePath));
+    Kv(s, "target_disk_name=", W2U(t.targetDiskName));
+    Kv(s, "target_disk_serial=", W2U(t.targetDiskSerial));
+    Kv(s, "target_disk_size=", NumU(t.targetDiskSize));
+    Kv(s, "target_part_offset=", NumU(t.targetOffset));
+    Kv(s, "target_part_size=", NumU(t.targetSize));
+    Kv(s, "target_fs=", W2U(t.targetFs));
+    Kv(s, "target_vol_label=", W2U(t.targetVolLabel));
+    Kv(s, "image_path=", W2U(t.imagePath));
+    Kv(s, "image_index=", Num(t.imageIndex));
+    Kv(s, "image_size=", NumU(t.imageSize));
+    Kv(s, "reparse_scan=", Num(t.reparseScan));
+    Kv(s, "efs_scan=", Num(t.efsScan));
+    Kv(s, "esp_index=", Num(t.espIndex));
+    Kv(s, "ea_index=", Num(t.eaIndex));
+    Kv(s, "esp_fix_dir=", W2U(t.espFixDir));
+    Kv(s, "ea_fix_dir=", W2U(t.eaFixDir));
+    Kv(s, "repair_boot=", Num(t.repairBoot ? 1 : 0));
+    Kv(s, "pt_type=", t.ptType);
+    Kv(s, "engine=", t.engine.empty() ? "block" : t.engine);
+    Kv(s, "keep_old=", Num(t.keepOld ? 1 : 0));
+    Kv(s, "contract_version=", Num(SYSRECOVER_CONTRACT_VERSION));
+    return s;
 }
 
 bool WriteRestoreTask(const std::wstring& dir, const RestoreTask& t,
                       std::string& log) {
     // sidecar（key=value，供 Linux restore.sh）
     // 注意：image_path 为 restore.sh 第 7 步定位镜像分区的必需键（Phase 5 补）。
-    if (!WriteTextFile(dir + L"\\restore-task.conf", BuildTaskConf(t))) {
+    const std::string conf = BuildTaskConf(t);
+    if (!WriteTextFile(dir + L"\\restore-task.conf", conf)) {
         log += "write restore-task.conf FAIL\n";
+        return false;
+    }
+    // M14：回读校验关键键。0.9.96 的 8192 固定缓冲一旦截断，Linux 侧会拿不到
+    // contract_version/keep_old/target_guid，从而按默认值选错目标盘。
+    std::string back;
+    if (!ReadTextFile(dir + L"\\restore-task.conf", back) ||
+        !HasKeyLine(back, "contract_version=") ||
+        !HasKeyLine(back, "keep_old=") || !HasKeyLine(back, "target_guid=") ||
+        !HasKeyLine(back, "target_disk_serial=")) {
+        log += "restore-task.conf verify FAIL (keys missing/truncated)\n";
         return false;
     }
     // json（同内容，供 Windows 侧/GUI 读取）
