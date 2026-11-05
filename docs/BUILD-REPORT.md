@@ -112,18 +112,20 @@ cf9dc5b refactor(ops): 拆分前最小可见性调整 —— BootWriteBlockedHin
 ### 6.4 可复现验证清单
 
 ```powershell
-# 1) 构建（PATH 不含 bash）
-$env:PATH = "D:\Prog\ProgIDE\mingw64\bin;D:\Prog\ProgIDE\mingw32\bin;C:\Users\Administrator\AppData\Local\Programs\Python313;" + $env:PATH
-mingw32-make -f Makefile PYTHON='C:/Users/Administrator/AppData/Local/Programs/Python313/python.exe' ARCH=x64 all
-mingw32-make -f Makefile PYTHON='C:/Users/Administrator/AppData/Local/Programs/Python313/python.exe' ARCH=x86 all
+# 1) 构建（PATH 不含 bash/sh，否则 Make 会改用 sh，cmd 语法配方失败）
+$env:PATH = "D:\Prog\ProgIDE\mingw64\bin;D:\Prog\ProgIDE\mingw32\bin;D:\Prog\ProgIDE\python\Python313;C:\Windows\System32;C:\Windows"
+mingw32-make -f Makefile PYTHON=D:/Prog/ProgIDE/python/Python313/python.exe ARCH=x64 all
+mingw32-make -f Makefile PYTHON=D:/Prog/ProgIDE/python/Python313/python.exe ARCH=x86 all
 
-# 2) 门禁（PATH 需含 bash）
-$env:PATH = "D:\Prog\ProgIDE\msys64\usr\bin;" + $env:PATH
-mingw32-make -f Makefile PYTHON='C:/Users/Administrator/AppData/Local/Programs/Python313/python.exe' check
+# 2) 门禁（PATH 需含 bash；MAKESHELL 强制配方仍走 cmd）
+$env:PATH = "D:\Prog\ProgIDE\mingw64\bin;D:\Prog\Github\Github_UGit\resources\app\git\bin;C:\Windows\System32;C:\Windows"
+$env:MAKESHELL = "C:\Windows\System32\cmd.exe"
+mingw32-make -f Makefile SHELL=cmd.exe PYTHON=D:/Prog/ProgIDE/python/Python313/python.exe check
 
-# 3) 打包 + CLI 冒烟（顺序不能反）
-mingw32-make -f Makefile PYTHON='C:/Users/Administrator/AppData/Local/Programs/Python313/python.exe' package
-mingw32-make -f Makefile PYTHON='C:/Users/Administrator/AppData/Local/Programs/Python313/python.exe' ARCH=x64 smoke-cli
+# 3) 打包 + SHA256 + 分发校验（顺序不能反）
+mingw32-make -f Makefile SHELL=cmd.exe PYTHON=D:/Prog/ProgIDE/python/Python313/python.exe package
+mingw32-make -f Makefile SHELL=cmd.exe PYTHON=D:/Prog/ProgIDE/python/Python313/python.exe sha256
+mingw32-make -f Makefile SHELL=cmd.exe PYTHON=D:/Prog/ProgIDE/python/Python313/python.exe dist-check
 
 # 4) 结构证明
 git log --oneline 97a0d6c..HEAD
@@ -193,3 +195,47 @@ test_zjswap: PASS (A fail-closed/rollback, B happy path, C marker gate, D post-v
 ```
 
 用例含义：A 注入旧项 move 失败 → 必须 exit 4、回滚已搬项、保留 `~new`、不得留下 `~old`、新树不得泄漏到根；B 正常路径 → exit 0、删 `~new`、保留 `~old`；C 缺 `.zj-done` → exit 2；D 新树缺 `winload` → exit 5 且保留 `~new`。
+
+## 8. 阶段 4（P1 + 测试 + CI）实测证据
+
+环境同上。时间：2026-11-05。
+
+### 8.1 原子提交清单（每批提交前跑双架构构建 + 门禁）
+
+| 提交 | 覆盖编号 | 要点 |
+|---|---|---|
+| `2c36c30` | M8、M9 | 格式化工具预检 + diskpart 回退；长路径声明与 `\\?\` 前缀 |
+| `3ef7c65` | M14 | 契约/日志改 `std::string` 拼接，写后回读校验关键键 |
+| `794fa95` | M2、M3、M4 | keep 清空不完整即中止；清理范围收敛；ESP 按目标盘匹配 |
+| `4739c42` | M11、M12、M13、L1 | USB 显式开关；盘数上限 128 + extent 重试；备份不完整退出 7；提权保留工作目录；12 处译文不再当格式串 |
+| `fdcaeb5` | M1、M5、M6、M7、M10、M15 | 子镜像配对；救援层序列号/GUID 双校验；镜像不静默覆盖；备份预检；明文清扫；ESP 暂存失败降级 |
+| `e4be3d7` | L5、L6、L7、H2 | UEFI 项双条件清理 + 写失败返回；wim 线程上限 8；删死代码；回执 OK 判定纯函数化 + 单测 |
+| `8c0be91` | L2（CI） | x86 补 32 位门禁/冒烟并修产物路径；新增 release job（package + SHA256 + dist-check）；同步重建载荷 |
+
+### 8.2 构建与门禁
+
+| 命令 | 实际 |
+|---|---|
+| `mingw32-make ARCH=x64 all` | 退出码 0（`dist/x64` CLI/GUI/Check 三件） |
+| `mingw32-make ARCH=x86 all` | 退出码 0（`dist/*_x86` 三件） |
+| `mingw32-make -f Makefile SHELL=cmd.exe check` | `80 cases, 636 checks, 0 failures`；test_version 13 checks 0 失败 |
+| check-docs / check-i18n | PASS / `OK (863 keys, 863 lang entries)` |
+| check-widths / check-shell | `OK (1 WARN)` / `PASS (zjrestore-lite.sh=184, init=70, deny-list 8 clean)` |
+| check-config / check-layers / check-secrets | 全部 PASS |
+| test_zjswap | PASS（A/B/C/D 四场景） |
+| `package` → `sha256` → `dist-check` | 退出码 0 / `SHA256SUMS: 73 file(s)` / `check-dist: PASS` |
+
+### 8.3 关键改动的可验证证据
+
+- **M12（USB/盘数/extent）**：`disk.cpp` 中 `BusTypeUsb` 同时置 `isUsb`/`isRemovable`；默认 `EnumerateDisks(false)` 过滤，GUI 菜单项「显示 USB 设备（默认隐藏，谨慎选择）」传 `true`；列表行尾追加「（USB 设备）」。上限 16→128；extent 缓冲 8 起、`ERROR_MORE_DATA` 倍增（cap 64）。
+- **M11（备份完整性）**：有跳过文件时 CLI 返回 7，`--allow-skipped` 才归 0；帮助与退出码表已更新。
+- **M2/M3/M4（keep 模式）**：脚本在 apply 前中止并写 `STEP=wipe-incomplete` / `wipe-not-mountable`；清理只删带本工具特征的引导文件；ESP 优先同盘，无法判断时仅唯一候选。复现步骤见 `docs/07-测试矩阵与回归记录.md` §6 ④。
+- **M7/M10（备份预检/清扫）**：追加前按 `源用量/2 + 128MB` 预检（`ADV_SPACE`）；加密备份持锁后清理 `dest.plain.tmp`/`.stage*`。
+- **H2 回归**：`RescueStatusIsOk` 单测覆盖 `result=OK_BOOT_UNFIXED`、`result=FAILED`、带前缀、CRLF + 行尾空格（`tests/unit_tests.cpp` `rescue_status_ok_exact`）。
+- **L5**：`RemoveUefiEntry` 对 `WriteVar`/`DeleteVar`/`BootNext` 失败返回 false，主流程 `return 1`，日志写明 `removal FAILED`。
+
+### 8.4 未自动化 / 需实机确认的部分
+
+- 测试 ③（追加中途失败原镜像可用）与 ④（keep 清空不完整中止）需要真实 WIM 写入或 Linux 挂载环境，**不进 `make check`**；可复现步骤与通过判据见 `docs/07` §6。
+- 测试 ⑤（引导修复失败降级上报）核心判定已由 `rescue_status_ok_exact` 覆盖；端到端需真机/VM。
+- L3（`ops.cpp` 单体拆分）已在阶段 2 完成（函数集合 67/67 一致）。
