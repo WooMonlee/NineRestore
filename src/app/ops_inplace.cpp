@@ -20,6 +20,7 @@
 #include "../boot/bootfix.h"
 #include "../boot/bootpath.h"
 #include "../boot/bootself.h"
+#include "../boot/cleanup_marker.h"
 #include "../boot/grub.h"
 #include "../boot/task.h"
 #include "../boot/uefi.h"
@@ -622,15 +623,8 @@ bool InstallFirstBootCleanup(const std::wstring& newDir,
     }
     // 启动文件夹：首次登录由资源管理器以普通权限启动 helper；helper 先弹说明，
     // 再自行 ShellExecute(runas) 请求 UAC。非提权实例会等待提权实例完成；
-    // 成功后 cmd 立刻自删；UAC 取消/失败则 cmd 保留，下次登录重试。
-    const char kCmd[] =
-        "@echo off\r\n"
-        "if exist \"%ProgramData%\\SysRecover\\boot-cleanup.done\" goto done\r\n"
-        "\"%ProgramData%\\SysRecover\\zj-restore-boot.exe\"\r\n"
-        "if exist \"%ProgramData%\\SysRecover\\boot-cleanup.done\" del \"%~f0\"\r\n"
-        "goto :eof\r\n"
-        ":done\r\n"
-        "del \"%~f0\"\r\n";
+    // 标记带结果（ok=1/ok=0）——清理成功才自删，失败保留到下次登录重试
+    //（见 boot/cleanup_marker.h 的单一模板）。
     const std::wstring cmdPath = startup + L"\\SysRecover-RestoreBoot.cmd";
     HANDLE h = CreateFileW(cmdPath.c_str(), GENERIC_WRITE, 0, nullptr,
                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -640,7 +634,8 @@ bool InstallFirstBootCleanup(const std::wstring& newDir,
         return false;
     }
     DWORD wr = 0;
-    WriteFile(h, kCmd, (DWORD)(sizeof(kCmd) - 1), &wr, nullptr);
+    WriteFile(h, kFirstBootCleanupCmd,
+              (DWORD)(sizeof(kFirstBootCleanupCmd) - 1), &wr, nullptr);
     CloseHandle(h);
     log += "first-boot cleanup deployed (helper + startup cmd)\n";
     return true;

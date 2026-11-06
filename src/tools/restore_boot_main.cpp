@@ -17,12 +17,14 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <cwchar>
 #include <string>
 #include <vector>
 
 #include "../boot/bcd.h"
 #include "../boot/bootnames.h"
+#include "../boot/cleanup_marker.h"
 
 namespace {
 
@@ -488,19 +490,35 @@ void RemoveStartupCmd() {
             std::to_string(GetLastError()));
 }
 
-void WriteDoneMarker() {
+// 标记必须带结果（ok=1 / ok=0）：Startup 的 cmd 只认 ok=1 才自删，
+// ok=0 时保留 cmd 与 helper，下次登录重试。见 boot/cleanup_marker.h。
+void WriteDoneMarker(bool ok) {
     const std::wstring p = ProgramData() + kProgramDataSubdir +
                            L"\\boot-cleanup.done";
     HANDLE h = CreateFileW(p.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
-        Log("done marker write failed");
+        // 写不出标记 = 上层永远判不了结果；至少日志要能看出来。
+        Log("ERROR: done marker write failed (result=ok=" +
+            std::string(ok ? "1" : "0") + ")");
         return;
     }
-    const char k[] = "done\r\n";
+    const char* k = ok ? kCleanupMarkerOkText : kCleanupMarkerFailText;
     DWORD wr = 0;
-    WriteFile(h, k, (DWORD)sizeof(k) - 1, &wr, nullptr);
+    WriteFile(h, k, (DWORD)strlen(k), &wr, nullptr);
     CloseHandle(h);
+}
+
+// 清理失败必须可感知：NVRAM 只读/写满时框里给出下一步（自动重试 + 日志位置），
+// 不再像 0.9.96 那样当作成功静默退出。
+void NotifyCleanupFailure() {
+    const wchar_t* msg =
+        L"临时引导项清理未完成（NVRAM 可能被写保护或已写满）。\n\n"
+        L"系统会在下次登录时自动重试；如多次失败，请查看\n"
+        L"%ProgramData%\\SysRecover\\boot-cleanup.log 并以管理员身份运行\n"
+        L"zj-restore-boot.exe。";
+    MessageBoxW(nullptr, msg, L"SysRecover 引导清理",
+                MB_OK | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST);
 }
 
 }  // namespace
@@ -566,11 +584,18 @@ int wmain(int argc, wchar_t** argv) {
         }
         Log("temporary boot files removed");
     }
-    WriteDoneMarker();
-    RemoveStartupCmd();
-    RemoveSelfAndRunOnce();
+    WriteDoneMarker(ok);
     Log("restore-boot cleanup done (menu=" + std::string(menu ? "1" : "0") +
         ", ok=" + std::string(ok ? "1" : "0") + ")");
+    if (ok) {
+        RemoveStartupCmd();
+        RemoveSelfAndRunOnce();
+    } else {
+        // 失败：保留 cmd / helper / RunOnce，下次登录自动重试；同时给用户一个
+        // 可感知的提示（0.9.96 静默失败，用户只看到"菜单还在"）。
+        Log("cleanup incomplete: startup cmd + helper kept for retry");
+        NotifyCleanupFailure();
+    }
     // L5：把 NVRAM 写失败反映到退出码，上层（首启助手）可提示重试。
     return ok ? 0 : 1;
 }

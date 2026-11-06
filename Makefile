@@ -313,7 +313,7 @@ BOOT_CLEANUP_SRC = src/tools/restore_boot_main.cpp
 BOOT_CLEANUP_X86 = $(MINGW32)/bin/i686-w64-mingw32-g++
 BOOT_CLEANUP_OUT = bootfiles/zj-restore-boot.exe
 boot-cleanup: $(BOOT_CLEANUP_OUT)
-$(BOOT_CLEANUP_OUT): $(BOOT_CLEANUP_SRC) src/boot/bcd.h src/boot/bootnames.h $(VI_X86_DIR)/restore_boot.o | $(OBJDIR)
+$(BOOT_CLEANUP_OUT): $(BOOT_CLEANUP_SRC) src/boot/bcd.h src/boot/bootnames.h src/boot/cleanup_marker.h $(VI_X86_DIR)/restore_boot.o | $(OBJDIR)
 	$(BOOT_CLEANUP_X86) $(CXXFLAGS) $(INCLUDES) $(BOOT_CLEANUP_SRC) $(VI_X86_DIR)/restore_boot.o -o $(BOOT_CLEANUP_OUT) -static -mconsole -municode -s -ladvapi32 -lshell32
 # ---- 单元测试（0.7 线重做：2026-10-11 自 graveyard/tests 迁回；旧 45 用例对 0.7
 #      源码复验全绿后原样恢复，另补 0.7 新纯逻辑 DecideSwapLeftover 决策表用例）----

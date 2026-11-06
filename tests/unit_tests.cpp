@@ -20,6 +20,7 @@
 #include "boot/bootnames.h"
 #include "boot/bootpath.h"
 #include "boot/bootself.h"
+#include "boot/cleanup_marker.h"
 #include "boot/task.h"
 #include "boot/uefi.h"
 #include "common/crypt.h"
@@ -2072,4 +2073,28 @@ TEST(precheck_image_path_ready) {
     CHECK(ImagePathReady(L"C:\\__zj_no_such_file__.wim"));
     // 不存在且不像镜像：不尝试打开
     CHECK(!ImagePathReady(L"C:\\__zj_no_such_file__.txt"));
+}
+
+// ───────────────── 首启清理结果标记（ok=1 / ok=0） ─────────────────
+// 回归背景：0.9.96 失败也写 "done"，Startup cmd 只看文件存在就自删。
+// 现在标记必须带结果，cmd 只在 ok=1 时自删，失败保留重试。
+
+TEST(cleanup_marker_text_carries_result) {
+    CHECK(!CleanupMarkerSaysOk(kCleanupMarkerFailText));  // ok=0 → 未完成
+    CHECK(CleanupMarkerSaysOk(kCleanupMarkerOkText));     // ok=1 → 已完成
+    CHECK(!CleanupMarkerSaysOk(nullptr));
+    CHECK(!CleanupMarkerSaysOk(""));
+    CHECK(!CleanupMarkerSaysOk("done\r\n"));  // 旧标记（无结果）按未完成处理
+    CHECK(CleanupMarkerSaysOk("ok=1"));       // 无 CRLF 也认
+}
+
+TEST(cleanup_cmd_requires_ok_marker) {
+    const std::string cmd(kFirstBootCleanupCmd);
+    CHECK_CONTAINS(cmd, "findstr /C:\"ok=1\"");
+    CHECK_CONTAINS(cmd, "if errorlevel 1 goto :eof");
+    CHECK_CONTAINS(cmd, "zj-restore-boot.exe");
+    CHECK_CONTAINS(cmd, "del \"%~f0\"");
+    // 旧逻辑（只看文件存在）不得回归
+    CHECK(cmd.find("if exist \"%ProgramData%\\SysRecover\\boot-cleanup.done\" "
+                   "goto done") == std::string::npos);
 }
