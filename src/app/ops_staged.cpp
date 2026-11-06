@@ -40,6 +40,7 @@
 #include "../disk/mbrcode.h"
 #include "../wim/exclude.h"
 #include "../wim/wim.h"
+#include "../wim/wim_precheck.h"
 #include "safety.h"
 #include "selfdiag.h"
 #include "imgsrc.h"
@@ -333,16 +334,25 @@ static int RestorePreflight(StageCtx& c) {
                         std::to_string(eaIndex));
         }
     }
-    // 0.7) 镜像内容预检（I-1，2026-10-06 实测定稿；docs/19 批次 G）：
-    //   **规则：镜像里必须有 `\Windows\system32\winload.exe`（Win7+ 的加载器）**，
-    //   否则在**写契约/重启之前**拒绝，杜绝"格式化完才发现起不来"。覆盖：
-    //   Vista 以前（XP/2003/2000/98）系统镜像、安装源类"镜像"（实测某 XP esd
-    //   连 ntoskrnl 都没有）、合成/局部镜像（演练盘素材已补 dummy winload.exe）。
+    // 0.7) 镜像内容预检（I-1，2026-10-06 实测定稿；docs/19 批次 G + 2026-11-06）
+    //   **完整系统镜像必须同时有**：
+    //     `\Windows\system32\winload.exe`   （Win7+ 的加载器）
+    //     `\Windows\System32\config\SYSTEM` （目标系统的注册表）
+    //   缺 winload = Vista 以前（XP/2003/2000/98）/ 安装源 / 残镜像；
+    //   有 winload 但缺 SYSTEM = 安装源（install.wim/esd）或只含部分文件的
+    //   合成镜像 —— 还原后必然 0xc000000f，用户会当成产品 bug。两者都在
+    //   **写契约/重启之前**拒绝。
+    //   ⚠️ 判据只看 wimlib 元数据目录表，不靠文件名/大小猜；**查询失败一律
+    //   放行**（加密容器等），宁可交给救援层兜底，也不把合法镜像挡在门外。
     //   ⚠️ 救援层还有同款兜底（双保险；老契约/绕过此检查时仍安全）。
     {
         const int eff = req.index < 1 ? 1 : req.index;
         bool winload = false;
-        if (ImageHasWinload(req.image, eff, &winload) == 0 && !winload) {
+        bool hasSystem = false;
+        const bool winloadKnown = ImageHasWinload(req.image, eff, &winload) == 0;
+        const bool systemKnown = ImageHasSystemHive(req.image, eff, &hasSystem) == 0;
+        switch (ClassifySystemImage(winloadKnown, winload, systemKnown, hasSystem)) {
+        case SystemImageKind::kNotWin7Plus:
             err = Tr("该镜像不是 Windows 7 及以上的系统镜像（缺少 "
                      "\\Windows\\system32\\winload.exe；Vista 以前系统 / 安装源"
                      "/ 不完整镜像均不支持还原），已中止，未动目标分区。");
@@ -350,17 +360,7 @@ static int RestorePreflight(StageCtx& c) {
             AppendHistory("restore-rejected", req.image, req.image, 0,
                           "not a win7+ system image (no winload.exe)");
             return 4;
-        }
-    }
-    // 0.8) 可还原性预检（2026-11-06 实机）：镜像必须有目标系统的注册表
-    //   `\Windows\System32\config\SYSTEM`。安装源镜像（install.wim/esd）、
-    //   只含部分文件的合成镜像即使有 winload.exe，还原后也必然 0xc000000f
-    //   （实机已复现），用户会当成产品的 bug。判据只看 wimlib 元数据目录表，
-    //   不靠文件名/大小猜；查不了（加密容器）不阻断。
-    {
-        const int eff = req.index < 1 ? 1 : req.index;
-        bool hasSystem = false;
-        if (ImageHasSystemHive(req.image, eff, &hasSystem) == 0 && !hasSystem) {
+        case SystemImageKind::kNotRestorable:
             err = Tr("该镜像不是可还原的系统镜像（缺少 "
                      "\\Windows\\System32\\config\\SYSTEM：安装源镜像（如 "
                      "install.wim/esd）、只含部分文件的合成镜像都不支持还原），"
@@ -369,6 +369,8 @@ static int RestorePreflight(StageCtx& c) {
             AppendHistory("restore-rejected", req.image, req.image, 0,
                           "not a restorable system image (no config/SYSTEM)");
             return 4;
+        case SystemImageKind::kOk:
+            break;
         }
     }
     // 0.9) 异机还原前置检查（2026-10-21，0.9）：仅 Win10/11；只允许 Windows

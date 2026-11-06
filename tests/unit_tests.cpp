@@ -1911,6 +1911,41 @@ TEST(wim_precheck_accepts_wellformed) {
     CHECK(o.ok);
 }
 
+// P0-1（2026-11-06 用户实测回归）：.esd（固态压缩，version=0x00000E00）是
+// **合法的完整系统镜像**，0.9.96 一直能装菜单。旧判据按 major=version>>16
+// 判定，0xE00 算出 major=0 → 拦成"镜像版本不受支持"，1.0 全部 .esd 拒装。
+TEST(wim_precheck_accepts_full_system_esd) {
+    WimHeaderRaw h = MakeWimHeader(2);
+    h.version = 0x00000E00;  // 固态 ESD（LZMS），实测 20260927Win11…9711.esd
+    const std::string xml =
+        "<WIM><IMAGE INDEX=\"1\"><NAME>系统备份</NAME></IMAGE>"
+        "<IMAGE INDEX=\"2\"><NAME>ESP</NAME></IMAGE></WIM>";
+    const WimPrecheckOutcome o = RunWimPrecheck(h, 4096, true, xml);
+    CHECK(o.ok);
+    CHECK(IsSupportedWimVersion(0x00000E00));  // 固态 ESD
+    CHECK(IsSupportedWimVersion(0x00010D00));  // 普通 WIM（wimlib 默认）
+}
+
+// 可选项（完整性表）异常不该整体拒：size=0 / offset 残留旧值也是合法镜像。
+TEST(wim_precheck_ignores_optional_integrity_offset) {
+    WimHeaderRaw h = MakeWimHeader(1);
+    h.integrity.sizeFlags = 0;
+    h.integrity.offset = 4096;  // 有偏移但没大小 = 没写完整性表
+    const WimPrecheckOutcome o = RunWimPrecheck(
+        h, 4096, true, "<WIM><IMAGE INDEX=\"1\"/></WIM>");
+    CHECK(o.ok);
+}
+
+// 结构损坏（头部长度字段离谱）必须拒。
+TEST(wim_precheck_blocks_corrupt_header_size) {
+    WimHeaderRaw h = MakeWimHeader(1);
+    h.cbSize = 8192;  // > 4096：文件头已损坏
+    const WimPrecheckOutcome o = RunWimPrecheck(
+        h, 4096, true, "<WIM><IMAGE INDEX=\"1\"/></WIM>");
+    CHECK(!o.ok);
+    CHECK(o.reason == wim_precheck_reason::kBadHeaderSize);
+}
+
 TEST(wim_precheck_blocks_truncated_copy) {
     // 头部读全了、但 XML 资源尾部被截断：典型"拷贝到一半中断"
     const WimHeaderRaw h = MakeWimHeader(1);
@@ -1964,6 +1999,28 @@ TEST(wim_precheck_blocks_image_count_mismatch) {
         RunWimPrecheck(h, 4096, true, "<WIM><IMAGE INDEX=\"1\"/></WIM>");
     CHECK(!o.ok);
     CHECK(o.reason == wim_precheck_reason::kImageCountMismatch);
+}
+
+// ── 「完整系统镜像 vs 安装源」判据（0.7/0.8 合流，2026-11-06）──────
+// ① 完整系统镜像（有 winload + config\SYSTEM）→ 通过
+TEST(system_image_kind_accepts_full_system_image) {
+    CHECK(ClassifySystemImage(true, true, true, true) == SystemImageKind::kOk);
+}
+// ② 安装源镜像（install.wim/esd：有 winload、无 config\SYSTEM）→ 拒
+TEST(system_image_kind_rejects_install_source) {
+    CHECK(ClassifySystemImage(true, true, true, false) ==
+          SystemImageKind::kNotRestorable);
+}
+// ②' Vista 以前 / 没有加载器的残镜像（无 winload）→ 拒
+TEST(system_image_kind_rejects_pre_win7) {
+    CHECK(ClassifySystemImage(true, false, true, true) ==
+          SystemImageKind::kNotWin7Plus);
+    CHECK(ClassifySystemImage(true, false, true, false) ==
+          SystemImageKind::kNotWin7Plus);
+}
+// ③ 查不了目录表（加密容器 / wimlib 打开失败）→ 放行，交给救援层兜底
+TEST(system_image_kind_unknown_probe_passes) {
+    CHECK(ClassifySystemImage(false, false, false, false) == SystemImageKind::kOk);
 }
 
 TEST(wim_append_space_precheck) {

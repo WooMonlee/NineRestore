@@ -462,7 +462,6 @@ EN = {
     '镜像元数据读取失败': 'Failed to read image metadata',
     '镜像元数据不完整（XML 无法解析）': 'Image metadata is incomplete (XML cannot be parsed)',
     '镜像元数据与头部声明的子镜像数量不一致': 'Image metadata does not match the sub-image count in the header',
-    '镜像完整性表声明异常': 'Abnormal integrity table declaration in the image',
     '镜像文件过小或无法读取头部': 'The image file is too small or its header cannot be read',
     '无法打开镜像文件': 'Cannot open the image file',
     '加密镜像头声明异常': 'Encrypted image header declares invalid values',

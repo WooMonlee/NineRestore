@@ -46,6 +46,18 @@ inline unsigned long long WimResSize(unsigned long long raw) {
     return raw & 0x00FFFFFFFFFFFFFFull;
 }
 
+// WIM 头的 version **不是**"主版本<<16 | 次版本"两段式：wimlib 只认两个值
+//   0x00010D00  普通 WIM（LZX/XPRESS 压缩）
+//   0x00000E00  固态 ESD（solid/LZMS 压缩；本工具导出的 .esd 就是这种）
+// 旧判据按 major=version>>16 判定，固态 ESD 算出 major=0 → 直接拒。
+// 后果：0.9.96 能用的 .esd 在 1.0 全部被"镜像版本不受支持"挡在门外
+// （2026-11-06 用户实测，docs/34 N13 回归）。
+inline bool IsSupportedWimVersion(unsigned int version) {
+    if (version == 0x00000E00u) return true;  // 固态 ESD
+    const unsigned int major = version >> 16;
+    return major >= 1 && major <= 2;  // 普通 WIM：0x10D00、将来 2.x
+}
+
 // 稳定原因码（测试直接断言这些字符串，中文文案在 wim.cpp 里映射）。
 namespace wim_precheck_reason {
 inline constexpr const char* kOk = "";
@@ -59,7 +71,6 @@ inline constexpr const char* kXmlTooLarge = "xml-too-large";
 inline constexpr const char* kXmlUnreadable = "xml-unreadable";
 inline constexpr const char* kXmlNotParsable = "xml-not-parsable";
 inline constexpr const char* kImageCountMismatch = "image-count-mismatch";
-inline constexpr const char* kIntegrityInvalid = "integrity-table-invalid";
 }  // namespace wim_precheck_reason
 
 struct WimPrecheckOutcome {
@@ -99,8 +110,7 @@ inline WimPrecheckOutcome CheckWimStructure(unsigned long long fileSize,
         out.reason = wim_precheck_reason::kBadMagic;
         return out;
     }
-    const unsigned int major = h.version >> 16;
-    if (major < 1 || major > 2) {
+    if (!IsSupportedWimVersion(h.version)) {
         out.ok = false;
         out.reason = wim_precheck_reason::kBadVersion;
         return out;
@@ -165,13 +175,33 @@ inline WimPrecheckOutcome CheckWimStructure(unsigned long long fileSize,
         out.reason = wim_precheck_reason::kImageCountMismatch;
         return out;
     }
-    // 完整性表：有就要求落在文件内（上面已查）；这里只拦"声明了却为空"。
-    if (intSize == 0 && intOffset != 0) {
-        out.ok = false;
-        out.reason = wim_precheck_reason::kIntegrityInvalid;
-        return out;
-    }
+    // 完整性表是**可选**项（wimlib 不写时 size=offset=0，DISM 也可能留一个旧
+    // 偏移）。上面已确认"声明了大小就必须落在文件内"，这里不再对"size 为 0
+    // 但 offset 非 0"另行拒绝 —— 可选项异常不该把合法镜像整体挡下
+    // （2026-11-06 用户要求：宁可强警告 + 继续）。
     return out;
+}
+
+// 「完整系统镜像 vs 安装源/残镜像」判据（ops 的 0.7 + 0.8 合流）。
+// 输入是**目录表查询结果**，不是文件名/大小：
+//   winloadKnown / systemKnown —— 查询本身是否成功（false = 查不了，如加密容器）
+//   hasWinload / hasSystemHive —— 镜像里是否真有
+//     \Windows\system32\winload.exe    （Win7+ 的加载器）
+//     \Windows\System32\config\SYSTEM  （目标系统的注册表）
+// 规则：**只有明确查到缺失才拒绝**；查询失败一律放行（由 wimlib/救援层兜底）。
+//   缺少 SYSTEM 的多是安装源镜像（install.wim/esd）或只含部分文件的合成镜像，
+//   这种镜像还原后必然 0xc000000f —— 真非系统镜像，必须拒（2026-10-06/11-06 实测）。
+enum class SystemImageKind {
+    kOk,
+    kNotWin7Plus,   // 没有 winload.exe：Vista 以前系统 / 安装源 / 残镜像
+    kNotRestorable, // 有 winload 但没有 config\SYSTEM：安装源 / 合成镜像
+};
+
+inline SystemImageKind ClassifySystemImage(bool winloadKnown, bool hasWinload,
+                                           bool systemKnown, bool hasSystemHive) {
+    if (winloadKnown && !hasWinload) return SystemImageKind::kNotWin7Plus;
+    if (systemKnown && !hasSystemHive) return SystemImageKind::kNotRestorable;
+    return SystemImageKind::kOk;
 }
 
 }  // namespace sysrecover

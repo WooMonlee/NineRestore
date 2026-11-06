@@ -531,8 +531,6 @@ int WimEngine::QuickPrecheck(const std::wstring& imagePath, std::wstring& why) {
         why = Tr(L"镜像元数据不完整（XML 无法解析）");
     else if (o.reason == R::kImageCountMismatch)
         why = Tr(L"镜像元数据与头部声明的子镜像数量不一致");
-    else if (o.reason == R::kIntegrityInvalid)
-        why = Tr(L"镜像完整性表声明异常");
     else
         why = Tr(L"镜像文件过小或无法读取头部");
     return -1;
