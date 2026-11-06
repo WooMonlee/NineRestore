@@ -28,6 +28,9 @@ HAN = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]")
 # “提示框/标题”漏翻误报成产品 UI 漏翻。
 SKIP_FILES = {
     "src/tools/restore_boot_main.cpp",
+    # 版本资源常量（SYSRECOVER_PRODUCT="九转还原" 等）：构建期由
+    # tools/gen-versioninfo.py 读进 .rc，运行时从不进 UI，不属于可翻译文案。
+    "src/common/version.h",
 }
 
 

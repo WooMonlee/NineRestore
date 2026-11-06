@@ -20,3 +20,9 @@
 #define SYSRECOVER_WIDEN(x) SYSRECOVER_WIDEN2(x)
 #define SYSRECOVER_VERSION_W SYSRECOVER_WIDEN(SYSRECOVER_VERSION)
 #define SYSRECOVER_CONTRACT_VERSION 1
+// ── VERSIONINFO（exe 属性「详细信息」）用的品牌字段 ────────────────
+// 只在这里写一份：tools/gen-versioninfo.py 生成 .rc 时从这里读，
+// 公司名/版权沿用仓库 LICENSE（作者 DreamGrain，MIT），不要另编。
+#define SYSRECOVER_PRODUCT   "九转还原"
+#define SYSRECOVER_COMPANY   "DreamGrain"
+#define SYSRECOVER_COPYRIGHT "Copyright (c) 2026 DreamGrain. MIT License"

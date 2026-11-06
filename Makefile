@@ -50,6 +50,77 @@ endif
 PYTHON   ?= python
 # 版本号唯一来源 = src/common/version.h（用 tools/version.py 读写；每个问题修完 --bump）
 VERSION  := $(shell $(PYTHON) tools/version.py)
+
+# ---- Windows 版本资源（VERSIONINFO）----------------------------------------
+# 用户规格（2026-11-06）：右键 exe → 属性 → 详细信息 必须能读到
+# 产品名（九转还原）/ 版本 / 公司（DreamGrain）/ 版权。
+# 唯一来源仍是 src/common/version.h：tools/gen-versioninfo.py 从它读出版本串与
+# SYSRECOVER_PRODUCT/COMPANY/COPYRIGHT 生成 .rc（不在 .rc 里手写数字，避免漂移）；
+# 再按架构用自己的 windres 编译，x64 / x86 的 .o 绝不混用。
+# 单文件是「自建 stub + 追加载荷」（src/app/ops_selfpack.cpp）：先把 stub 字节原样
+# 拷过去、再在末尾追加压缩载荷 —— stub 的 .rsrc 完好，顺序天然是"先加资源、后追载荷"。
+VI_GEN      = $(PYTHON) tools/gen-versioninfo.py
+VI_ARCH_DIR = $(OBJDIR)/versioninfo
+VI_X86_DIR  = build/versioninfo
+VI_X86_RES  = $(MINGW32)/bin/windres.exe
+
+VI_RC_GUI   = $(VI_ARCH_DIR)/SysRecoverUI.rc
+VI_RC_CLI   = $(VI_ARCH_DIR)/SysRecover.rc
+VI_RC_CHECK = $(VI_ARCH_DIR)/SysRecoverCheck.rc
+VI_RC_LUI     = $(VI_X86_DIR)/SysRecoverLauncherUI.rc
+VI_RC_LCLI    = $(VI_X86_DIR)/SysRecoverLauncherCLI.rc
+VI_RC_LCHECK  = $(VI_X86_DIR)/SysRecoverLauncherCheck.rc
+VI_RC_EA      = $(VI_X86_DIR)/zj-ea-apply.rc
+VI_RC_BOOT    = $(VI_X86_DIR)/zj-restore-boot.rc
+VI_RC_PSTUB     = $(VI_X86_DIR)/portable-stub.rc
+VI_RC_PSTUB_GUI = $(VI_X86_DIR)/portable-stub-gui.rc
+
+# 三个真程序按当前 ARCH 生成（OriginalFilename 随架构变：SysRecoverUI_x86.exe 等）
+$(VI_RC_GUI): src/common/version.h tools/gen-versioninfo.py
+	$(VI_GEN) --out $@ --profile gui --original $(GUI_NAME)
+$(VI_RC_CLI): src/common/version.h tools/gen-versioninfo.py
+	$(VI_GEN) --out $@ --profile cli --original $(CLI_NAME)
+$(VI_RC_CHECK): src/common/version.h tools/gen-versioninfo.py
+	$(VI_GEN) --out $@ --profile check --original $(CHECK_NAME)
+
+# 固定 x86 的辅助 exe（启动器 / EA 补写器 / 启动项清理 / 单文件 stub）
+$(VI_RC_LUI): src/common/version.h tools/gen-versioninfo.py
+	$(VI_GEN) --out $@ --profile launcher-ui --original SysRecoverUI.exe
+$(VI_RC_LCLI): src/common/version.h tools/gen-versioninfo.py
+	$(VI_GEN) --out $@ --profile launcher-cli --original SysRecover.exe
+$(VI_RC_LCHECK): src/common/version.h tools/gen-versioninfo.py
+	$(VI_GEN) --out $@ --profile launcher-check --original SysRecoverCheck.exe
+$(VI_RC_EA): src/common/version.h tools/gen-versioninfo.py
+	$(VI_GEN) --out $@ --profile ea --original zj-ea-apply.exe
+$(VI_RC_BOOT): src/common/version.h tools/gen-versioninfo.py
+	$(VI_GEN) --out $@ --profile boot --original zj-restore-boot.exe
+$(VI_RC_PSTUB): src/common/version.h tools/gen-versioninfo.py
+	$(VI_GEN) --out $@ --profile pstub --original portable-stub.exe
+$(VI_RC_PSTUB_GUI): src/common/version.h tools/gen-versioninfo.py
+	$(VI_GEN) --out $@ --profile pstub-gui --original portable-stub-gui.exe
+
+$(OBJDIR)/vi_gui.o: $(VI_RC_GUI)
+	$(WINDRES) -I . $< -o $@
+$(OBJDIR)/vi_cli.o: $(VI_RC_CLI)
+	$(WINDRES) -I . $< -o $@
+$(OBJDIR)/vi_check.o: $(VI_RC_CHECK)
+	$(WINDRES) -I . $< -o $@
+
+$(VI_X86_DIR)/launcher_ui.o: $(VI_RC_LUI)
+	$(VI_X86_RES) -I . $< -o $@
+$(VI_X86_DIR)/launcher_cli.o: $(VI_RC_LCLI)
+	$(VI_X86_RES) -I . $< -o $@
+$(VI_X86_DIR)/launcher_check.o: $(VI_RC_LCHECK)
+	$(VI_X86_RES) -I . $< -o $@
+$(VI_X86_DIR)/ea_apply.o: $(VI_RC_EA)
+	$(VI_X86_RES) -I . $< -o $@
+$(VI_X86_DIR)/restore_boot.o: $(VI_RC_BOOT)
+	$(VI_X86_RES) -I . $< -o $@
+$(VI_X86_DIR)/portable_stub.o: $(VI_RC_PSTUB)
+	$(VI_X86_RES) -I . $< -o $@
+$(VI_X86_DIR)/portable_stub_gui.o: $(VI_RC_PSTUB_GUI)
+	$(VI_X86_RES) -I . $< -o $@
+
 CXXFLAGS = -O2 -std=c++17 -Wall -Wextra -D_WIN32_WINNT=0x0601 -DUNICODE -D_UNICODE
 INCLUDES = -Ithird_party/wimlib -Isrc
 # -s = 链接时剥符号表：发布体积显著下降（实测 x64 CLI -838KB / GUI -1.1MB /
@@ -144,12 +215,13 @@ $(APP_LIB): $(APP_OBJS)
 $(CLI_RC_OBJ): $(CLI_RC) src/cli/SysRecover.manifest resources/SysRecover.ico | $(OBJDIR)
 	$(WINDRES) -I src/cli -I resources $< -o $@
 
-$(CLI_OUT): $(CLI_MAIN) $(CLI_RC_OBJ) $(APP_LIB) $(WIMLIB)/libwim-15.dll src/common/version.h | $(DISTDIR)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $(CLI_MAIN) $(CLI_RC_OBJ) $(APP_LIB) -o $(CLI_OUT) $(LDFLAGS) $(LDLIBS)
+$(CLI_OUT): $(CLI_MAIN) $(CLI_RC_OBJ) $(OBJDIR)/vi_cli.o $(APP_LIB) $(WIMLIB)/libwim-15.dll src/common/version.h | $(DISTDIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(CLI_MAIN) $(CLI_RC_OBJ) $(OBJDIR)/vi_cli.o $(APP_LIB) -o $(CLI_OUT) $(LDFLAGS) $(LDLIBS)
 
-# 镜像检查程序：console、无 .rc（不要求管理员）、-lcomdlg32（多选打开框）。
-$(CHECK_OUT): $(CHECK_MAIN) $(APP_LIB) $(WIMLIB)/libwim-15.dll src/common/version.h | $(DISTDIR)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $(CHECK_MAIN) $(APP_LIB) -o $(CHECK_OUT) $(LDFLAGS) $(LDLIBS) -lcomdlg32
+# 镜像检查程序：console、无提权清单（不要求管理员）、-lcomdlg32（多选打开框）。
+# 带 VERSIONINFO（右键属性要能看到版本号）。
+$(CHECK_OUT): $(CHECK_MAIN) $(OBJDIR)/vi_check.o $(APP_LIB) $(WIMLIB)/libwim-15.dll src/common/version.h | $(DISTDIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(CHECK_MAIN) $(OBJDIR)/vi_check.o $(APP_LIB) -o $(CHECK_OUT) $(LDFLAGS) $(LDLIBS) -lcomdlg32
 
 $(OBJDIR)/duilib:
 	@if not exist $(subst /,\,$(OBJDIR))\duilib mkdir $(subst /,\,$(OBJDIR))\duilib
@@ -164,8 +236,8 @@ gui: $(DUI_LIB) $(APP_LIB) $(GUI_OUT)
 $(GUI_RC_OBJ): $(GUI_RC) src/gui/SysRecoverUI.manifest resources/SysRecover.ico | $(OBJDIR)
 	$(WINDRES) -I src/gui -I resources $< -o $@
 
-$(GUI_OUT): $(GUI_SRC) $(GUI_RC_OBJ) $(DUI_LIB) $(APP_LIB) src/common/version.h | $(DISTDIR)
-	$(CXX) $(GUI_FLAGS) $(GUI_INCLUDES) $(GUI_SRC) $(GUI_RC_OBJ) $(APP_LIB) $(DUI_LIB) -o $(GUI_OUT) -static -mwindows -s $(GUI_LDLIBS) -L$(WIMLIB) -l:libwim-15.dll
+$(GUI_OUT): $(GUI_SRC) $(GUI_RC_OBJ) $(OBJDIR)/vi_gui.o $(DUI_LIB) $(APP_LIB) src/common/version.h | $(DISTDIR)
+	$(CXX) $(GUI_FLAGS) $(GUI_INCLUDES) $(GUI_SRC) $(GUI_RC_OBJ) $(OBJDIR)/vi_gui.o $(APP_LIB) $(DUI_LIB) -o $(GUI_OUT) -static -mwindows -s $(GUI_LDLIBS) -L$(WIMLIB) -l:libwim-15.dll
 
 # ---- x64 总入口（图标 + 调用 x64\ 下的真程序）----
 # 根目录只放这个 x64 启动器；纯 x64 PE（没有 WOW64）也能运行。
@@ -190,19 +262,19 @@ $(LAUNCHER_CLI_RC): src/launcher/SysRecoverLauncherCLI.rc src/cli/SysRecover.man
 	@if not exist build mkdir build
 	$(MINGW32)/bin/windres.exe -I src/cli $< -o $@
 
-$(LAUNCHER_UI): src/launcher/launcher.cpp $(LAUNCHER_UI_RC)
+$(LAUNCHER_UI): src/launcher/launcher.cpp $(LAUNCHER_UI_RC) $(VI_X86_DIR)/launcher_ui.o
 	@if not exist dist mkdir dist
-	$(LAUNCHER_CXX) -O2 -std=c++17 -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 -DZJ_LAUNCH_GUI $< $(LAUNCHER_UI_RC) -o $@ -static -mwindows -s -luser32
+	$(LAUNCHER_CXX) -O2 -std=c++17 -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 -DZJ_LAUNCH_GUI $< $(LAUNCHER_UI_RC) $(VI_X86_DIR)/launcher_ui.o -o $@ -static -mwindows -s -luser32
 
-$(LAUNCHER_CLI): src/launcher/launcher.cpp $(LAUNCHER_CLI_RC)
+$(LAUNCHER_CLI): src/launcher/launcher.cpp $(LAUNCHER_CLI_RC) $(VI_X86_DIR)/launcher_cli.o
 	@if not exist dist mkdir dist
-	$(LAUNCHER_CXX) -O2 -std=c++17 -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 $< $(LAUNCHER_CLI_RC) -o $@ -static -mconsole -s -luser32
+	$(LAUNCHER_CXX) -O2 -std=c++17 -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 $< $(LAUNCHER_CLI_RC) $(VI_X86_DIR)/launcher_cli.o -o $@ -static -mconsole -s -luser32
 
 # 镜像检查入口：console + 等待子进程并透传退出码（脚本/拖放都能拿到结果）。
-# **不带 .rc** —— 检查镜像只需读权限，不能要求管理员。
-$(LAUNCHER_CHECK): src/launcher/launcher.cpp
+# **不带提权清单** —— 检查镜像只需读权限；但带 VERSIONINFO。
+$(LAUNCHER_CHECK): src/launcher/launcher.cpp $(VI_X86_DIR)/launcher_check.o
 	@if not exist dist mkdir dist
-	$(LAUNCHER_CXX) -O2 -std=c++17 -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 -DZJ_LAUNCH_CHECK $< -o $@ -static -mconsole -s -luser32
+	$(LAUNCHER_CXX) -O2 -std=c++17 -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 -DZJ_LAUNCH_CHECK $< $(VI_X86_DIR)/launcher_check.o -o $@ -static -mconsole -s -luser32
 
 clean:
 	-del /Q $(subst /,\,$(CLI_OUT)) $(subst /,\,$(GUI_OUT)) $(subst /,\,$(CHECK_OUT)) 2>nul
@@ -217,8 +289,8 @@ EA_APPLY_SRC = src/tools/ea_apply_main.cpp src/common/ea.cpp src/common/refscan.
 EA_APPLY_X86 = $(MINGW32)/bin/i686-w64-mingw32-g++
 EA_APPLY_OUT = bootfiles/zj-ea-apply.exe
 ea-apply: $(EA_APPLY_OUT)
-$(EA_APPLY_OUT): $(EA_APPLY_SRC) src/common/version.h
-	$(EA_APPLY_X86) $(CXXFLAGS) $(INCLUDES) $(EA_APPLY_SRC) -o $(EA_APPLY_OUT) -static -mconsole -municode -s -lntdll -ladvapi32
+$(EA_APPLY_OUT): $(EA_APPLY_SRC) src/common/version.h $(VI_X86_DIR)/ea_apply.o
+	$(EA_APPLY_X86) $(CXXFLAGS) $(INCLUDES) $(EA_APPLY_SRC) $(VI_X86_DIR)/ea_apply.o -o $(EA_APPLY_OUT) -static -mconsole -municode -s -lntdll -ladvapi32
 
 # ---- “恢复引导菜单”首启清理器（日常还原临时项；PIT-170）----
 # 注意：**故意不嵌 requireAdministrator 清单**。启动文件夹先以普通权限启动它，
@@ -228,8 +300,8 @@ BOOT_CLEANUP_SRC = src/tools/restore_boot_main.cpp
 BOOT_CLEANUP_X86 = $(MINGW32)/bin/i686-w64-mingw32-g++
 BOOT_CLEANUP_OUT = bootfiles/zj-restore-boot.exe
 boot-cleanup: $(BOOT_CLEANUP_OUT)
-$(BOOT_CLEANUP_OUT): $(BOOT_CLEANUP_SRC) src/boot/bcd.h src/boot/bootnames.h | $(OBJDIR)
-	$(BOOT_CLEANUP_X86) $(CXXFLAGS) $(INCLUDES) $(BOOT_CLEANUP_SRC) -o $(BOOT_CLEANUP_OUT) -static -mconsole -municode -s -ladvapi32 -lshell32
+$(BOOT_CLEANUP_OUT): $(BOOT_CLEANUP_SRC) src/boot/bcd.h src/boot/bootnames.h $(VI_X86_DIR)/restore_boot.o | $(OBJDIR)
+	$(BOOT_CLEANUP_X86) $(CXXFLAGS) $(INCLUDES) $(BOOT_CLEANUP_SRC) $(VI_X86_DIR)/restore_boot.o -o $(BOOT_CLEANUP_OUT) -static -mconsole -municode -s -ladvapi32 -lshell32
 # ---- 单元测试（0.7 线重做：2026-10-11 自 graveyard/tests 迁回；旧 45 用例对 0.7
 #      源码复验全绿后原样恢复，另补 0.7 新纯逻辑 DecideSwapLeftover 决策表用例）----
 TEST_SRC   = tests/tiny_test.cpp tests/unit_tests.cpp tests/main.cpp
@@ -251,7 +323,9 @@ crash-test: $(CRASH_PROBE)
 
 # ---- 一致性门禁（check = 单元测试 + 版本脚本自检 + 文档/i18n/宽度/shell 门禁）----
 # 冒烟（QEMU）仍封存（tools/vmtest 在 graveyard），单独 make smoke 不可用；见 docs/20。
-check: $(TEST_BIN)
+# 版本资源断言（用户 2026-11-06）：用 PowerShell 真读三个 exe 的 VersionInfo，
+# 与 version.h 比对；缺资源/不一致即失败 —— 以后换构建方式也别想悄悄丢掉。
+check: $(TEST_BIN) $(CLI_OUT) $(GUI_OUT) $(CHECK_OUT)
 	$(TEST_BIN)
 	$(PYTHON) tests/test_version.py
 	$(PYTHON) tools/check-docs.py
@@ -261,6 +335,7 @@ check: $(TEST_BIN)
 	$(PYTHON) tools/check-config.py
 	$(PYTHON) tools/check-layers.py
 	$(PYTHON) tools/check-secrets.py
+	$(PYTHON) tools/check-versioninfo.py $(DISTDIR)/$(GUI_NAME) $(DISTDIR)/$(CLI_NAME) $(DISTDIR)/$(CHECK_NAME)
 	@bash tests/test_zjswap.sh
 
 # ---- ★ 发布包：根目录 = x64 总入口 + x86 兼容入口；x64/ = x64 真程序；共享资源放根目录 ----
@@ -354,16 +429,16 @@ $(PORTABLE_RC): src/tools/portable.rc resources/SysRecover.ico
 	@if not exist build mkdir build
 	$(MINGW32)/bin/windres.exe -I . -I resources $< -o $@
 
-$(PORTABLE_STUB): src/tools/portable_main.cpp src/common/xpress.h $(PORTABLE_RC)
+$(PORTABLE_STUB): src/tools/portable_main.cpp src/common/xpress.h $(PORTABLE_RC) $(VI_X86_DIR)/portable_stub.o
 	@if not exist build mkdir build
-	$(MINGW32)/bin/i686-w64-mingw32-g++ -O2 -std=c++17 -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 $< $(PORTABLE_RC) -o $@ -static -municode -mconsole -s -lshell32 -luser32
+	$(MINGW32)/bin/i686-w64-mingw32-g++ -O2 -std=c++17 -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 $< $(PORTABLE_RC) $(VI_X86_DIR)/portable_stub.o -o $@ -static -municode -mconsole -s -lshell32 -luser32
 
 # PIT-215（用户 2026-11-03）：**GUI 子系统版 stub** —— 双击时 Windows 根本不会
 # 创建控制台（控制台子系统的进程在进门之前就已经有一个黑框了，只能"藏"不能"没有"）。
 # 代价：cmd/PowerShell 不会等 GUI 程序，**退出码拿不到** → 所以另出一个 CLI 版。
-$(PORTABLE_STUB_GUI): src/tools/portable_main.cpp src/common/xpress.h $(PORTABLE_RC)
+$(PORTABLE_STUB_GUI): src/tools/portable_main.cpp src/common/xpress.h $(PORTABLE_RC) $(VI_X86_DIR)/portable_stub_gui.o
 	@if not exist build mkdir build
-	$(MINGW32)/bin/i686-w64-mingw32-g++ -O2 -std=c++17 -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 $< $(PORTABLE_RC) -o $@ -static -municode -mwindows -s -lshell32 -luser32
+	$(MINGW32)/bin/i686-w64-mingw32-g++ -O2 -std=c++17 -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 $< $(PORTABLE_RC) $(VI_X86_DIR)/portable_stub_gui.o -o $@ -static -municode -mwindows -s -lshell32 -luser32
 
 
 portable: package $(PORTABLE_STUB) $(PORTABLE_STUB_GUI)
