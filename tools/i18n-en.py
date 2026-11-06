@@ -881,7 +881,8 @@ EN = {
     '已安装的还原菜单没有被引导执行。\n': 'The installed restore menu was never booted.\n',
     '安装时间 ': 'Install time ',
     '，之后没有新的救援回执。\n': ', no new rescue receipt afterwards.\n',
-    '可能原因：开机时没选 SysRecover 菜单项，或固件未识别到该启动项。\n': 'Possible cause: the SysRecover menu item was not picked at boot, or the firmware did not recognize the entry.\n',
-    '请重新运行本程序并安装菜单；若反复如此，把 logs\\collected 发给技术支持。': 'Please run this program again and reinstall the menu; if it keeps happening, send logs\\collected to support.',
+    '可能原因：选了 SysRecover 但固件跳过了该启动项（BootOrder 前面有失效条目时常见），或救援层没有启动。\n': 'Possible cause: SysRecover was picked but the firmware skipped that entry (common when stale entries sit ahead in BootOrder), or the rescue layer never started.\n',
+    '正确操作：开机时按 F10（该机型也可能是 F12/Esc）→ 选 SysRecover。\n': 'Correct steps: at boot press F10 (on some machines it is F12/Esc), then pick SysRecover.\n',
+    '若确认已选仍回到 Windows，请把 logs\\collected 发给技术支持；启动项丢失时重新运行本程序安装菜单。': 'If you did pick SysRecover and still landed in Windows, send logs\\collected to support; if the entry is missing, run this program again to reinstall the menu.',
     '还原菜单未执行': 'Restore Menu Not Executed',
 }

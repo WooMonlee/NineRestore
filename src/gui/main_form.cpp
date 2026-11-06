@@ -963,8 +963,11 @@ void CMainForm::ShowMenuRescueNotice() {
     std::wstring msg = Tr(L"已安装的还原菜单没有被引导执行。\n");
     msg += Tr(L"安装时间 ") + U2W(installTime) +
            Tr(L"，之后没有新的救援回执。\n");
-    msg += Tr(L"可能原因：开机时没选 SysRecover 菜单项，或固件未识别到该启动项。\n");
-    msg += Tr(L"请重新运行本程序并安装菜单；若反复如此，把 logs\\collected 发给技术支持。");
+    // 2026-11-06 用户确认“确实按了 F10 并选了 SysRecover 仍回到 Windows”，
+    // 不能再把“无救援回执”直接归因于没选：固件跳过失效/非首位启动项同样会静默回落。
+    msg += Tr(L"可能原因：选了 SysRecover 但固件跳过了该启动项（BootOrder 前面有失效条目时常见），或救援层没有启动。\n");
+    msg += Tr(L"正确操作：开机时按 F10（该机型也可能是 F12/Esc）→ 选 SysRecover。\n");
+    msg += Tr(L"若确认已选仍回到 Windows，请把 logs\\collected 发给技术支持；启动项丢失时重新运行本程序安装菜单。");
     MessageBoxW(m_hWnd, msg.c_str(), Tr(L"还原菜单未执行"),
                 MB_OK | MB_ICONWARNING);
     sysrecover::AcknowledgeMenuRescue();
