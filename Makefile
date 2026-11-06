@@ -121,8 +121,14 @@ $(VI_X86_DIR)/portable_stub.o: $(VI_RC_PSTUB)
 $(VI_X86_DIR)/portable_stub_gui.o: $(VI_RC_PSTUB_GUI)
 	$(VI_X86_RES) -I . $< -o $@
 
-CXXFLAGS = -O2 -std=c++17 -Wall -Wextra -D_WIN32_WINNT=0x0601 -DUNICODE -D_UNICODE
-INCLUDES = -Ithird_party/wimlib -Isrc
+# ---- 告警策略 ---------------------------------------------------------------
+# 自研代码一律 -Wall -Wextra 且 **-Werror**：告警即构建失败。禁止用 (void) 之类
+# 强制消音；确实需要放宽的单条诊断用 -Wno-xxx 并在使用处写明原因。
+# third_party 是 vendored 上游源码（不改），编译期用 -w、头文件用 -isystem 隔离，
+# 免得第三方噪音（duilib 自身就有几百条）掩盖我们自己的告警。
+WARN_FLAGS = -Wall -Wextra -Werror
+CXXFLAGS = -O2 -std=c++17 $(WARN_FLAGS) -D_WIN32_WINNT=0x0601 -DUNICODE -D_UNICODE
+INCLUDES = -isystem third_party/wimlib -Isrc
 # -s = 链接时剥符号表：发布体积显著下降（实测 x64 CLI -838KB / GUI -1.1MB /
 # EA 补写器 -495KB）；崩溃处理只用"模块+偏移"（PIT-084），不依赖符号表。
 LDFLAGS  = -static -mconsole -s
@@ -156,17 +162,20 @@ CHECK_OUT  = $(DISTDIR)/$(CHECK_NAME)
 
 # ---- Duilib 静态库（经典 Duilib，MIT；见 AGENTS.md PIT-012；源清单 build/duilib.mk 自动生成） ----
 DUI_ROOT  = third_party/duilib-master/DuiLib
-DUI_FLAGS = -std=c++17 -O1 -fpermissive -DUNICODE -D_UNICODE -DWIN32 -D_WIN32_WINNT=0x0601 -D_stdcall=__stdcall -DUILIB_STATIC -I$(DUI_ROOT) -I$(DUI_ROOT)/Control -I$(DUI_ROOT)/Core -I$(DUI_ROOT)/Layout -I$(DUI_ROOT)/Utils
+# 第三方（vendored，MIT）：**不加 -Wall/-Wextra/-Werror**，并且显式 -w 关掉告警 ——
+# 上游源码我们一个字节都不改，它自带几百条历史告警，留着只会淹没自研代码的问题。
+DUI_FLAGS = -std=c++17 -O1 -fpermissive -w -DUNICODE -D_UNICODE -DWIN32 -D_WIN32_WINNT=0x0601 -D_stdcall=__stdcall -DUILIB_STATIC -isystem $(DUI_ROOT) -isystem $(DUI_ROOT)/Control -isystem $(DUI_ROOT)/Core -isystem $(DUI_ROOT)/Layout -isystem $(DUI_ROOT)/Utils
 CXX_DUI = $(CXX) $(DUI_FLAGS)
-CC_DUI  = $(CC) -O1 -DUNICODE -D_UNICODE -DWIN32 -D_WIN32_WINNT=0x0601 -D_stdcall=__stdcall -DUILIB_STATIC -I$(DUI_ROOT)
+CC_DUI  = $(CC) -O1 -w -DUNICODE -D_UNICODE -DWIN32 -D_WIN32_WINNT=0x0601 -D_stdcall=__stdcall -DUILIB_STATIC -isystem $(DUI_ROOT)
 DUI_LIB = $(OBJDIR)/libduilib.a
 include build/duilib.mk
 
 # ---- GUI（windows，经典 Duilib） ----
 GUI_SRC = src/gui/main_win.cpp src/gui/main_form.cpp src/gui/ui_skin.cpp src/gui/instance_dlg.cpp src/gui/confirm_dlg.cpp src/gui/passwd_dlg.cpp src/gui/imgsearch.cpp src/gui/initdisk_dlg.cpp
 GUI_OUT = $(DISTDIR)/$(GUI_NAME)
-GUI_INCLUDES = -Isrc -I$(DUI_ROOT) -I$(DUI_ROOT)/Control -I$(DUI_ROOT)/Core -I$(DUI_ROOT)/Layout -I$(DUI_ROOT)/Utils
-GUI_FLAGS = -std=c++17 -O1 -fpermissive -DUNICODE -D_UNICODE -DWIN32 -D_WIN32_WINNT=0x0601 -D_stdcall=__stdcall -DUILIB_STATIC
+GUI_INCLUDES = -Isrc -isystem $(DUI_ROOT) -isystem $(DUI_ROOT)/Control -isystem $(DUI_ROOT)/Core -isystem $(DUI_ROOT)/Layout -isystem $(DUI_ROOT)/Utils
+# duilib 头文件对 ISO 一致性要求宽松，故保留 -fpermissive（第三方头文件，不改）。
+GUI_FLAGS = -std=c++17 -O1 -fpermissive $(WARN_FLAGS) -DUNICODE -D_UNICODE -DWIN32 -D_WIN32_WINNT=0x0601 -D_stdcall=__stdcall -DUILIB_STATIC
 GUI_LDLIBS = -lgdi32 -lcomctl32 -limm32 -lole32 -luuid -lmsimg32 -lshlwapi -luxtheme -ldwmapi -lwinmm -lgdiplus -loleaut32 -ladvapi32 -lshell32 -lntdll -lversion -lversion -lbcrypt
 
 # ---- 提权清单（requireAdministrator）：windres 编成 .o 再链入 ----
@@ -264,17 +273,17 @@ $(LAUNCHER_CLI_RC): src/launcher/SysRecoverLauncherCLI.rc src/cli/SysRecover.man
 
 $(LAUNCHER_UI): src/launcher/launcher.cpp $(LAUNCHER_UI_RC) $(VI_X86_DIR)/launcher_ui.o
 	@if not exist dist mkdir dist
-	$(LAUNCHER_CXX) -O2 -std=c++17 -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 -DZJ_LAUNCH_GUI $< $(LAUNCHER_UI_RC) $(VI_X86_DIR)/launcher_ui.o -o $@ -static -mwindows -s -luser32
+	$(LAUNCHER_CXX) -O2 -std=c++17 $(WARN_FLAGS) -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 -DZJ_LAUNCH_GUI $< $(LAUNCHER_UI_RC) $(VI_X86_DIR)/launcher_ui.o -o $@ -static -mwindows -s -luser32
 
 $(LAUNCHER_CLI): src/launcher/launcher.cpp $(LAUNCHER_CLI_RC) $(VI_X86_DIR)/launcher_cli.o
 	@if not exist dist mkdir dist
-	$(LAUNCHER_CXX) -O2 -std=c++17 -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 $< $(LAUNCHER_CLI_RC) $(VI_X86_DIR)/launcher_cli.o -o $@ -static -mconsole -s -luser32
+	$(LAUNCHER_CXX) -O2 -std=c++17 $(WARN_FLAGS) -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 $< $(LAUNCHER_CLI_RC) $(VI_X86_DIR)/launcher_cli.o -o $@ -static -mconsole -s -luser32
 
 # 镜像检查入口：console + 等待子进程并透传退出码（脚本/拖放都能拿到结果）。
 # **不带提权清单** —— 检查镜像只需读权限；但带 VERSIONINFO。
 $(LAUNCHER_CHECK): src/launcher/launcher.cpp $(VI_X86_DIR)/launcher_check.o
 	@if not exist dist mkdir dist
-	$(LAUNCHER_CXX) -O2 -std=c++17 -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 -DZJ_LAUNCH_CHECK $< $(VI_X86_DIR)/launcher_check.o -o $@ -static -mconsole -s -luser32
+	$(LAUNCHER_CXX) -O2 -std=c++17 $(WARN_FLAGS) -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 -DZJ_LAUNCH_CHECK $< $(VI_X86_DIR)/launcher_check.o -o $@ -static -mconsole -s -luser32
 
 clean:
 	-del /Q $(subst /,\,$(CLI_OUT)) $(subst /,\,$(GUI_OUT)) $(subst /,\,$(CHECK_OUT)) 2>nul
@@ -431,14 +440,14 @@ $(PORTABLE_RC): src/tools/portable.rc resources/SysRecover.ico
 
 $(PORTABLE_STUB): src/tools/portable_main.cpp src/common/xpress.h $(PORTABLE_RC) $(VI_X86_DIR)/portable_stub.o
 	@if not exist build mkdir build
-	$(MINGW32)/bin/i686-w64-mingw32-g++ -O2 -std=c++17 -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 $< $(PORTABLE_RC) $(VI_X86_DIR)/portable_stub.o -o $@ -static -municode -mconsole -s -lshell32 -luser32
+	$(MINGW32)/bin/i686-w64-mingw32-g++ -O2 -std=c++17 $(WARN_FLAGS) -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 $< $(PORTABLE_RC) $(VI_X86_DIR)/portable_stub.o -o $@ -static -municode -mconsole -s -lshell32 -luser32
 
 # PIT-215（用户 2026-11-03）：**GUI 子系统版 stub** —— 双击时 Windows 根本不会
 # 创建控制台（控制台子系统的进程在进门之前就已经有一个黑框了，只能"藏"不能"没有"）。
 # 代价：cmd/PowerShell 不会等 GUI 程序，**退出码拿不到** → 所以另出一个 CLI 版。
 $(PORTABLE_STUB_GUI): src/tools/portable_main.cpp src/common/xpress.h $(PORTABLE_RC) $(VI_X86_DIR)/portable_stub_gui.o
 	@if not exist build mkdir build
-	$(MINGW32)/bin/i686-w64-mingw32-g++ -O2 -std=c++17 -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 $< $(PORTABLE_RC) $(VI_X86_DIR)/portable_stub_gui.o -o $@ -static -municode -mwindows -s -lshell32 -luser32
+	$(MINGW32)/bin/i686-w64-mingw32-g++ -O2 -std=c++17 $(WARN_FLAGS) -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 $< $(PORTABLE_RC) $(VI_X86_DIR)/portable_stub_gui.o -o $@ -static -municode -mwindows -s -lshell32 -luser32
 
 
 portable: package $(PORTABLE_STUB) $(PORTABLE_STUB_GUI)

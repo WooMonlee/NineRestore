@@ -212,7 +212,8 @@ private:
 // ────────────────────────────────────────────────────────────
 class CTitleLabelUI : public CLabelUI {
 public:
-    CTitleLabelUI() : m_sub(ui_skin::VersionDisplay()), m_subPx(13), m_px(19) {}
+    // 初始化顺序必须与成员声明顺序一致（m_sub → m_px → m_subPx），否则 -Wreorder 报错。
+    CTitleLabelUI() : m_sub(ui_skin::VersionDisplay()), m_px(19), m_subPx(13) {}
 
     LPCTSTR GetClass() const override { return _T("TitleLabel"); }
     void SetAttribute(LPCTSTR pstrName, LPCTSTR pstrValue) override;

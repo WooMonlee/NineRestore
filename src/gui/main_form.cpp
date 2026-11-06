@@ -88,15 +88,6 @@ bool ImagePathReady(const std::wstring& p) {
     return LooksLikeImagePath(p);
 }
 
-std::wstring FormatSize(uint64_t bytes) {
-    wchar_t buf[64];
-    if (bytes < 1024ULL * 1024 * 1024)
-        swprintf(buf, 64, L"%.0f MB", (double)bytes / (1024.0 * 1024.0));
-    else
-        swprintf(buf, 64, L"%.1f GB", (double)bytes / (1024.0 * 1024.0 * 1024.0));
-    return buf;
-}
-
 // 分区行容量列用整数 GB（老界面观感："28 / 89 GB"、"可用 61 GB"）
 std::wstring FormatGb(uint64_t bytes) {
     wchar_t buf[48];

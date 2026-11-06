@@ -29,6 +29,14 @@ inline HMODULE Ntdll() {
     return h;
 }
 
+// GetProcAddress 返回 FARPROC，直接转成具体函数指针会触发
+// -Wcast-function-type（函数类型不兼容）。标准做法是先转 void* 再转目标类型——
+// 不改变运行期行为，只是让编译器看清"这是动态取址"的意图。
+template <typename Fn>
+inline Fn LoadProc(HMODULE h, const char* name) {
+    return reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(h, name)));
+}
+
 inline bool Available() {
     return Ntdll() && GetProcAddress(Ntdll(), "RtlCompressBuffer") &&
            GetProcAddress(Ntdll(), "RtlDecompressBuffer");
@@ -40,9 +48,8 @@ inline bool Compress(const std::vector<unsigned char>& src,
     dst.clear();
     if (src.empty()) return false;
     HMODULE h = Ntdll();
-    auto fnWs = (FnGetWorkSpace)GetProcAddress(h,
-                                               "RtlGetCompressionWorkSpaceSize");
-    auto fnCo = (FnCompress)GetProcAddress(h, "RtlCompressBuffer");
+    auto fnWs = LoadProc<FnGetWorkSpace>(h, "RtlGetCompressionWorkSpaceSize");
+    auto fnCo = LoadProc<FnCompress>(h, "RtlCompressBuffer");
     if (!fnWs || !fnCo) return false;
     ULONG wsC = 0, wsD = 0;
     if (fnWs(kFormat, &wsC, &wsD) != 0) return false;
@@ -68,10 +75,9 @@ inline bool Decompress(const unsigned char* src, size_t srcLen, size_t rawLen,
     dst.clear();
     if (rawLen == 0) return false;
     HMODULE h = Ntdll();
-    auto fnWs = (FnGetWorkSpace)GetProcAddress(h,
-                                               "RtlGetCompressionWorkSpaceSize");
-    auto fnEx = (FnDecompressEx)GetProcAddress(h, "RtlDecompressBufferEx");
-    auto fnDe = (FnDecompress)GetProcAddress(h, "RtlDecompressBuffer");
+    auto fnWs = LoadProc<FnGetWorkSpace>(h, "RtlGetCompressionWorkSpaceSize");
+    auto fnEx = LoadProc<FnDecompressEx>(h, "RtlDecompressBufferEx");
+    auto fnDe = LoadProc<FnDecompress>(h, "RtlDecompressBuffer");
     ULONG wsC = 0, wsD = 0;
     if (fnWs) fnWs(kFormat, &wsC, &wsD);
     dst.resize(rawLen);

@@ -1204,18 +1204,20 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
                 LogError(err);
                 return 1;
             }
-            if (!guidMatched)
+            if (!guidMatched) {
                 LogWarn("ESP partition type is not EFI System; used fallback "
                         "(mountvol/\\EFI files)");
-                // PIT-216：先清掉以前失败/取消留下的**临时启动项**。它们指向的
-                // 内核可能已经删了，却还顶在 BootOrder[0] —— 固件每次先启它，
-                // 就永远进不了 Windows（这台客户机就是这么卡的）。
-                {
-                    std::string clog;
-                    CleanupStaleUefiEntries(clog);
-                    if (!clog.empty())
-                        LogInfo("stale uefi entry cleanup: " + clog);
-                }
+            }
+            // PIT-216：先清掉以前失败/取消留下的**临时启动项**。它们指向的
+            // 内核可能已经删了，却还顶在 BootOrder[0] —— 固件每次先启它，
+            // 就永远进不了 Windows（这台客户机就是这么卡的）。
+            // 注意：清理是无条件执行的（上面的 if 只管那条告警日志）。
+            {
+                std::string clog;
+                CleanupStaleUefiEntries(clog);
+                if (!clog.empty())
+                    LogInfo("stale uefi entry cleanup: " + clog);
+            }
             // ① 目标系统盘得有 bcdboot 要的模板（docs/15 · P2c）；② ESP 还得
             //    放得下 bcdboot 要写的 ~9MB（docs/15 · P2a）。
             //    ⚠️ 这两条**只对 bcdboot 这条路成立**：不满足就改走随包资产自足

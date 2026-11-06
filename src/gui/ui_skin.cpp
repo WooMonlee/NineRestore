@@ -830,9 +830,12 @@ static DWORD Tint(DWORD argb, int delta) {
     int r = (int)((argb >> 16) & 0xFF) + delta;
     int g = (int)((argb >> 8) & 0xFF) + delta;
     int b = (int)(argb & 0xFF) + delta;
-    if (r < 0) r = 0; if (r > 255) r = 255;
-    if (g < 0) g = 0; if (g > 255) g = 255;
-    if (b < 0) b = 0; if (b > 255) b = 255;
+    if (r < 0) r = 0;
+    if (r > 255) r = 255;
+    if (g < 0) g = 0;
+    if (g > 255) g = 255;
+    if (b < 0) b = 0;
+    if (b > 255) b = 255;
     return ((DWORD)a << 24) | ((DWORD)r << 16) | ((DWORD)g << 8) | (DWORD)b;
 }
 

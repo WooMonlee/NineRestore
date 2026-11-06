@@ -34,6 +34,10 @@ namespace {
 #define WM_DEL_DONE     (WM_APP + 21)  // wParam=stillThere (0/1)
 
 const wchar_t* kDelProgClass = L"SysRecoverDelProg";
+// 删除线程栈：DeleteRec 递归删整棵 Windows 树（WinSxS/AppData 深路径），
+// 每帧 WIN32_FIND_DATAW≈592B + 两个 wstring ≈700B；默认 1MB 栈在极深树
+// 可栈溢出（EXCEPTION_STACK_OVERFLOW）。8MB 对应约 12000 层，远超真实树深。
+constexpr DWORD kDeleteWorkerStackBytes = 8 * 1024 * 1024;
 HFONT g_delFont = nullptr;
 HWND g_delBar = nullptr;
 ULONGLONG g_delStart = 0;
@@ -182,6 +186,37 @@ static void DoDeleteWork(const sysrecover::SwapLeftInfo& info, HWND hwnd) {
     }
 }
 
+// 删除线程的上下文与入口。
+// 入口必须是**独立函数且带 WINAPI（__stdcall）**：无捕获 lambda 的调用约定是
+// __cdecl，x86 上与 LPTHREAD_START_ROUTINE（__stdcall）不兼容，只能靠
+// -fpermissive 勉强转换 —— 那是编译器在替我们冒险，不是正确写法。
+struct DelWorkerCtx {
+    sysrecover::SwapLeftInfo info;
+    HWND hwnd;
+};
+
+static DWORD WINAPI DelWorkerProc(LPVOID p) {
+    auto* c = static_cast<DelWorkerCtx*>(p);
+    // 2026-10-30：删 2.7 万文件会把磁盘打满、explorer 都卡（客户现场
+    // 两个 explorer dump）。用后台模式让前台优先（Win7+ 有效）；
+    // 代价是删得稍慢，但界面/桌面不再"假死"。
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+    // VEH 兜底（0.7.54）：删除线程内致命异常先落一条再放行 —
+    // 崩溃过滤器若没写出 dump 也留线索。线程结束时移除。
+    PVOID veh = AddVectoredExceptionHandler(1, DelWorkerVeh);
+    DoDeleteWork(c->info, c->hwnd);
+    if (veh)
+        RemoveVectoredExceptionHandler(veh);
+    // 删完复核目录是否还在
+    std::wstring dir = std::wstring(1, c->info.drive) +
+                       (c->info.isNew ? L":\\~new" : L":\\~old");
+    bool still = GetFileAttributesW(dir.c_str()) != INVALID_FILE_ATTRIBUTES;
+    PostMessageW(c->hwnd, WM_DEL_DONE, still ? 1 : 0, 0);
+    delete c;
+    return 0;
+}
+
 // 程序自删（用户 2026-10-20 规格：删除旧系统后自删）。
 // 正在运行的 exe/DLL 不能当场删除 —— 起一个**分离的** cmd：等本进程退出后
 // 反复 rmdir（最多 30 次），把整个程序目录（含 logs、libwim-15.dll）清掉。
@@ -256,41 +291,13 @@ bool RunDeleteWithProgress(HWND owner, const sysrecover::SwapLeftInfo& it) {
                         (it.isNew ? ":\\~new" : ":\\~old"));
 
     // 工作线程：删除 + PostMessage 进度
-    struct Ctx {
-        sysrecover::SwapLeftInfo info;
-        HWND hwnd;
-    };
-    auto* ctx = new Ctx{it, hwnd};
+    auto* ctx = new DelWorkerCtx{it, hwnd};
     // 0.7.55 栈加固：DeleteRec 递归删整棵 Windows 树（WinSxS/AppData 深路径），
     // 每帧 WIN32_FIND_DATAW≈592B + 两个 wstring ≈700B；默认 1MB 栈在极深树
     // 可栈溢出（EXCEPTION_STACK_OVERFLOW，VEH 0.7.54 可见 code=0xC00000FD）。
     // 提到 8MB —— 8MB/700B ≈ 12000 层，远超真实 Windows 树深度。
-    HANDLE hThread = CreateThread(
-        nullptr, 8 * 1024 * 1024,
-        [](LPVOID p) -> DWORD {
-            auto* c = static_cast<Ctx*>(p);
-            // 2026-10-30：删 2.7 万文件会把磁盘打满、explorer 都卡（客户现场
-            // 两个 explorer dump）。用后台模式让前台优先（Win7+ 有效）；
-            // 代价是删得稍慢，但界面/桌面不再"假死"。
-            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-            SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
-            // VEH 兜底（0.7.54）：删除线程内致命异常先落一条再放行 —
-            // 崩溃过滤器若没写出 dump 也留线索。线程结束时移除。
-            PVOID veh = AddVectoredExceptionHandler(1, DelWorkerVeh);
-            DoDeleteWork(c->info, c->hwnd);
-            if (veh)
-                RemoveVectoredExceptionHandler(veh);
-            // 删完复核目录是否还在
-            std::wstring dir =
-                std::wstring(1, c->info.drive) +
-                (c->info.isNew ? L":\\~new" : L":\\~old");
-            bool still =
-                GetFileAttributesW(dir.c_str()) != INVALID_FILE_ATTRIBUTES;
-            PostMessageW(c->hwnd, WM_DEL_DONE, still ? 1 : 0, 0);
-            delete c;
-            return 0;
-        },
-        ctx, 0, nullptr);
+    HANDLE hThread = CreateThread(nullptr, kDeleteWorkerStackBytes,
+                                  DelWorkerProc, ctx, 0, nullptr);
     if (!hThread) {
         sysrecover::LogWarn("swap leftover delete UI: CreateThread failed err=" +
                             std::to_string(GetLastError()));
