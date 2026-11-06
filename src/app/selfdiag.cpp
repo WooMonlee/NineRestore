@@ -1169,6 +1169,89 @@ RescueNotice CheckLastRescueFailure() {
     return out;
 }
 
+// ── 菜单模式自证 + 失败现场保留（2026-11-06）──────────────────────────
+// 背景：菜单模式装完只写契约与常驻启动项，没有任何"救援层是否真的跑过"的
+// 回执；用户选了菜单但救援没起来时，GUI 仍显示"已安装"，等于默认成功。
+namespace {
+
+std::wstring MenuMarkerPath() {
+    return LogBaseDir() + L"\\logs\\menu-install.txt";
+}
+std::wstring MenuAckPath() { return LogBaseDir() + L"\\logs\\.menu-ack"; }
+
+// 本次开机时刻（UTC FILETIME，100ns 单位）：现在 - 开机时长。
+unsigned long long BootUtcFileTime() {
+    FILETIME now = {};
+    ::GetSystemTimeAsFileTime(&now);
+    ULARGE_INTEGER u;
+    u.LowPart = now.dwLowDateTime;
+    u.HighPart = now.dwHighDateTime;
+    const unsigned long long up = ::GetTickCount64() * 10000ull;
+    return u.QuadPart > up ? u.QuadPart - up : 0;
+}
+
+bool FileCreationUtcFileTime(const std::wstring& path,
+                             unsigned long long& out) {
+    HANDLE h = CreateFileW(
+        path.c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return false;
+    FILETIME create = {}, access = {}, write = {};
+    const bool ok = GetFileTime(h, &create, &access, &write) != FALSE;
+    CloseHandle(h);
+    if (!ok)
+        return false;
+    ULARGE_INTEGER u;
+    u.LowPart = create.dwLowDateTime;
+    u.HighPart = create.dwHighDateTime;
+    out = u.QuadPart;
+    return true;
+}
+
+std::string LatestReceiptTime() {
+    std::wstring base = LogBaseDir() + L"\\logs";
+    std::vector<std::wstring> files;
+    FindStatusFiles(base + L"\\collected", 4, files);
+    FindStatusFiles(base, 1, files);
+    std::string best;
+    for (const auto& f : files) {
+        std::string t;
+        if (!ReadSmallFile(f, t))
+            continue;
+        const std::string tm = StatusField(t, "time");
+        if (!tm.empty() && (best.empty() || tm > best))
+            best = tm;
+    }
+    return best;
+}
+
+}  // namespace
+
+MenuRescueState CheckMenuRescueExecution(std::string& installTime,
+                                         std::string& detail) {
+    std::string body;
+    if (!ReadSmallFile(MenuMarkerPath(), body))
+        return MenuRescueState::NotInstalled;
+    installTime = StatusField(body, "time");
+    if (installTime.empty())
+        return MenuRescueState::NotInstalled;  // 标记损坏：不下结论
+    // 标记是本次开机之后写的 → 就是安装那一次，还没重启，先不下结论。
+    unsigned long long ct = 0;
+    if (FileCreationUtcFileTime(MenuMarkerPath(), ct) &&
+        ct >= BootUtcFileTime())
+        return MenuRescueState::SameBoot;
+    const std::string latest = LatestReceiptTime();
+    detail = "install=" + installTime +
+             " latest=" + (latest.empty() ? std::string("-") : latest);
+    if (!latest.empty() && latest > installTime)
+        return MenuRescueState::Executed;  // 安装后确有新回执
+    return MenuRescueState::NeverExecuted;  // 重启过 + 没有新回执 = 没被引导
+}
+
+void AcknowledgeMenuRescue() { WriteUtf8File(MenuAckPath(), "seen"); }
+
 // 收集后清理散落日志（用户 2026-10-04 规格 4：不该到处放这种东西）。
 int CleanupStrayLogs() {
     int n = 0;

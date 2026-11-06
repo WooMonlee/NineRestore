@@ -191,6 +191,8 @@ private:
     void ShowRescueFailureNotice();  // P3（PIT-148）：A/B 类失败 → Ask3 + 一键重试
     // 启动兜底：safeboot 仍被置位（上一轮进了安全模式且自动退出没跑成）。
     void ShowSafeBootExitNotice();
+    // 启动兜底：装了常驻菜单、但重启后没有任何新回执 → "菜单未被引导执行"。
+    void ShowMenuRescueNotice();
     void StartRetryStagedRestore();  // 一键重试 worker 入口（读 conf → StageRestore）
     bool RebootNow();  // true = 已发起重启（PE 走 wpeutil）
     bool AskBusyClose();          // 忙时关闭：true = 用户选了「终止并退出」

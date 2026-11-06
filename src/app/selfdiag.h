@@ -49,6 +49,20 @@ struct RescueNotice {
 };
 RescueNotice CheckLastRescueFailure();
 
+// 菜单模式自证（2026-11-06）：装常驻菜单时写 <日志根>\logs\menu-install.txt；
+// 下次进 Windows 时比对"本次开机时刻"与安装时刻，再看有没有**晚于安装**的新
+// 救援回执。结论：
+//   NotInstalled  没装过菜单（或标记已丢）
+//   SameBoot      就是安装时那次开机，还没重启，不下结论
+//   Executed      安装后至少有一次新的回执 → 救援层确实被引导执行过
+//   NeverExecuted 重启过、但没有新回执 → 菜单没被固件/用户引导，不能默认成功
+enum class MenuRescueState { NotInstalled, SameBoot, Executed, NeverExecuted };
+MenuRescueState CheckMenuRescueExecution(std::string& installTime,
+                                         std::string& detail);
+
+// 用户已经看过"菜单未执行"提示（写 .menu-ack）→ 下次启动才允许清理失败现场。
+void AcknowledgeMenuRescue();
+
 // 支持包出包成功后清理散落在各盘的日志（用户规格 4：不该到处放）：
 // <盘根>\ZJRESTORE-{last.log,probe.txt,status.txt}、zjrestore-boot.log、
 // ZJRESTORE-logs\、非活动 <盘>\ZJRESTORE\logs\、ESP 的 \EFI\ZJRESTORE\logs\*。

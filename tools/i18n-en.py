@@ -877,4 +877,10 @@ EN = {
     '双系统下 {current} 可能是另一个系统；\n': 'On dual-boot systems {current} may refer to the other system;\n',
     'BitLocker 机器重启可能要求恢复密钥。\n': 'BitLocker machines may ask for the recovery key after a reboot.\n',
     '是否现在退出安全模式并重启？': 'Exit safe mode and reboot now?',
+    '已安装的还原菜单没有被引导执行。\n': 'The installed restore menu was never booted.\n',
+    '安装时间 ': 'Install time ',
+    '，之后没有新的救援回执。\n': ', no new rescue receipt afterwards.\n',
+    '可能原因：开机时没选 SysRecover 菜单项，或固件未识别到该启动项。\n': 'Possible cause: the SysRecover menu item was not picked at boot, or the firmware did not recognize the entry.\n',
+    '请重新运行本程序并安装菜单；若反复如此，把 logs\\collected 发给技术支持。': 'Please run this program again and reinstall the menu; if it keeps happening, send logs\\collected to support.',
+    '还原菜单未执行': 'Restore Menu Not Executed',
 }

@@ -1635,6 +1635,30 @@ static int FinishStagedTask(StageCtx& c) {
     ProgressDone("restore", "staged");
     if (menuEntry) {
         SetMenuFlag(true);
+        // 菜单模式自证（2026-11-06）：记下安装时刻。下次进 Windows 时，如果
+        // "开机时间晚于安装时刻、但没有任何晚于安装时刻的新回执"，就明确提示
+        // 「还原菜单未被引导执行」——菜单装上了 ≠ 救援层跑过，不能默认成功。
+        // 重新安装会作废旧确认（.menu-ack），逼用户再看一次结论。
+        {
+            std::wstring md = LogBaseDir() + L"\\logs";
+            CreateDirectoryW(md.c_str(), nullptr);
+            DeleteFileW((md + L"\\.menu-ack").c_str());
+            SYSTEMTIME st2 = {};
+            GetLocalTime(&st2);
+            char mk[64];
+            snprintf(mk, sizeof(mk), "time=%04u-%02u-%02u %02u:%02u:%02u\n",
+                     st2.wYear, st2.wMonth, st2.wDay, st2.wHour, st2.wMinute,
+                     st2.wSecond);
+            HANDLE hm = CreateFileW((md + L"\\menu-install.txt").c_str(),
+                                    GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                    FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (hm != INVALID_HANDLE_VALUE) {
+                std::string body(mk);
+                DWORD w = 0;
+                WriteFile(hm, body.data(), (DWORD)body.size(), &w, nullptr);
+                CloseHandle(hm);
+            }
+        }
         LogInfo("restore menu entry installed (contract written; boots into the "
                 "rescue layer only if the user picks it)");
     } else {

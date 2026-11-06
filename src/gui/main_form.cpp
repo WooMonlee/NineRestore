@@ -429,6 +429,7 @@ LRESULT CMainForm::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
     }
     if (msg == WM_CHECK_RESCUE) {
         ShowRescueFailureNotice();
+        ShowMenuRescueNotice();
         ShowSafeBootExitNotice();
     }
     if (msg == WM_STARTUP_LAZY) {
@@ -951,6 +952,26 @@ void CMainForm::ShowRescueFailureNotice() {
         if (r == 1)
             StartRetryStagedRestore();
     }
+}
+
+// 菜单模式自证（2026-11-06）：装了常驻菜单 ≠ 救援层跑过。判据 = 本次开机晚于
+// 安装时刻、但 collected 里没有任何晚于安装时刻的新回执。命中就明确提示，
+// 不再"默认已安装即成功"。提示看过后写 .menu-ack，下次启动才允许清掉现场。
+void CMainForm::ShowMenuRescueNotice() {
+    std::string installTime, detail;
+    sysrecover::MenuRescueState st =
+        sysrecover::CheckMenuRescueExecution(installTime, detail);
+    if (st != sysrecover::MenuRescueState::NeverExecuted)
+        return;
+    LogWarn("menu rescue never executed: " + detail);
+    std::wstring msg = Tr(L"已安装的还原菜单没有被引导执行。\n");
+    msg += Tr(L"安装时间 ") + U2W(installTime) +
+           Tr(L"，之后没有新的救援回执。\n");
+    msg += Tr(L"可能原因：开机时没选 SysRecover 菜单项，或固件未识别到该启动项。\n");
+    msg += Tr(L"请重新运行本程序并安装菜单；若反复如此，把 logs\\collected 发给技术支持。");
+    MessageBoxW(m_hWnd, msg.c_str(), Tr(L"还原菜单未执行"),
+                MB_OK | MB_ICONWARNING);
+    sysrecover::AcknowledgeMenuRescue();
 }
 
 // 启动兜底（2026-11-06）：safeboot 仍被置位。正常情况下「日志」入口设置时会
