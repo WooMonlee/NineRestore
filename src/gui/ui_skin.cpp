@@ -1062,6 +1062,9 @@ void CPartitionComboUI::DoEvent(TEventUI& event) {
 }
 
 void CPartitionComboUI::PaintText(HDC hDC) {
+    // 展开态：弹层与控件自身区域重叠，控件里的选中文本会与弹层首项叠成
+    // "两个 C:"。纯渲染修复——展开期间不画自身选中行（布局/交互不变）。
+    if (m_pWindow != nullptr) return;
     if (GetCount() == 0) {
         if (m_hint.empty())
             return;
