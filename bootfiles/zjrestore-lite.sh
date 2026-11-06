@@ -93,13 +93,21 @@ for _f in /tmp/_zjresy*.log; do
     [ -f "$_f" ] && { TARGET_LOG="$_f"; break; }
 done
 TASK_CONF="/tmp/restore-task.conf"
-if [ "$ZZ_BLACKBOX" != "1" ] && [ -z "$TARGET_LOG" ] && [ ! -f "$TASK_CONF" ]; then
-    RESULT=FAILED; STEP=no-task
-    say "no log and no conf, abort"
+# 只有日志、没有契约 → 不再"接着跑"（2026-11-06）：日志是诊断输出，字段可能被
+# 手工编辑、截断或来自别的任务；契约缺席时不猜参数，直接 fail-closed。
+# 正常暂存流程总会在日志同一分区根写 conf（task.cpp WriteRestoreLog），缺席即异常。
+if [ "$ZZ_BLACKBOX" != "1" ] && [ ! -f "$TASK_CONF" ]; then
+    if [ -z "$TARGET_LOG" ]; then
+        RESULT=FAILED; STEP=no-task
+        say "no log and no conf, abort"
+    else
+        RESULT=FAILED; STEP=no-contract
+        say "ERROR: no restore-task.conf (log-only fallback disabled; fail-closed)"
+        say "ERROR: re-stage the restore so the contract is written with the log"
+    fi
     exit 1
 fi
 [ -n "$TARGET_LOG" ] || say "warn: no _zjresy log, using conf only"
-[ -f "$TASK_CONF" ] || say "warn: no conf, using log only"
 
 # 取值为防呆都去掉尾部 \r：契约正常是 LF（task.cpp 用 \n），但若有人用记事本
 # 编辑过/别处生成的 CRLF 版本，路径/数字会带 \r 导致静默失配（如 image not found）。
@@ -130,7 +138,18 @@ fi
 say "contract_version=$_CV (ok)"
 
 IMAGE_INDEX=$(get_task image_index)
-[ -n "$IMAGE_INDEX" ] || IMAGE_INDEX=1
+# 缺 image_index 不再默认 1（2026-11-06）：多卷镜像里"默认取 1"会解错卷，
+# 且失败现场看不出是猜的。语义从"静默推测"改为"显式失败"（见 CHANGELOG）。
+if [ -z "$IMAGE_INDEX" ]; then
+    if [ "$ZZ_BLACKBOX" = "1" ]; then
+        IMAGE_INDEX=1   # 黑匣子不执行 apply，只为日志字段完整
+    else
+        RESULT=FAILED; STEP=no-image-index
+        say "ERROR: image_index missing in contract/log; refusing the old default 1"
+        say "ERROR: re-stage the restore with this build"
+        exit 1
+    fi
+fi
 # 方案 C（用户 2026-09-30 规格）：镜像里 ESP 分区备份子镜像的 index。
 # Windows 暂存时从镜像内容发现后写进契约；0/缺省 = 镜像里没有（绝大多数任务）。
 ESP_INDEX=$(get_task esp_index)
@@ -151,6 +170,27 @@ TARGET_OFFSET=$(get_task target_offset)
 TARGET_SIZE=$(get_task target_size)
 [ -n "$TARGET_SIZE" ] || TARGET_SIZE=$(get_log target_part_size)
 IMAGE_PATH=$(get_task image_path)
+# 关键字段 fail-closed（2026-11-06）：契约缺失时 get_task 会回落到日志；以前
+# 再把 keep_old / repair_boot / 目标分区标识套"缺省值"接着跑 —— 缺字段 =
+# 语义未知，可能删错分区、或跳过引导修复还报成功。现在缺一即失败。
+KEEP_OLD_RAW=""
+if [ "$ZZ_BLACKBOX" != "1" ]; then
+    _miss=""
+    [ -n "$TARGET_OFFSET" ] || _miss="$_miss target_offset"
+    [ -n "$TARGET_SIZE" ] || _miss="$_miss target_size"
+    [ -n "$PT_TYPE" ] || _miss="$_miss pt_type"
+    [ -n "$REPAIR_BOOT" ] || _miss="$_miss repair_boot"
+    KEEP_OLD_RAW=$(get_task keep_old)
+    case "$KEEP_OLD_RAW" in 0|1) ;; *) _miss="$_miss keep_old" ;; esac
+    if [ -n "$_miss" ]; then
+        RESULT=FAILED; STEP=contract-incomplete
+        say "ERROR: required contract field(s) missing:$_miss"
+        say "ERROR: refusing to continue with guessed defaults"
+        exit 1
+    fi
+else
+    KEEP_OLD_RAW=1   # 黑匣子不执行 swap/apply
+fi
 say "offset=$TARGET_OFFSET size=$TARGET_SIZE pt=$PT_TYPE index=$IMAGE_INDEX repair=$REPAIR_BOOT"
 say "image=$IMAGE_PATH"
 [ -n "$ESP_INDEX" ] && say "esp subimage: index=$ESP_INDEX (restore to ESP after main apply)"
@@ -1233,8 +1273,7 @@ if [ "$ENGINE" = "swap" ]; then
         # PIT-202：keep_old=0 → 交换完成后**直接删掉旧系统树**（Linux root 不受
         # Windows ACL 限制；以前靠新系统首启的 `rd /s /q`，遇到 TrustedInstaller
         # ACL 必失败，~old 会一直留着 —— 用户实测就是这个问题）。
-        ZJ_KEEP_OLD=$(get_task keep_old)
-        case "$ZJ_KEEP_OLD" in 0|1) ;; *) ZJ_KEEP_OLD=1 ;; esac
+        ZJ_KEEP_OLD="$KEEP_OLD_RAW"
         say "keep_old=$ZJ_KEEP_OLD (0=delete old system after swap)"
     _s0=$(date +%s)
     ZJ_KEEP_OLD="$ZJ_KEEP_OLD" sh "$ZJSWAP" "$TARGET_DEV" /tmp/zj_swap_mnt

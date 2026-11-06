@@ -120,7 +120,9 @@ tar.gz，可直接解包）组装：
 
 ### zjrestore-lite.sh 执行顺序（失败即停并写日志）
 
-1. 读 `/tmp/_zjresy*.log` + `/tmp/restore-task.conf`（由 `/init` 扫描后拷贝；conf 缺失时回退日志字段）。
+1. 读 `/tmp/_zjresy*.log` + `/tmp/restore-task.conf`（由 `/init` 扫描后拷贝）；**契约缺席即
+   fail-closed 退出**（不再回退到日志继续），关键字段（`image_index`/`target_offset`/
+   `target_size`/`pt_type`/`repair_boot`/`keep_old`）缺一即失败。
 2. 解析四元素（offset/size/serial/path）+ 镜像路径/索引。
 3. 目标分区定位：**用日志所在分区设备**（`/init` 作为 `$1` 传入）；回退按 offset 匹配（blkid 返回扇区，须 ×512）。
 4. 扫描其它分区找镜像文件 + `bootfix.wim`（按 fs 类型选 `ntfs3`/`ntfs-3g`/`vfat`/`exfat` 挂载）。

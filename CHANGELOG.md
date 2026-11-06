@@ -27,6 +27,12 @@
   全部成功才删除标记（失败保留标记等下次重试）。
 - **H7 单实例锁**：暂存还原入口改用 RAII 操作锁，移镜像、解压、格式化、写引导全部纳入锁内，
   避免并发实例互踩。
+- **H8 救援层缺字段 fail-closed**：`zjrestore-lite.sh` 缺 `image_index` 不再默认 1；
+  只有 `_zjresy*.log`、没有 `restore-task.conf` 时不再"接着跑"；`target_offset` /
+  `target_size` / `pt_type` / `repair_boot` / `keep_old` 缺一即失败
+  （`STEP=no-image-index` / `no-contract` / `contract-incomplete`）。
+  **语义变更**：契约不全时由「静默推测默认值继续」改为「显式失败、不碰目标分区」
+  （黑匣子模式除外：它只收集日志、不执行写入）。
 
 ### 备份 / 还原可靠性（P1）
 
