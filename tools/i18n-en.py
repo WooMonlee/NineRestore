@@ -846,6 +846,8 @@ EN = {
     '备份已写出但校验失败(rc=': 'Backup was written but verification failed (rc=',
     '备份已生成但不完整；确认可接受请加 --allow-skipped（此时退出码为 0）。\n': 'Backup created but incomplete; add --allow-skipped if that is acceptable (exit code 0).\n',
     '已安装 Boot': 'Installed Boot',
+    '已安装': 'Installed',
+    '启动还原菜单已安装，无需重复安装。\n要清除或换绑镜像，请用「更多功能>>」→「清除启动中还原菜单」，之后本按钮会恢复为可安装。': 'The restore boot menu is already installed; no need to install it again.\nTo remove it or rebind an image, use "More>>" -> "Remove recovery boot menu"; this button will become available again.',
     '已显示 USB 设备（还原目标请谨慎选择）': 'USB devices are now shown (choose the restore target carefully)',
     '已隐藏 USB 设备': 'USB devices are now hidden',
     '找不到目标分区 磁盘': 'Target partition not found: disk ',

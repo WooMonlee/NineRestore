@@ -1332,8 +1332,11 @@ void CMainForm::RefreshBootMenuBtn() {
         } else {
             wcscpy_s(tip, Tr(L"已安装启动还原（旧版安装，未绑定镜像）。\n要清除请用「更多功能>>」→「清除启动中还原菜单」"));
         }
-        p->SetText(Tr(L"安装到启动"));
-        p->SetEnabled(false);
+        // 已安装（2026-11-06 用户反馈 P2）：按钮文字改为「已安装」，**不再置灰**——
+        // 置灰状态下用户看不到悬停提示，会误以为程序坏了。点击只弹说明（见
+        // ToggleBootMenu），删除/重装入口唯一化到「更多功能>>」→「清除启动中还原菜单」。
+        p->SetText(Tr(L"已安装"));
+        p->SetEnabled(!m_busy);
         p->SetBkColor(0xFFFFFFFF);
         btn->SetTextColor(ui_skin::C_TEXT);
     } else {
@@ -1362,10 +1365,27 @@ void CMainForm::RefreshBootMenuBtn() {
 }
 
 void CMainForm::ToggleBootMenu() {
-    // 「安装到启动」= **只负责安装**（2026-10-27 用户规格）：已安装时按钮由
-    // RefreshBootMenuBtn 置灰，删除入口唯一化到「更多功能>>」→「清除启动中还原
-    // 菜单」（ClearBootMenuEntry）。这里不再保留"已安装就走删除"的分支。
+    // 「安装到启动」= **只负责安装**（2026-10-27 用户规格）：已安装时按钮文字变
+    //「已安装」且仍可点（点击只弹说明，见下）；删除入口唯一化到「更多功能>>」→
+    //「清除启动中还原菜单」（ClearBootMenuEntry）。这里不保留"已安装就走删除"的分支。
     if (m_busy) return;
+    // 已安装（P2）：按钮可点但只说明状态 —— 不重复安装、也不在这里删除
+    //（删除入口唯一化到「更多功能>>」→「清除启动中还原菜单」）。
+    {
+        std::string detail;
+        std::wstring boundImg;
+        int boundIdx = 1;
+        unsigned long long boundOff = 0, boundSz = 0;
+        if (BootMenuInstalled(detail) ||
+            ReadMenuBinding(&boundImg, &boundIdx, &boundOff, &boundSz)) {
+            MessageBoxW(m_hWnd,
+                        Tr(L"启动还原菜单已安装，无需重复安装。\n"
+                           L"要清除或换绑镜像，请用「更多功能>>」→"
+                           L"「清除启动中还原菜单」，之后本按钮会恢复为可安装。"),
+                        Tr(L"已安装"), MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+    }
     // ── 安装（用户 2026-09-29 规格）：把**当前镜像 → 第二步选中的目标分区**写成
     //    常驻任务契约，并装常驻启动项；开机菜单里选「SysRecover」即执行该还原。
     if (m_wimPath.empty() || m_selPart < 0 ||
