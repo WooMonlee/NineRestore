@@ -45,6 +45,5 @@ int ImageHasWinload(const std::wstring& path, int index, bool* exists);
 std::wstring ResolveImagePlain(const std::wstring& path, ProgressFn progress,
                                std::wstring& err, bool* temp);
 void ReleaseImagePlain(const std::wstring& path);
-void ReleaseAllImagePlain();
 
 }  // namespace sysrecover

@@ -262,14 +262,4 @@ void ReleaseImagePlain(const std::wstring& path) {
         DeleteFileW(tmp.c_str());
 }
 
-void ReleaseAllImagePlain() {
-    std::map<std::wstring, std::wstring> copy;
-    {
-        std::lock_guard<std::mutex> lk(g_mu);
-        copy.swap(g_temps);
-    }
-    for (const auto& kv : copy)
-        DeleteFileW(kv.second.c_str());
-}
-
 }  // namespace sysrecover

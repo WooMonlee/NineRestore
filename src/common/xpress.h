@@ -37,11 +37,6 @@ inline Fn LoadProc(HMODULE h, const char* name) {
     return reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(h, name)));
 }
 
-inline bool Available() {
-    return Ntdll() && GetProcAddress(Ntdll(), "RtlCompressBuffer") &&
-           GetProcAddress(Ntdll(), "RtlDecompressBuffer");
-}
-
 // 压缩；结果不比原文小 → 返回 false（调用方存原样）。
 inline bool Compress(const std::vector<unsigned char>& src,
                      std::vector<unsigned char>& dst) {
