@@ -280,6 +280,70 @@ LRESULT CMainForm::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         if (pFocus && _tcscmp(pFocus->GetName(), _T("MainAction")) == 0)
             return 0;
     }
+    if (msg == WM_MOUSELEAVE || msg == WM_MOUSEMOVE)
+        HandleTooltipMessage(msg, wParam, lParam);  // 不消费，仍交基类
+    if ((msg == WM_COMMAND && HIWORD(wParam) == EN_SETFOCUS) ||
+        msg == WM_OPEN_PICK_MENU ||
+        (msg == WM_COMMAND && HIWORD(wParam) == EN_CHANGE))
+        return HandleImagePathEditMessage(msg, wParam);
+    if (msg == WM_TIMER && wParam >= 1 && wParam <= 3)
+        return HandleTimerMessage(wParam);
+    if (msg == WM_RETRY_DONE) return OnRetryDone(wParam, lParam);
+    if (msg == WM_PART_INIT_DONE) return OnInitPartDone(wParam);
+    if (msg == WM_FIXBOOT_DONE) return OnFixBootDone(wParam);
+    if (msg == WM_VERIFY_DONE) return OnVerifyDone(wParam);
+    if (msg == WM_SR_QUERY_BUSY) {
+        // 新实例问「你在忙吗」——忙则不让它关掉本进程（见 instance_dlg.cpp）。
+        return m_busy ? 1 : 0;
+    }
+    if (msg == WM_DROPFILES) {
+        HandleDroppedFiles(wParam);
+        return 0;
+    }
+    if (msg == WM_DESTROY) {
+        // 关键：经典 Duilib 的 WindowImplBase 销毁窗口后**不会**结束消息循环
+        // （它只做 m_pm 的清理），必须自己 PostQuitMessage，否则
+        // CPaintManagerUI::MessageLoop() 永不返回 → 进程变成「没有窗口但还活着」
+        // 的僵尸：任务栏看不见、但单实例互斥量仍被占用，于是下次启动只会走到
+        // 「已有程序在运行」流程，且等满 WaitForSingleObject 的 5s 超时才继续。
+        // 修复前实测：PostMessage(WM_CLOSE) 后窗口立刻消失、进程 6s 后仍在。
+        ::PostQuitMessage(0);
+    }
+    if (msg == WM_CLOSE && m_busy) {
+        // 关闭请求来自别处（新实例的 PostMessage(WM_CLOSE)、Alt+F4、任务栏菜单等）。
+        // 任务执行中直接销毁窗口会连 worker 一起杀掉，留下半成品镜像 / 中断的暂存
+        // → 不能默默关，也不能只会拒绝：问一次，允许「终止并退出」。
+        if (m_cancelling)
+            return 0;
+        if (!AskBusyClose())
+            return 0;            // 「继续等待」：不关窗，任务继续
+        CancelAndExit();         // 「终止并退出」：中止 + 清理 + 关窗
+        return 0;
+    }
+    if (msg == WM_NCHITTEST) {
+        // 老界面是「无系统外框」的自绘窗口：顶栏（caption 52px）空白处必须
+        // 能拖动，而按钮 / Tab / 勾选框 / 下拉 / 输入框必须拿到鼠标消息。
+        // 基类 OnNcHitTest 只看 caption 高度，分不清这两者，故在此自行判定：
+        // 先看命中的控件是否「可交互」，是 → HTCLIENT；否则落在顶栏 → HTCAPTION。
+        POINT pt = {(short)LOWORD(lParam), (short)HIWORD(lParam)};
+        ::ScreenToClient(m_hWnd, &pt);
+        for (CControlUI* q = m_PaintManager.FindControl(pt); q; q = q->GetParent()) {
+            LPCTSTR cls = q->GetClass();
+            if (_tcscmp(cls, _T("WinBtn")) == 0 || _tcscmp(cls, _T("TabOption")) == 0 ||
+                _tcscmp(cls, _T("GlyphCheck")) == 0 || _tcscmp(cls, _T("Combo")) == 0 ||
+                _tcscmp(cls, _T("Edit")) == 0 || _tcscmp(cls, _T("Button")) == 0 ||
+                _tcscmp(cls, _T("SkinButton")) == 0 || _tcscmp(cls, _T("SkinEdit")) == 0 ||
+                _tcscmp(cls, _T("PartItem")) == 0 || _tcscmp(cls, _T("TextItem")) == 0 ||
+                _tcscmp(cls, _T("ListContainerElement")) == 0)
+                return HTCLIENT;
+        }
+        if (pt.y >= 0 && pt.y < 52) return HTCAPTION;
+        return HTCLIENT;
+    }
+    return WindowImplBase::HandleMessage(msg, wParam, lParam);
+}
+
+void CMainForm::HandleTooltipMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
     if (msg == WM_MOUSELEAVE) {
         ::SendMessage(m_tipHwnd, TTM_POP, 0, 0);
     }
@@ -307,6 +371,9 @@ LRESULT CMainForm::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         msgStruct.pt = pt;
         ::SendMessage(m_tipHwnd, TTM_RELAYEVENT, 0, (LPARAM)&msgStruct);
     }
+}
+
+LRESULT CMainForm::HandleImagePathEditMessage(UINT msg, WPARAM wParam) {
     if (msg == WM_COMMAND && HIWORD(wParam) == EN_SETFOCUS) {
         // 点击/Tab 进入镜像输入框（还原模式）→ 若上次「搜索」有结果，在输入框
         // 下方弹下拉列表供选择（用户 2026-09-30 规格：点输入框可下拉选择某一个）。
@@ -385,19 +452,23 @@ LRESULT CMainForm::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         return 0;
     }
-    if (msg == WM_TIMER && wParam == 2) {
+    return 0;
+}
+
+LRESULT CMainForm::HandleTimerMessage(WPARAM wParam) {
+    if (wParam == 2) {
         // 兜底同步：不管路径是手打/粘贴/拖入/浏览进来的，每 500ms 回读一次原生 EDIT，
         // 有变化就更新 m_wimPath、必要时解析镜像、刷新主按钮。只靠 EN_CHANGE 不够稳
         // （焦点/时序/事件路径都可能漏，用户 2026-09-23 实测按钮仍不亮）。
         SyncImagePathFromUi();
         return 0;
     }
-    if (msg == WM_TIMER && wParam == 1) {
+    if (wParam == 1) {
         if (m_busy)
             SetStatus(m_lastStage + Tr(L"    已用 ") + ElapsedText());
         return 0;
     }
-    if (msg == WM_TIMER && wParam == 3) {
+    if (wParam == 3) {
         if (m_postBusy) {
             m_postPulse = (m_postPulse + 5) % 100;
             CRoundProgressUI* p = static_cast<CRoundProgressUI*>(
@@ -406,212 +477,112 @@ LRESULT CMainForm::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         return 0;
     }
-    if (msg == WM_PROGRESS_UPDATE) {
-        // 防御（PIT-096）：lParam 是 worker new 的 std::wstring*，正常永不为 0；
-        // 为 0 = 消息撞车/异常投递，必须丢弃 —— 解引用空指针就是 2026-09-30
-        // 用户实测的崩溃点（read address 0x8）。已另有消息重编号根治撞车。
-        if (lParam) {
-            OnProgressUpdate((int)wParam, *reinterpret_cast<std::wstring*>(lParam));
-            delete reinterpret_cast<std::wstring*>(lParam);
-        } else {
-            LogWarn("progress msg with null lParam ignored (msg=" +
-                    std::to_string((unsigned)msg) + " wParam=" +
-                    std::to_string((unsigned long long)wParam) + ")");
-        }
-        return 0;
+    return 0;
+}
+
+LRESULT CMainForm::OnRetryDone(WPARAM wParam, LPARAM lParam) {
+    // P3（PIT-148）一键重试完成：成功且需重启 → 自动 shutdown（与正常
+    // 还原暂存一致，PIT-110）；失败 → 弹错误（静默模式也弹，fail-safe）。
+    m_busy = false;
+    KillTimer(m_hWnd, 1);
+    ShowProgress(false);
+    UpdateMainAction();
+    int rc = (int)wParam;
+    bool reboot = lParam != 0;
+    if (rc == 0) {
+        SetStatus(reboot ? Tr(L"重试暂存完成，正在重启...")
+                         : Tr(L"重试完成，无需重启"));
+        if (reboot)
+            RebootNow();
+        else
+            MessageBoxW(m_hWnd, Tr(L"重试完成。重启后即可进入恢复的系统。"),
+                        Tr(L"一键重试"), MB_OK | MB_ICONINFORMATION);
+    } else {
+        std::wstring e = m_retryErr.empty() ? Tr(L"重试失败（详见日志）")
+                                            : U2W(m_retryErr);
+        SetStatus(Tr(L"重试失败"));
+        MessageBoxW(m_hWnd, e.c_str(), Tr(L"一键重试"),
+                    MB_OK | MB_ICONERROR);
     }
-    if (msg == WM_TASK_COMPLETE) {
-        OnTaskComplete((int)wParam);
-        return 0;
+    return 0;
+}
+
+LRESULT CMainForm::OnInitPartDone(WPARAM wParam) {
+    m_busy = false;
+    KillTimer(m_hWnd, 1);
+    ShowProgress(false);
+    if (m_worker.joinable()) m_worker.join();
+    const int rc = (int)wParam;
+    if (rc == 0) {
+        PopulatePartitions(EnumerateDisks());
+        SetStatus(Tr(L"新硬盘分区已创建，请选择镜像后开始还原"));
+        MessageBoxW(m_hWnd,
+                    Tr(L"分区已创建完成。\n请选择系统镜像，再选择新的系统分区开始还原。"),
+                    Tr(L"创建分区"), MB_OK | MB_ICONINFORMATION);
+    } else {
+        SetStatus(Tr(L"创建分区失败"));
+        MessageBoxW(m_hWnd,
+                    m_initErr.empty() ? Tr(L"创建分区失败，请打开日志查看详情。")
+                                      : m_initErr.c_str(),
+                    Tr(L"创建分区"), MB_OK | MB_ICONERROR);
     }
-    if (msg == WM_SUPPORT_DONE) {
-        OnSupportDone(reinterpret_cast<sysrecover::SupportBundle*>(lParam));
-    }
-    if (msg == WM_CHECK_RESCUE) {
-        ShowRescueFailureNotice();
-        ShowMenuRescueNotice();
-    }
-    if (msg == WM_STARTUP_LAZY) {
-        // 起后台线程做启动后置工作（diag/收集/清理/枚举 —— 可能被慢速 USB2
-        // 盘卡住，故绝不能在 InitWindow 里同步跑，见 StartupLazyWork）。
-        if (!m_startWorker.joinable())
-            m_startWorker = std::thread([this] { StartupLazyWork(); });
-        return 0;
-    }
-    if (msg == WM_PARTS_READY) {
-        // 后台枚举完成 → 回主线程填分区下拉（handler 接管指针所有权）。
-        auto* disks = reinterpret_cast<std::vector<DiskInfo>*>(lParam);
-        if (disks) {
-            PopulatePartitions(*disks);
-            delete disks;
-        }
-        return 0;
-    }
-    if (msg == WM_RETRY_DONE) {
-        // P3（PIT-148）一键重试完成：成功且需重启 → 自动 shutdown（与正常
-        // 还原暂存一致，PIT-110）；失败 → 弹错误（静默模式也弹，fail-safe）。
-        m_busy = false;
-        KillTimer(m_hWnd, 1);
-        ShowProgress(false);
+    UpdateMainAction();
+    return 0;
+}
+
+LRESULT CMainForm::OnFixBootDone(WPARAM wParam) {
+    m_busy = false;
+    KillTimer(m_hWnd, 1);
+    ShowProgress(false);
+    if (m_worker.joinable()) m_worker.join();
+    const int rc = (int)wParam;
+    LogInfo("GUI repair-boot done rc=" + std::to_string(rc) + " / " + m_fixMsg);
+    SetStatus(rc == 0 ? Tr(L"引导已修复") : Tr(L"修复引导未完全成功"));
+    // 2026-10-28（用户规格）：**被安全软件拦写 → 弹框让用户退出防护后点「重试」**，
+    // 不再让用户自己猜"为什么没修好"。重试直接开跑（不再重复确认框）。
+    if (m_fixBlocked &&
+        CConfirmDlg::Ask2(
+            m_hWnd, Tr(L"修复引导未完成"),
+            Tr(L"写入启动项/引导区被安全软件拦截\n（如火绒/360 的「写磁盘保留扇区」）。\n请退出该防护或把本程序加入信任，再点「重试」。"),
+            Tr(L"关闭"), Tr(L"重试"), /*defaultIsRight=*/true) == 1) {
         UpdateMainAction();
-        int rc = (int)wParam;
-        bool reboot = lParam != 0;
-        if (rc == 0) {
-            SetStatus(reboot ? Tr(L"重试暂存完成，正在重启...")
-                             : Tr(L"重试完成，无需重启"));
-            if (reboot)
-                RebootNow();
-            else
-                MessageBoxW(m_hWnd, Tr(L"重试完成。重启后即可进入恢复的系统。"),
-                            Tr(L"一键重试"), MB_OK | MB_ICONINFORMATION);
-        } else {
-            std::wstring e = m_retryErr.empty() ? Tr(L"重试失败（详见日志）")
-                                                : U2W(m_retryErr);
-            SetStatus(Tr(L"重试失败"));
-            MessageBoxW(m_hWnd, e.c_str(), Tr(L"一键重试"),
-                        MB_OK | MB_ICONERROR);
-        }
+        StartRepairBoot(/*confirm=*/false);
         return 0;
     }
-    if (msg == WM_MENU_DONE) {
-        // 装/删菜单 worker 完成（2026-10-18）：wParam=rc, lParam=install(0/1)。
-        OnMenuDone((int)wParam, lParam != 0);
-        return 0;
-    }
-    if (msg == WM_MENU_SCAN_DONE) {
-        // 「安装到启动」扫描完成（2026-10-28）：wParam=1 表示可在救援层直接还原。
-        OnMenuScanDone(wParam != 0);
-        return 0;
-    }
-    if (msg == WM_SKIN_EMPTY_PARTITION) {
-        // 分区下拉为空时被点击（2026-10-20）：直接打开发分区向导。
-        if (!m_busy && !m_backupMode) OpenInitDiskWizard();
-        return 0;
-    }
-    if (msg == WM_PART_INIT_DONE) {
-        m_busy = false;
-        KillTimer(m_hWnd, 1);
-        ShowProgress(false);
-        if (m_worker.joinable()) m_worker.join();
-        const int rc = (int)wParam;
-        if (rc == 0) {
-            PopulatePartitions(EnumerateDisks());
-            SetStatus(Tr(L"新硬盘分区已创建，请选择镜像后开始还原"));
-            MessageBoxW(m_hWnd,
-                        Tr(L"分区已创建完成。\n请选择系统镜像，再选择新的系统分区开始还原。"),
-                        Tr(L"创建分区"), MB_OK | MB_ICONINFORMATION);
-        } else {
-            SetStatus(Tr(L"创建分区失败"));
-            MessageBoxW(m_hWnd,
-                        m_initErr.empty() ? Tr(L"创建分区失败，请打开日志查看详情。")
-                                          : m_initErr.c_str(),
-                        Tr(L"创建分区"), MB_OK | MB_ICONERROR);
-        }
+    std::wstring text = m_fixMsg.empty() ? Tr(L"修复引导失败，请打开日志查看详情。")
+                                         : U2W(m_fixMsg);
+    MessageBoxW(m_hWnd, text.c_str(), Tr(L"修复引导"),
+                rc == 0 ? (MB_OK | MB_ICONINFORMATION)
+                        : (MB_OK | MB_ICONWARNING));
+    UpdateMainAction();
+    return 0;
+}
+
+LRESULT CMainForm::OnVerifyDone(WPARAM wParam) {
+    // 「镜像检查」worker 完成（2026-10-27）：wParam=rc(0=通过)。
+    m_busy = false;
+    KillTimer(m_hWnd, 1);
+    ShowProgress(false);
+    if (m_worker.joinable()) m_worker.join();
+    const int rc = (int)wParam;
+    if (m_cancel) {
+        SetStatus(Tr(L"镜像检查已取消"));
         UpdateMainAction();
         return 0;
     }
-    if (msg == WM_FIXBOOT_DONE) {
-        m_busy = false;
-        KillTimer(m_hWnd, 1);
-        ShowProgress(false);
-        if (m_worker.joinable()) m_worker.join();
-        const int rc = (int)wParam;
-        LogInfo("GUI repair-boot done rc=" + std::to_string(rc) + " / " + m_fixMsg);
-        SetStatus(rc == 0 ? Tr(L"引导已修复") : Tr(L"修复引导未完全成功"));
-        // 2026-10-28（用户规格）：**被安全软件拦写 → 弹框让用户退出防护后点「重试」**，
-        // 不再让用户自己猜"为什么没修好"。重试直接开跑（不再重复确认框）。
-        if (m_fixBlocked &&
-            CConfirmDlg::Ask2(
-                m_hWnd, Tr(L"修复引导未完成"),
-                Tr(L"写入启动项/引导区被安全软件拦截\n（如火绒/360 的「写磁盘保留扇区」）。\n请退出该防护或把本程序加入信任，再点「重试」。"),
-                Tr(L"关闭"), Tr(L"重试"), /*defaultIsRight=*/true) == 1) {
-            UpdateMainAction();
-            StartRepairBoot(/*confirm=*/false);
-            return 0;
-        }
-        std::wstring text = m_fixMsg.empty() ? Tr(L"修复引导失败，请打开日志查看详情。")
-                                             : U2W(m_fixMsg);
-        MessageBoxW(m_hWnd, text.c_str(), Tr(L"修复引导"),
-                    rc == 0 ? (MB_OK | MB_ICONINFORMATION)
-                            : (MB_OK | MB_ICONWARNING));
-        UpdateMainAction();
-        return 0;
+    if (rc == 0) {
+        SetStatus(Tr(L"镜像校验通过"));
+        MessageBoxW(m_hWnd, Tr(L"镜像校验通过：文件完整，可以放心还原。"),
+                    Tr(L"镜像检查"), MB_OK | MB_ICONINFORMATION);
+    } else {
+        SetStatus(Tr(L"镜像校验失败"));
+        std::wstring e = m_verifyMsg.empty() ? Tr(L"镜像校验失败，请打开日志查看详情。")
+                                             : U2W(m_verifyMsg);
+        MessageBoxW(m_hWnd, e.c_str(), Tr(L"镜像检查"),
+                    MB_OK | MB_ICONERROR);
     }
-    if (msg == WM_VERIFY_DONE) {
-        // 「镜像检查」worker 完成（2026-10-27）：wParam=rc(0=通过)。
-        m_busy = false;
-        KillTimer(m_hWnd, 1);
-        ShowProgress(false);
-        if (m_worker.joinable()) m_worker.join();
-        const int rc = (int)wParam;
-        if (m_cancel) {
-            SetStatus(Tr(L"镜像检查已取消"));
-            UpdateMainAction();
-            return 0;
-        }
-        if (rc == 0) {
-            SetStatus(Tr(L"镜像校验通过"));
-            MessageBoxW(m_hWnd, Tr(L"镜像校验通过：文件完整，可以放心还原。"),
-                        Tr(L"镜像检查"), MB_OK | MB_ICONINFORMATION);
-        } else {
-            SetStatus(Tr(L"镜像校验失败"));
-            std::wstring e = m_verifyMsg.empty() ? Tr(L"镜像校验失败，请打开日志查看详情。")
-                                                 : U2W(m_verifyMsg);
-            MessageBoxW(m_hWnd, e.c_str(), Tr(L"镜像检查"),
-                        MB_OK | MB_ICONERROR);
-        }
-        UpdateMainAction();
-        return 0;
-    }
-    if (msg == WM_SR_QUERY_BUSY) {
-        // 新实例问「你在忙吗」——忙则不让它关掉本进程（见 instance_dlg.cpp）。
-        return m_busy ? 1 : 0;
-    }
-    if (msg == WM_DROPFILES) {
-        HandleDroppedFiles(wParam);
-        return 0;
-    }
-    if (msg == WM_DESTROY) {
-        // 关键：经典 Duilib 的 WindowImplBase 销毁窗口后**不会**结束消息循环
-        // （它只做 m_pm 的清理），必须自己 PostQuitMessage，否则
-        // CPaintManagerUI::MessageLoop() 永不返回 → 进程变成「没有窗口但还活着」
-        // 的僵尸：任务栏看不见、但单实例互斥量仍被占用，于是下次启动只会走到
-        // 「已有程序在运行」流程，且等满 WaitForSingleObject 的 5s 超时才继续。
-        // 修复前实测：PostMessage(WM_CLOSE) 后窗口立刻消失、进程 6s 后仍在。
-        ::PostQuitMessage(0);
-    }
-    if (msg == WM_CLOSE && m_busy) {
-        // 关闭请求来自别处（新实例的 PostMessage(WM_CLOSE)、Alt+F4、任务栏菜单等）。
-        // 任务执行中直接销毁窗口会连 worker 一起杀掉，留下半成品镜像 / 中断的暂存
-        // → 不能默默关，也不能只会拒绝：问一次，允许「终止并退出」。
-        if (m_cancelling)
-            return 0;
-        if (!AskBusyClose())
-            return 0;            // 「继续等待」：不关窗，任务继续
-        CancelAndExit();         // 「终止并退出」：中止 + 清理 + 关窗
-        return 0;
-    }
-    if (msg == WM_NCHITTEST) {
-        // 老界面是「无系统外框」的自绘窗口：顶栏（caption 52px）空白处必须
-        // 能拖动，而按钮 / Tab / 勾选框 / 下拉 / 输入框必须拿到鼠标消息。
-        // 基类 OnNcHitTest 只看 caption 高度，分不清这两者，故在此自行判定：
-        // 先看命中的控件是否「可交互」，是 → HTCLIENT；否则落在顶栏 → HTCAPTION。
-        POINT pt = {(short)LOWORD(lParam), (short)HIWORD(lParam)};
-        ::ScreenToClient(m_hWnd, &pt);
-        for (CControlUI* q = m_PaintManager.FindControl(pt); q; q = q->GetParent()) {
-            LPCTSTR cls = q->GetClass();
-            if (_tcscmp(cls, _T("WinBtn")) == 0 || _tcscmp(cls, _T("TabOption")) == 0 ||
-                _tcscmp(cls, _T("GlyphCheck")) == 0 || _tcscmp(cls, _T("Combo")) == 0 ||
-                _tcscmp(cls, _T("Edit")) == 0 || _tcscmp(cls, _T("Button")) == 0 ||
-                _tcscmp(cls, _T("SkinButton")) == 0 || _tcscmp(cls, _T("SkinEdit")) == 0 ||
-                _tcscmp(cls, _T("PartItem")) == 0 || _tcscmp(cls, _T("TextItem")) == 0 ||
-                _tcscmp(cls, _T("ListContainerElement")) == 0)
-                return HTCLIENT;
-        }
-        if (pt.y >= 0 && pt.y < 52) return HTCAPTION;
-        return HTCLIENT;
-    }
-    return WindowImplBase::HandleMessage(msg, wParam, lParam);
+    UpdateMainAction();
+    return 0;
 }
 
 // 自绘控件注入点：未知 UIClass 由 UIDlgBuilder 回调到这里（见 ui_skin.h 头部注释）

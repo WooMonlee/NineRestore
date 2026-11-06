@@ -218,6 +218,14 @@ private:
     void ShowPostProgress(bool show);
     void OnProgressUpdate(int pct, const std::wstring& stage);
     void OnTaskComplete(int rc);
+    // HandleMessage 里按消息族拆出的处理段（纯搬移，判定条件/返回值不变）。
+    void HandleTooltipMessage(UINT msg, WPARAM wParam, LPARAM lParam);
+    LRESULT HandleImagePathEditMessage(UINT msg, WPARAM wParam);
+    LRESULT HandleTimerMessage(WPARAM wParam);
+    LRESULT OnRetryDone(WPARAM wParam, LPARAM lParam);
+    LRESULT OnInitPartDone(WPARAM wParam);
+    LRESULT OnFixBootDone(WPARAM wParam);
+    LRESULT OnVerifyDone(WPARAM wParam);
     // 2026-10-20：新硬盘分区向导（第二步分区下拉为空时直接打开）与「修复引导」。
     void OpenInitDiskWizard();
     // 修复引导（2026-10-28）：confirm=false 用于「被安全软件拦截 → 重试」的二次进入
