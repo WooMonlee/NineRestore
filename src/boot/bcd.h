@@ -224,11 +224,15 @@ bool VerifyBcdStore(const std::wstring& storePath, const std::wstring& winDir,
 //   我们自己的条目（ZJRESTORE / SysRecover）一律不动。
 // targetWinDir = 本次还原/修复的目标系统目录（如 L"C:\\Windows"）：
 //   指向它的条目**永不删除**（哪怕文件暂时读不到 —— BitLocker/离线也不误杀）。
-// outReachable：清完后仍在启动顺序里的 Windows 加载器条数（-1 = 判定失败）。
-// 返回删除条数（-1 = 枚举失败）。
-int BcdPruneDeadEntries(const std::wstring& storePath,
-                        const std::wstring& targetWinDir, int* outReachable,
-                        std::string& log);
+struct BcdPruneResult {
+    bool ok = false;
+    int removed = -1;    // 删除条数；!ok 时为 -1（旧接口的错误哨兵）
+    int reachable = -1;  // 清完后仍在启动顺序里的 Windows 加载器条数；-1 = 判定失败
+};
+// 结果类型取代"int 返回计数 + int* 出参 + -1 表错"的歧义写法。
+BcdPruneResult BcdPruneDeadEntries(const std::wstring& storePath,
+                                   const std::wstring& targetWinDir,
+                                   std::string& log);
 
 // 只剩一个 Windows 系统时，别让它停在"选择操作系统"菜单：
 //   displayorder 收敛成这一条 + `{bootmgr} timeout 0` + 清 displaybootmenu。

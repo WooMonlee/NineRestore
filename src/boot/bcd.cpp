@@ -496,12 +496,12 @@ bool VerifyBcdStore(const std::wstring& storePath, const std::wstring& winDir,
     return true;
 }
 
-int BcdPruneDeadEntries(const std::wstring& storePath,
-                        const std::wstring& targetWinDir, int* outReachable,
-                        std::string& log) {
-    if (outReachable) *outReachable = -1;
+BcdPruneResult BcdPruneDeadEntries(const std::wstring& storePath,
+                                   const std::wstring& targetWinDir,
+                                   std::string& log) {
+    BcdPruneResult r;
     std::string out;
-    if (!BcdEnumStore(storePath, out, log)) return -1;
+    if (!BcdEnumStore(storePath, out, log)) return r;
     VolMap map;
     map.Build();
     // 目标系统的盘符（"C:"）—— 指向它的一律不删（BitLocker/离线读不到文件也不误杀）
@@ -570,16 +570,18 @@ int BcdPruneDeadEntries(const std::wstring& storePath,
         }
     }
     std::string after;
-    if (BcdEnumStore(storePath, after, log) && outReachable) {
+    if (BcdEnumStore(storePath, after, log)) {
         int n = 0;
         for (const auto& e : BcdListOsEntries(after))
             if (e.reachable) ++n;
-        *outReachable = n;
+        r.reachable = n;
     }
     if (removed)
         log += "prune: removed " + std::to_string(removed) +
                " dead boot entr(ies)\n";
-    return removed;
+    r.ok = true;
+    r.removed = removed;
+    return r;
 }
 
 bool BcdQuietSingleOsMenu(const std::wstring& storePath, std::string& log) {

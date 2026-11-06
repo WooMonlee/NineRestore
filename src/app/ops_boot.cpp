@@ -539,11 +539,10 @@ int RepairBoot(int disk, int part, std::string& msg) {
         {
             const std::wstring store = root + L"Boot\\BCD";
             std::string plog, qlog;
-            int osLeft = -1;
-            const int pruned = BcdPruneDeadEntries(store, winDir, &osLeft, plog);
+            const BcdPruneResult pr = BcdPruneDeadEntries(store, winDir, plog);
             LogInfo("repair-boot bcd prune (bios): removed=" +
-                    std::to_string(pruned) + " reachable_os=" +
-                    std::to_string(osLeft) + "\n" + plog);
+                    std::to_string(pr.removed) + " reachable_os=" +
+                    std::to_string(pr.reachable) + "\n" + plog);
             BcdQuietSingleOsMenu(store, qlog);
             LogInfo("repair-boot menu policy (bios): " + qlog);
         }
@@ -606,11 +605,10 @@ int RepairBoot(int disk, int part, std::string& msg) {
     {
         const std::wstring store = espRoot + L"EFI\\Microsoft\\Boot\\BCD";
         std::string plog, qlog;
-        int osLeft = -1;
-        const int pruned = BcdPruneDeadEntries(store, winDir, &osLeft, plog);
+        const BcdPruneResult pr = BcdPruneDeadEntries(store, winDir, plog);
         LogInfo("repair-boot bcd prune (uefi): removed=" +
-                std::to_string(pruned) + " reachable_os=" +
-                std::to_string(osLeft) + "\n" + plog);
+                std::to_string(pr.removed) + " reachable_os=" +
+                std::to_string(pr.reachable) + "\n" + plog);
         BcdQuietSingleOsMenu(store, qlog);
         LogInfo("repair-boot menu policy (uefi): " + qlog);
     }
