@@ -100,8 +100,7 @@
     <SkinButton name="FixBootBtn" float="true" pos="471,298,541,331" text="修复引导" fontsize="14" bkcolor="#FFFFFFFF" bordercolor="#FFFFFFFF" borderround="14,14" textcolor="#FF1B2432" shortcut="R" visible="false"
             tooltip="修复 Windows 引导（自动找系统盘与 ESP，重建启动文件）" />
     <!-- 「打包日志」（2026-10-03 用户规格；2026-11-05 与「异机还原」位置对调）：
-         一键搜集 各盘日志 + explorer 转储 + 事件日志 → 打包到桌面；
-         结果框里可重启进/出安全模式。
+         一键搜集 各盘日志 + explorer 转储 + 事件日志 → 打包到桌面。
          控件保留但默认隐藏，入口在「更多功能>>」菜单；name 路由仍指向 ExportSupportFlow。 -->
     <SkinButton name="LogBtn" float="true" pos="340,298,438,331" text="打包日志" fontsize="14" bkcolor="#FFFFFFFF" bordercolor="#FFFFFFFF" borderround="14,14" textcolor="#FF1B2432" shortcut="L" visible="false"
             tooltip="搜集还原日志与诊断信息并打包到桌面（含 explorer 转储、事件日志）" />

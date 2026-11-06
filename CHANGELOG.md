@@ -76,6 +76,11 @@
   一致，Tab 焦点不走样；菜单命令用常量 id，不依赖索引。
 - 英文文案同步：`异机还原=Universal`、`打包日志=Package log`、新增 `测试版=Beta`；
   删除 4 个随改动失效的旧键（`使用异机还原` / `已关闭异机还原` / `已启用异机还原（…）` / `异机`）。
+- **删除「安全模式」诊断入口**（2026-11-06 用户判断：该功能已无用途）：「打包日志」结果框
+  由二选（完成 / 重启进安全模式再测）改为「完成」单按钮；`boot/bcd.cpp` 的 safeboot 读写、
+  自动退出计划任务武装/撤销、启动兜底提示整条删除，相关英文词条与 4 个单测一并移除。
+  已由旧版本置位 safeboot 的机器，请用 `msconfig` 或
+  `bcdedit /deletevalue {current} safeboot` 退出。
 - 版本显示名由 `src/gui/ui_skin.cpp::VersionDisplay()` 从 `version.h` 派生：
   `1.0.0-beta.N` → 「1.0.0 测试版」，`1.0.0-rc.N` → 「1.0.0 RC」，正式版原样；不另写第二份数字。
 - **Windows VERSIONINFO**：`tools/gen-versioninfo.py` 从 `version.h` 生成 `.rc`（公司名/版权
