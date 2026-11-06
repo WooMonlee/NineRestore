@@ -35,7 +35,6 @@ const wchar_t* kLabel = L"SysRecoverUI";
 #elif defined(ZJ_LAUNCH_CHECK)
 const wchar_t* kTarget = L"x64\\SysRecoverCheck.exe";
 const wchar_t* kFallback = L"SysRecoverCheck_x86.exe";
-const wchar_t* kLabel = L"SysRecoverCheck";
 
 // 父进程是不是「自动化宿主」（命令解释器 / 计划任务 / 我们的门禁脚本）。
 // 这类调用方要的是"跑完就退、退出码可读"，绝不能停在那儿等回车。
@@ -99,7 +98,6 @@ void MarkConsoleForChildIfOwned() {
 #else
 const wchar_t* kTarget = L"x64\\SysRecover.exe";
 const wchar_t* kFallback = L"SysRecover_x86.exe";   // 32 位系统 / 缺 x64 目录
-const wchar_t* kLabel = L"SysRecover";
 #endif
 
 // 本机是不是 64 位 Windows（WOW64 下也返回原生架构）。
