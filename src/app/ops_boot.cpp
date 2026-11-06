@@ -508,7 +508,7 @@ int RepairBoot(int disk, int part, std::string& msg) {
         if (!done) {
             std::string slog, serr;
             const bool sok =
-                StageBiosBootTree(root, winDir, AppDir(),
+                StageBiosBootTree(root, winDir, BootAssetDir(),
                                   /*overwriteBcd=*/false, slog, serr);
             LogInfo(std::string("repair-boot self-contained BIOS: ") +
                     (sok ? "ok" : "FAILED") + "\n" + slog);
@@ -522,7 +522,7 @@ int RepairBoot(int disk, int part, std::string& msg) {
         //（火绒「写磁盘保留扇区」）。bootself 内部已按「先查 → bootsect → 自足写」，
         // 到这一步还失败 = 确实写不进去 → 如实告诉用户怎么办，而不是假装成功。
         std::string prlog;
-        if (EnsureNtfsBootRegion(root, AppDir(), prlog)) {
+        if (EnsureNtfsBootRegion(root, BootAssetDir(), prlog)) {
             LogInfo("repair-boot pbr: " + prlog);
         } else {
             LogWarn("repair-boot pbr (non-fatal): " + prlog);
@@ -530,7 +530,7 @@ int RepairBoot(int disk, int part, std::string& msg) {
             msg += Tr("\n注意：分区引导区（PBR）未能写入 —— 可能被安全软件拦写。请临时退出火绒/360 的「写磁盘保留扇区」保护（或把本程序加入信任）后重试，或在 PE 里修复。");
         }
         std::string mrlog;
-        if (EnsureDiskMbrCode(target.diskIndex, AppDir(), mrlog))
+        if (EnsureDiskMbrCode(target.diskIndex, BootAssetDir(), mrlog))
             LogInfo("repair-boot mbr: " + mrlog);
         else
             LogWarn("repair-boot mbr (non-fatal): " + mrlog);
@@ -590,7 +590,7 @@ int RepairBoot(int disk, int part, std::string& msg) {
     if (!rebuilt) {
         std::string slog, serr;
         const bool sok = EnsureUefiBootFiles(
-            espRoot, std::wstring(1, target.letter[0]) + L":\\", winDir, AppDir(),
+            espRoot, std::wstring(1, target.letter[0]) + L":\\", winDir, BootAssetDir(),
             /*overwriteBcd=*/false, slog, serr);
         LogInfo(std::string("repair-boot self-contained ESP: ") +
                 (sok ? "ok" : "FAILED") + "\n" + slog);

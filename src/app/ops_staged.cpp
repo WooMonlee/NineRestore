@@ -1312,6 +1312,9 @@ static int InstallStagedBoot(StageCtx& c) {
     const bool menuEntry = c.menuEntry;
     PartitionInfo& target = c.target;
     const std::wstring& exeDir = c.exeDir;
+    // 引导资产（bootfiles\）单独定位：单文件版在解包目录、安装版在 exe 目录，
+    // 与"软件家目录" c.exeDir（可能已 settle 到数据盘）不是同一回事（docs/34 P0）。
+    const std::wstring assetDir = BootAssetDir();
     const std::wstring& swapNewDir = c.swapNewDir;
     // 6) 引导层 + 单次启动（仅正常 Windows，§2 禁令3）
     // 走哪条链**看目标盘的分区风格**（MBR→BIOS/GRUB4DOS；GPT→UEFI/ESP），不看固件类型：
@@ -1436,7 +1439,7 @@ static int InstallStagedBoot(StageCtx& c) {
                         std::string slog, serr;
                         const bool sok = EnsureUefiBootFiles(
                             espRoot, std::wstring(1, target.letter[0]) + L":\\",
-                            winDir, exeDir, /*overwriteBcd=*/true, slog, serr);
+                            winDir, assetDir, /*overwriteBcd=*/true, slog, serr);
                         LogInfo(std::string("ESP self-contained boot: ") +
                                 (sok ? "ok" : "FAILED") + "\n" + slog);
                         std::string wlog;
@@ -1493,7 +1496,7 @@ static int InstallStagedBoot(StageCtx& c) {
                 }
             }
             // ⑤ 救援载荷（内核 + initramfs ≈ 33MB；它自带空间检查）
-            ok = InstallUefiBootEntry(espRoot, exeDir, blog, !menuEntry);
+            ok = InstallUefiBootEntry(espRoot, assetDir, blog, !menuEntry);
             UnmountEsp(espRoot, blog);
             LogInfo(std::string("uefi boot entry: ") + (ok ? "ok" : "FAIL") +
                     " / " + blog);
@@ -1508,7 +1511,7 @@ static int InstallStagedBoot(StageCtx& c) {
             // 所以不必去动数据盘（D:/E:）的根目录。
             std::wstring deployDrive = std::wstring(1, target.letter[0]) + L":\\";
             // 每次都重装（幂等）：确保 menu.lst/bootfiles/initramfs 随本版本刷新。
-            if (!InstallBootLayer(deployDrive, exeDir, blog, !menuEntry)) {
+            if (!InstallBootLayer(deployDrive, assetDir, blog, !menuEntry)) {
                 ProgressDone("restore", "failed");
                 err = Tr("安装引导层失败: ") + blog;
                 LogError(err);

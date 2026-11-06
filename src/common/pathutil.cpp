@@ -78,6 +78,39 @@ std::wstring PortableOriginDir() {
     return d;
 }
 
+std::wstring PickBootAssetRoot(bool appHasBootfiles, bool portable,
+                               bool originHasBootfiles,
+                               const std::wstring& appDir,
+                               const std::wstring& originDir) {
+    if (appHasBootfiles)
+        return appDir;
+    if (portable && originHasBootfiles && !originDir.empty())
+        return originDir;
+    return appDir;
+}
+
+namespace {
+
+bool IsDirW(const std::wstring& p) {
+    const DWORD attr = GetFileAttributesW(p.c_str());
+    return attr != INVALID_FILE_ATTRIBUTES &&
+           (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+}  // namespace
+
+std::wstring BootAssetDir() {
+    const std::wstring app = AppDir();
+    const std::wstring origin = PortableOriginDir();
+    return PickBootAssetRoot(IsDirW(app + L"\\bootfiles"), IsPortableRuntime(),
+                             !origin.empty() && IsDirW(origin + L"\\bootfiles"),
+                             app, origin);
+}
+
+std::wstring BootAssetPath(const wchar_t* relative) {
+    return BootAssetDir() + L"\\bootfiles\\" + (relative ? relative : L"");
+}
+
 std::wstring CurrentUserName() {
     wchar_t buf[256] = {};
     DWORD n = 256;

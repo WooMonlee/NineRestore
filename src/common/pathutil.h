@@ -36,6 +36,25 @@ bool IsPortableRuntime();
 // 单文件自身所在目录（便携运行时由 stub 设）；非便携 → 空串。
 std::wstring PortableOriginDir();
 
+// 引导资产根（其下必须有 bootfiles\）。装菜单 / 修引导 / 首启清理读随包救援资产
+// **统一走这里**，不再各自拿 exeDir 拼：
+//   安装版 / UI：AppDir()（exe 所在应用根，bootfiles 就在旁边）；
+//   单文件版：stub 已把包解到 AppDir()（%LOCALAPPDATA%\SysRecover\app），优先用它；
+//             万一该目录没有 bootfiles（解包不完整），再退回单文件所在目录
+//             （ZJ_ORIGIN_DIR，支持外置 bootfiles）。
+// 两处都没有时仍返回 AppDir()，由调用方按**具体文件名**报错，不在查找层吞掉原因。
+std::wstring BootAssetDir();
+
+// <BootAssetDir>\bootfiles\<relative>；relative 用反斜杠，不带开头的 bootfiles\。
+std::wstring BootAssetPath(const wchar_t* relative);
+
+// 纯决策（单测）：appHasBootfiles → appDir；否则 portable && originHasBootfiles →
+// originDir；否则 appDir。
+std::wstring PickBootAssetRoot(bool appHasBootfiles, bool portable,
+                               bool originHasBootfiles,
+                               const std::wstring& appDir,
+                               const std::wstring& originDir);
+
 // 当前登录用户名（文件命名用；失败返回 "User"）。
 std::wstring CurrentUserName();
 

@@ -497,6 +497,37 @@ TEST(pathutil_make_dir_tree) {
     RemoveDirectoryW(base.c_str());
 }
 
+// ── pathutil：引导资产定位（P0 单文件版装菜单）──────────────────────────
+// 单文件版与安装版的 bootfiles 位置不同；装菜单/修引导必须走同一个入口，
+// 不能各自拿 exeDir 拼（否则单文件版会去解包目录之外找资产）。
+TEST(pathutil_pick_boot_asset_root) {
+    // 四象限：有包内资产 → 永远优先；否则"单文件 + 单文件旁有资产"→ 用单文件旁；
+    // 其余一律回 AppDir（让调用方按具体文件名报缺失）。
+    CHECK_EQ(PickBootAssetRoot(true, true, true, L"A", L"O"), std::wstring(L"A"));
+    CHECK_EQ(PickBootAssetRoot(true, false, true, L"A", L"O"), std::wstring(L"A"));
+    CHECK_EQ(PickBootAssetRoot(false, true, true, L"A", L"O"), std::wstring(L"O"));
+    CHECK_EQ(PickBootAssetRoot(false, true, false, L"A", L"O"), std::wstring(L"A"));
+    CHECK_EQ(PickBootAssetRoot(false, false, true, L"A", L"O"), std::wstring(L"A"));
+    CHECK_EQ(PickBootAssetRoot(false, true, true, L"A", L""), std::wstring(L"A"));
+}
+
+TEST(pathutil_boot_asset_dir_portable) {
+    // 真实目录：模拟单文件运行时"解包目录缺 bootfiles、单文件旁有 bootfiles"。
+    wchar_t tmp[MAX_PATH] = {};
+    GetTempPathW(MAX_PATH, tmp);
+    std::wstring origin = std::wstring(tmp) + L"sr-asset-origin";
+    std::wstring bf = origin + L"\\bootfiles";
+    CHECK(MakeDirTree(bf));
+    _wputenv_s(L"ZJ_ORIGIN_DIR", origin.c_str());
+    // 测试进程的 AppDir() 是构建目录，没有 bootfiles → 应落到单文件目录
+    CHECK_EQ(BootAssetDir(), origin);
+    CHECK_EQ(BootAssetPath(L"grldr"), origin + L"\\bootfiles\\grldr");
+    _wputenv_s(L"ZJ_ORIGIN_DIR", L"");
+    CHECK(!IsPortableRuntime());
+    RemoveDirectoryW(bf.c_str());
+    RemoveDirectoryW(origin.c_str());
+}
+
 // ── task：restore-task.conf 读取（GUI 判断"菜单项绑定了哪个镜像"）──────
 TEST(task_conf_get) {
     std::string conf = BuildTaskConf(SampleTask());

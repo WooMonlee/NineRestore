@@ -16,6 +16,7 @@
 #include <cstdio>
 
 #include "../common/i18n.h"   // W2U（全项目唯一实现）
+#include "../common/pathutil.h"  // BootAssetDir()
 #include "../common/selfarch.h"
 #include "bootself.h"
 
@@ -36,8 +37,8 @@ bool PrepareBootFixFiles(const std::wstring& recoveryDir, std::string& log) {
 
     std::string err;
     // destRoot 必须以反斜杠结尾（bootself 里按 "destRoot + Boot" 拼）。
-    bool ok = StageBiosBootTree(bf + L"\\", srcWin, AppDir(), /*overwriteBcd=*/true,
-                                log, err);
+    bool ok = StageBiosBootTree(bf + L"\\", srcWin, BootAssetDir(),
+                                /*overwriteBcd=*/true, log, err);
     if (!ok) log += "bootfix: " + err + "\n";
     log += ok ? "bootfix prepared\n" : "bootfix INCOMPLETE\n";
     return ok;
