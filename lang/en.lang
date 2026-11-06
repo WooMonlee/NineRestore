@@ -696,6 +696,7 @@ wimlib 初始化失败\n=wimlib initialization failed\n
 自删 \= 删旧系统 + 启动菜单 + 本程序（不可恢复）=Self-delete \= old system + boot menu + this program (irreversible)
 自动重启失败（rc\=%d），请手动重启。\n=Automatic reboot failed (rc\=%d); please reboot manually.\n
 自动重启没有成功。\n请手动重启电脑（开始菜单 → 重启）。=Automatic restart failed.\nPlease restart the computer manually (Start menu > Restart).
+若按该键无反应：重启进入固件设置（Windows 设置→恢复→高级启动→立即重启→疑难解答→UEFI 固件设置），在启动项里直接选 SysRecover。\n=If the key does nothing: restart into firmware settings (Windows Settings > Recovery > Advanced startup > Restart now > Troubleshoot > UEFI Firmware Settings) and pick SysRecover from the boot list.\n
 若确认已选仍回到 Windows，请把 logs\\collected 发给技术支持；启动项丢失时重新运行本程序安装菜单。=If you did pick SysRecover and still landed in Windows, send logs\\collected to support; if the entry is missing, run this program again to reinstall the menu.
 解压到文件夹=Extract to a folder
 解压到文件夹…=Extract to a folder...

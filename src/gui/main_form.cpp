@@ -966,7 +966,17 @@ void CMainForm::ShowMenuRescueNotice() {
     // 2026-11-06 用户确认“确实按了 F10 并选了 SysRecover 仍回到 Windows”，
     // 不能再把“无救援回执”直接归因于没选：固件跳过失效/非首位启动项同样会静默回落。
     msg += Tr(L"可能原因：选了 SysRecover 但固件跳过了该启动项（BootOrder 前面有失效条目时常见），或救援层没有启动。\n");
-    msg += Tr(L"正确操作：开机时按 F10（该机型也可能是 F12/Esc）→ 选 SysRecover。\n");
+    // 2026-11-06 P0-2：热键原来在本条提示里写死成 F10；本机（Gigabyte/AMI）实际识别到的是 F12，
+    // 用户照 F10 按自然没反应。这里改为运行时把占位 "F10" 换成本机识别到的键（译文键不变）。
+    std::wstring step = Tr(L"正确操作：开机时按 F10（该机型也可能是 F12/Esc）→ 选 SysRecover。\n");
+    {
+        const std::wstring key = BootMenuKeyHint();
+        const size_t p = step.find(L"F10");
+        if (p != std::wstring::npos && !key.empty())
+            step.replace(p, 3, key);
+    }
+    msg += step;
+    msg += Tr(L"若按该键无反应：重启进入固件设置（Windows 设置→恢复→高级启动→立即重启→疑难解答→UEFI 固件设置），在启动项里直接选 SysRecover。\n");
     msg += Tr(L"若确认已选仍回到 Windows，请把 logs\\collected 发给技术支持；启动项丢失时重新运行本程序安装菜单。");
     MessageBoxW(m_hWnd, msg.c_str(), Tr(L"还原菜单未执行"),
                 MB_OK | MB_ICONWARNING);
