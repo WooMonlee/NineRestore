@@ -17,6 +17,18 @@ std::wstring g_logFile;
 CRITICAL_SECTION g_cs;
 bool g_csInit = false;
 
+// 临界区的 RAII 守卫：任何提前 return / 异常都不会把锁留在持有状态。
+struct CsGuard {
+    explicit CsGuard(CRITICAL_SECTION& cs) : cs_(cs) {
+        EnterCriticalSection(&cs_);
+    }
+    ~CsGuard() { LeaveCriticalSection(&cs_); }
+    CsGuard(const CsGuard&) = delete;
+    CsGuard& operator=(const CsGuard&) = delete;
+
+    CRITICAL_SECTION& cs_;
+};
+
 // 总量上限（用户 2026-10-04 规格 5；2026-10-05 二次修订：支持包开始带屏幕
 // 截图/更多环境信息 → 上限提高）：
 //   · logs 目录（含 crash/、collected/、screens/，深度≤3）超 **64MB** 才启动清理；
@@ -171,7 +183,7 @@ void AppendLogFile(const std::string& line) {
     if (g_logFile.empty())
         return;
     EnsureCs();
-    EnterCriticalSection(&g_cs);
+    CsGuard guard(g_cs);
     HANDLE h =
         CreateFileW(g_logFile.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ,
                     nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -180,7 +192,6 @@ void AppendLogFile(const std::string& line) {
         WriteFile(h, line.data(), (DWORD)line.size(), &written, nullptr);
         CloseHandle(h);
     }
-    LeaveCriticalSection(&g_cs);
 }
 
 void Write(const char* level, const std::string& msg, FILE* con) {
