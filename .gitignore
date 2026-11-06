@@ -98,3 +98,6 @@ tools/vmtest/e2e/*.log
 temp/*
 !temp/.gitkeep
 build/versioninfo/
+
+# 归档的旧发布物（用户决定从盘根移入，不入库）
+archive/
