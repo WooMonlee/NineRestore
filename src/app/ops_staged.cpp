@@ -49,6 +49,96 @@
 namespace sysrecover {
 
 
+// ── B3（2026-11-06）：阶段拆分 ─────────────────────────────────────────────
+// StageRestoreImpl 原本 1460 行，预检/就地/解压/契约/引导/收尾混在一个函数里。
+// 这里按执行阶段拆成 6 个 static 函数，共享一份 StageCtx：
+//   · 只搬代码：执行顺序、日志文本、返回码、契约字段均未改动；
+//   · 每个阶段顶部把 ctx 里用到的字段起成本地别名，搬移后的语句逐字保留；
+//   · 操作锁（OpLockGuard）留在 StageRestoreImpl，覆盖全部阶段（与拆分前一致）；
+//   · 契约回滚守卫同样留在 StageRestoreImpl，作用域仍从"契约写完"到"成功收尾"。
+struct StageCtx {
+    StageCtx(const RestoreRequest& r, std::string& e, bool* nr, ProgressFn p,
+             ErrAdvice* a, bool menu)
+        : req(r), err(e), needReboot(nr), progress(p), adv(a), menuEntry(menu) {}
+
+    const RestoreRequest& req;
+    std::string& err;
+    bool* needReboot;
+    ProgressFn progress;
+    ErrAdvice* adv;
+    const bool menuEntry;
+
+    // 预检 / 定位结果
+    std::wstring imagePath;       // 实际使用的镜像（可能已被搬离目标分区）
+    DiskInfo tdisk;
+    PartitionInfo target;
+    int espIndex = 0;             // ESP 子镜像 index（0 = 镜像里没有）
+    int eaIndex = 0;              // EA 修复子镜像 index（0 = 镜像里没有）
+    int reparseScan = -1;         // 重解析点预检：-1 未扫描 / 0 干净 / 2 不可用
+    int efsScan = -1;             // EFS 预检：同上
+    bool inPlace = false;         // 就地还原（不写契约、不部署引导、不重启）
+    std::string inplaceWhy;       // 判定就地还原的依据（写日志用）
+
+    // A 引擎暂存结果
+    std::wstring swapNewDir;      // 目标盘根下的 ~new
+    std::wstring espFixRel;       // 加密镜像已解出的 ESP 子镜像相对目录
+    std::wstring eaFixRel;        // 加密镜像已解出的 EA 子镜像相对目录
+    std::wstring exeDir;          // 契约目录（Q1 settle 后的新家）
+    std::wstring logsDir;         // 本机日志目录
+};
+
+static int RestorePreflight(StageCtx& c);
+static int RestoreInPlace(StageCtx& c);
+static int ExtractNewSystem(StageCtx& c);
+static int WriteStagedContracts(StageCtx& c);
+static int InstallStagedBoot(StageCtx& c);
+static int FinishStagedTask(StageCtx& c);
+
+// 契约回滚（PIT-126）：契约在引导层之前写，引导层失败 = 任务永远不会执行，
+// 必须撤销两份契约（目标根 _zjresy + restore-task.conf），否则 GUI 误判"已安装"、
+// 目标根留一份 action=restore 的陈旧日志。RAII 覆盖"之后的任何失败返回"。
+class StagedRollbackGuard {
+public:
+    explicit StagedRollbackGuard(bool armed) : armed_(armed) {}
+    ~StagedRollbackGuard() {
+        if (!armed_) return;
+        std::string rlog;
+        int n = CleanupStrayContracts(rlog);
+        DeleteMenuBinding();
+        std::wstring dd = FindDataDrive();
+        if (!dd.empty()) {
+            DeleteFileW((dd + L"ZJRESTORE\\restore-task.conf").c_str());
+            DeleteFileW((dd + L"ZJRESTORE\\restore-task.json").c_str());
+        }
+        LogWarn("boot layer failed -> staged contracts rolled back (" +
+                std::to_string(n) + " stray removed)");
+    }
+    void Disarm() { armed_ = false; }
+
+private:
+    bool armed_;
+};
+
+// A 引擎残留门禁（就地与暂存共用，docs/23 §5）：目标盘还有未处理的 ~old
+// （用户选「保留不动」/清理未跑）→ 不动盘、中止；重新运行程序会再次询问。
+// 就地还原**同样要拦**：就地 = format 整个目标分区，等于不询问就删掉用户
+// 刚刚选择「保留」的旧系统。
+static bool SwapLeftoverGuard(const PartitionInfo& target, std::string& err) {
+    if (target.letter.empty()) {
+        err = Tr("目标分区无盘符，A 引擎无法解压");
+        return false;
+    }
+    WaitSwapCleanup(target.letter[0]);  // 等启动期后台残留清理收尾
+    DWORD a = GetFileAttributesW((target.letter + L":\\~old").c_str());
+    if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY)) {
+        err = Tr("目标盘存在未处理的 ~old 残留，A 引擎还原已中止"
+                 "（重新运行程序会再次询问如何处理）");
+        LogError(err);
+        return false;
+    }
+    return true;
+}
+
 // 还原的两条"安装"模式（共用同一套检查与契约，只有"是否立即重启"不同）：
 //   menuEntry=false：StageRestore —— 判定就地/暂存，暂存则设**单次启动**（BootNext/
 //                    bootsequence），重启后自动执行；
@@ -65,6 +155,42 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
         err = Tr("已有备份/还原实例在运行");
         return 1;
     }
+    StageCtx ctx{req, err, needReboot, progress, adv, menuEntry};
+    int rc = RestorePreflight(ctx);
+    if (rc != 0) return rc;
+    if (ctx.inPlace) return RestoreInPlace(ctx);
+    rc = ExtractNewSystem(ctx);  // 内部按 req.engine == "swap" 自行判断
+    if (rc != 0) return rc;
+    rc = WriteStagedContracts(ctx);
+    if (rc != 0) return rc;
+    // 契约此后已落盘：引导层及收尾阶段失败需回滚（repairBoot=false 时与拆分前一致不武装）。
+    StagedRollbackGuard rollback(req.repairBoot);
+    rc = InstallStagedBoot(ctx);
+    if (rc != 0) return rc;
+    rc = FinishStagedTask(ctx);
+    if (rc != 0) return rc;
+    rollback.Disarm();  // 成功：契约保留（菜单绑定 / 暂存任务）
+    return 0;
+}
+
+
+// 阶段 1：入参/引擎组合/镜像可用性/目标定位/安全门禁/就地判定/引导路径前置。
+// 全部只读检查，任何失败都在**写盘之前**返回。
+static int RestorePreflight(StageCtx& c) {
+    const RestoreRequest& req = c.req;
+    std::string& err = c.err;
+    ProgressFn progress = c.progress;
+    ErrAdvice* adv = c.adv;
+    const bool menuEntry = c.menuEntry;
+    std::wstring& imagePath = c.imagePath;
+    DiskInfo& tdisk = c.tdisk;
+    PartitionInfo& target = c.target;
+    int& espIndex = c.espIndex;
+    int& eaIndex = c.eaIndex;
+    int& reparseScan = c.reparseScan;
+    int& efsScan = c.efsScan;
+    bool& inPlace = c.inPlace;
+    std::string& inplaceWhy = c.inplaceWhy;
     if (req.image.empty()) {
         err = Tr("缺少镜像路径");
         return 1;
@@ -142,8 +268,8 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
     //      （GUI 弹框 / CLI 打印，退出码 4；在一切写盘动作之前）；"ZJEA" 同理；
     //   ② 顺带从镜像**内容**发现 ESP / EA 子镜像 index（esp_index / ea_index，
     //      0=没有）写进契约，救援层 apply 完主系统后按需恢复 ESP、投放 EA 修复。
-    int espIndex = 0;
-    int eaIndex = 0;
+    espIndex = 0;
+    eaIndex = 0;
     {
         std::vector<ImageDesc> imgs;
         const int eff = req.index < 1 ? 1 : req.index;
@@ -285,8 +411,8 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
     //   （EFS/重解析点都能写回），无需检查。
     //   结果随任务写进契约（reparse_scan / efs_scan：0=干净/2=不可用），救援层
     //   据此决定是否走"契约认证"快路径（W1/W2；老契约缺键 → 救援层自行扫描）。
-    int reparseScan = -1;
-    int efsScan = -1;
+    reparseScan = -1;
+    efsScan = -1;
     // 注意：engine 为空 = 文档里的默认 B 引擎（block）——不能只认字面量 "block"，
     // 否则 CLI 不传 --engine 时既跳过 EFS/重解析点预检、也跳过下面的解密。
     if (req.engine != "swap" && !encImage) {
@@ -333,8 +459,6 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
         }
     }
     // 1) 定位目标分区与所在磁盘
-    DiskInfo tdisk;
-    PartitionInfo target;
     bool found = false;
     for (const auto& d : EnumerateDisks()) {
         if ((int)d.index != req.disk)
@@ -357,7 +481,7 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
     }
     // 1b) 软件/镜像若在目标分区（会被格式化）上 → 镜像移动、软件复制到数据盘。
     //     放在 <数据盘>\SysRecover\（持久保留，不参与还原后清理），绝不丢用户镜像。
-    std::wstring imagePath = req.image;
+    imagePath = req.image;
     {
         std::wstring dataDrive = FindDataDrive(target.letter.empty() ? 0 : target.letter[0]);
         wchar_t tgtLetter = target.letter.empty() ? 0 : target.letter[0];
@@ -476,8 +600,7 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
     //      目标走就地 → 接着 format 把刚解压的 ~new 一起格式化掉、再整镜像
     //      apply 第二遍 —— 表现为"100% 后停 16 秒、又从 1% 跑到 100%"
     //      （同一遍镜像解了两遍）。就地时整段 swap（解压/备返/RunOnce）跳过。
-    std::string inplaceWhy;
-    const bool inPlace = !menuEntry && CanRestoreInPlace(target, inplaceWhy);
+    inPlace = !menuEntry && CanRestoreInPlace(target, inplaceWhy);
     LogInfo(std::string("restore path: ") +
             (inPlace ? "in-place" : (menuEntry ? "menu-entry" : "staged-reboot")) +
             (inplaceWhy.empty() ? "" : " (" + inplaceWhy + ")"));
@@ -522,30 +645,25 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
                 break;
         }
     }
+    return 0;
+}
 
-    // A 引擎残留门禁（就地与暂存共用，docs/23 §5）：目标盘还有未处理的 ~old
-    // （用户选「保留不动」/清理未跑）→ 不动盘、中止；重新运行程序会再次询问。
-    // 就地还原**同样要拦**：就地 = format 整个目标分区，等于不询问就删掉用户
-    // 刚刚选择「保留」的旧系统。
-    auto swapLeftGuard = [&]() -> bool {
-        if (target.letter.empty()) {
-            err = Tr("目标分区无盘符，A 引擎无法解压");
-            return false;
-        }
-        WaitSwapCleanup(target.letter[0]);  // 等启动期后台残留清理收尾
-        DWORD a = GetFileAttributesW((target.letter + L":\\~old").c_str());
-        if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY)) {
-            err = Tr("目标盘存在未处理的 ~old 残留，A 引擎还原已中止"
-                     "（重新运行程序会再次询问如何处理）");
-            LogError(err);
-            return false;
-        }
-        return true;
-    };
 
+// 阶段 2a：就地还原 —— 到此直接执行（不写契约、不部署引导、不重启）。
+static int RestoreInPlace(StageCtx& c) {
+    const RestoreRequest& req = c.req;
+    std::string& err = c.err;
+    bool* needReboot = c.needReboot;
+    ProgressFn progress = c.progress;
+    std::wstring& imagePath = c.imagePath;
+    PartitionInfo& target = c.target;
+    int& espIndex = c.espIndex;
+    int& eaIndex = c.eaIndex;
+    const bool inPlace = c.inPlace;
+    const std::string& inplaceWhy = c.inplaceWhy;
     // ── 就地还原：到此直接执行（不写契约、不部署引导、不重启）────────────
     if (inPlace) {
-        if (req.engine == "swap" && !swapLeftGuard())
+        if (req.engine == "swap" && !SwapLeftoverGuard(target, err))
             return 4;
         ProgressUpdate("restore", 0, "start");
         LogInfo("restore stage image=" + W2U(imagePath) + " disk=" +
@@ -576,19 +694,29 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
                       GetTickCount64() - t1, rc == 0 ? "ok" : "failed");
         return rc;
     }
+    return 0;
+}
 
-    // 临时引导项的首启清理需要知道 A 引擎的 ~new 位置（B 引擎没有 ~new，
-    // 目前只能记录告警；见下方 InstallFirstBootCleanup 调用）。
-    std::wstring swapNewDir;
-    // 加密镜像：Windows 侧暂存的 ESP/EA 子镜像相对目录（写进契约 esp_fix_dir/
-    // ea_fix_dir，救援层只做拷贝）。非加密镜像恒为空。
-    std::wstring espFixRel;
-    std::wstring eaFixRel;
+
+// 阶段 2b：A 引擎（swap）在 Windows 侧把镜像解压到 <目标>:\~new。
+// 非 swap 引擎（B 引擎/block）直接返回 0，不在 Windows 侧解压。
+static int ExtractNewSystem(StageCtx& c) {
+    const RestoreRequest& req = c.req;
+    std::string& err = c.err;
+    ProgressFn progress = c.progress;
+    ErrAdvice* adv = c.adv;
+    std::wstring& imagePath = c.imagePath;
+    PartitionInfo& target = c.target;
+    int& espIndex = c.espIndex;
+    int& eaIndex = c.eaIndex;
+    std::wstring& swapNewDir = c.swapNewDir;
+    std::wstring& espFixRel = c.espFixRel;
+    std::wstring& eaFixRel = c.eaFixRel;
     // ── A 引擎（0.7，docs/21/22/23）：Windows 原生解压到 <目标>:\~new ──
     // 必须在写契约/部署引导之前完成：解压成功才继续。失败/中断 → 报错、不碰
     // 旧系统、清理 ~new（L1 定案：让用户换镜像重试；断电由下次启动清孤儿）。
     if (req.engine == "swap") {
-        if (!swapLeftGuard())
+        if (!SwapLeftoverGuard(target, err))
             return 4;
         unsigned long long content = 0;
         {
@@ -950,6 +1078,30 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
             }
         }
     }
+    return 0;
+}
+
+
+// 阶段 3：组装任务并写两份契约（目标根 _zjresy 主契约 + restore-task 副契约）。
+// 副契约写不了不致命（PIT-035）；主契约写不了必须失败。
+static int WriteStagedContracts(StageCtx& c) {
+    const RestoreRequest& req = c.req;
+    std::string& err = c.err;
+    ErrAdvice* adv = c.adv;
+    const bool menuEntry = c.menuEntry;
+    std::wstring& imagePath = c.imagePath;
+    DiskInfo& tdisk = c.tdisk;
+    PartitionInfo& target = c.target;
+    int espIndex = c.espIndex;
+    int eaIndex = c.eaIndex;
+    int reparseScan = c.reparseScan;
+    int efsScan = c.efsScan;
+    const std::string& inplaceWhy = c.inplaceWhy;
+    const std::wstring& swapNewDir = c.swapNewDir;
+    const std::wstring& espFixRel = c.espFixRel;
+    const std::wstring& eaFixRel = c.eaFixRel;
+    std::wstring& exeDir = c.exeDir;
+    std::wstring& logsDir = c.logsDir;
     ProgressUpdate("restore", 0, "start");
     LogInfo("restore stage image=" + W2U(imagePath) + " disk=" +
             std::to_string(req.disk) + " part=" + std::to_string(req.part));
@@ -985,10 +1137,10 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
                           "staged; 实际结果见救援层日志");
     }
 
-    std::wstring exeDir = ContractDir();  // Q1 settle 后返回新家；否则 = ExeDir()
+    exeDir = ContractDir();  // Q1 settle 后返回新家；否则 = ExeDir()
     // 日志根同 LogBaseDir（PIT-105）：软件在系统盘时 BCD 备份也放数据盘，
     // 免得随系统盘一起被格式化。
-    std::wstring logsDir = LogBaseDir() + L"\\logs";
+    logsDir = LogBaseDir() + L"\\logs";
     CreateDirectoryW(logsDir.c_str(), nullptr);
     if (req.repairBoot)
         BcdExport(logsDir + L"\\bcd-backup");  // 改 BCD 前先备份（§11）
@@ -1126,31 +1278,20 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
         else
             LogInfo("restore task written to " + W2U(used));
     }
-    // 引导层失败 → **契约回滚**（PIT-126，用户 2026-10-06 论坛反馈）：
-    // 契约（目标根 _zjresy + exeDir restore-task.conf）在引导层**之前**写 ——
-    // 菜单绑定/暂存任务都需要它；但引导层失败 = 任务永远不会执行 → 契约必须
-    // 撤销，否则：① GUI 误判"已安装"（按钮变「删除菜单」，实为只写了两份契约）；
-    // ② 目标根留一份 action=restore 的陈旧日志，将来进救援层可能被误执行。
-    // RAII 守卫：repairBoot=true 时武装，之后**任何失败 return 都自动回滚**；
-    // 成功路径在 return 0 前 disarm。
-    bool rollbackArmed = req.repairBoot;
-    struct RollbackGuard {
-        bool* armed;
-        ~RollbackGuard() {
-            if (!*armed) return;
-            std::string rlog;
-            int n = CleanupStrayContracts(rlog);
-            DeleteMenuBinding();
-            std::wstring dd = FindDataDrive();
-            if (!dd.empty()) {
-                DeleteFileW((dd + L"ZJRESTORE\\restore-task.conf").c_str());
-                DeleteFileW((dd + L"ZJRESTORE\\restore-task.json").c_str());
-            }
-            LogWarn("boot layer failed -> staged contracts rolled back (" +
-                    std::to_string(n) + " stray removed)");
-        }
-    } rollbackGuard{&rollbackArmed};
+    return 0;
+}
 
+
+// 阶段 4：引导层 + 单次启动（仅正常 Windows，§2 禁令3）。
+// 引导项必须写后读回校验：安全软件会让命令返回 0 但不落盘。
+static int InstallStagedBoot(StageCtx& c) {
+    const RestoreRequest& req = c.req;
+    std::string& err = c.err;
+    ProgressFn progress = c.progress;
+    const bool menuEntry = c.menuEntry;
+    PartitionInfo& target = c.target;
+    const std::wstring& exeDir = c.exeDir;
+    const std::wstring& swapNewDir = c.swapNewDir;
     // 6) 引导层 + 单次启动（仅正常 Windows，§2 禁令3）
     // 走哪条链**看目标盘的分区风格**（MBR→BIOS/GRUB4DOS；GPT→UEFI/ESP），不看固件类型：
     // UEFI 固件 + MBR 盘的机器（CSM/Legacy 装的 Windows）上没有 ESP，必须走 BIOS 链。
@@ -1469,6 +1610,17 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
         }
     }
 
+    return 0;
+}
+
+
+// 阶段 5：收尾 —— 收集部署痕迹、按模式决定是否重启、写待执行标记。
+static int FinishStagedTask(StageCtx& c) {
+    const bool menuEntry = c.menuEntry;
+    bool* needReboot = c.needReboot;
+    const std::wstring& imagePath = c.imagePath;
+    const PartitionInfo& target = c.target;
+    const std::wstring& logsDir = c.logsDir;
     // 把本次部署到目标盘的痕迹收进 logs（用户 2026-10-03 规格）：盘根的
     // grldr/grldr.mbr/menu.lst/_zjresy 日志 + ZJRESTORE\bootfix|scripts|logs + 清单。
     // 用户排错只需发 logs 文件夹（含这些 + diag.txt/list.txt + 救援日志）。
@@ -1513,7 +1665,6 @@ int StageRestoreImpl(const RestoreRequest& req, std::string& err,
             }
         }
     }
-    rollbackArmed = false;  // 成功：契约保留（菜单绑定 / 暂存任务）
     return 0;
 }
 
