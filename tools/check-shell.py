@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """check-shell.py — 救援层 shell 门禁（P2，AGENTS PIT-147）
 
-三条规则（全部零依赖、纯 Python）：
+五条规则（全部零依赖、纯 Python）：
 
   C1 语法   —— bash -n 过一遍全部产品脚本（+ 负例 harness）。
                语法错误必须死在开发机，不能死在客户机的 rescue shell 里。
@@ -16,6 +16,14 @@
                这些命令失败必须原样吼出来（按"段首命令"判定：
                `command -v wimlib-imagex 2>/dev/null` 是探测，不算执行）。
 
+  C4 入口标记 —— `bootfiles/alpine/init` 必须在调用 `zjrestore-lite.sh` 之前
+               调用 `mark_entry_started`，且该函数只写 ESP 的
+               `EFI/ZJRESTORE/entry-started.txt`、body 内无 `exit`（失败不得阻塞启动）。
+
+  C5 载荷一致 —— `bootfiles/initramfs-zjrestore.cpio.gz` 里的救援脚本必须与
+               `bootfiles/` 源码逐字节一致。该包曾经落后源码（docs/33 §5.4），
+               而 `make all` 不刷新它，只能靠门禁拦住。
+
 分类哲学见 docs/25-PIT坑位册.md PIT-147：
   A（保留）= 探针/尽力而为/有读回校验或响亮兜底的消音；
   B（修掉）= 消音会藏真实故障的 —— 一律改成 WARN/ERROR 或路由到证据文件。
@@ -24,6 +32,7 @@
   python tools/check-shell.py                # 跑门禁
   python tools/check-shell.py --update-baseline   # 分类审查后重设基线（慎用）
 """
+import gzip
 import os
 import re
 import shutil
@@ -62,6 +71,21 @@ DENY_CMDS = [
     "fdisk",
     "ntfs-3g",
 ]
+
+# C4：init 首行标记（docs/33 §5.4）
+INIT_PATH = "bootfiles/alpine/init"
+MARKER_FILE = "EFI/ZJRESTORE/entry-started.txt"
+
+# C5：initramfs 内成员 -> 仓库内源码（逐字节一致，换行/BOM 归一后比较）
+INITRAMFS_PATH = "bootfiles/initramfs-zjrestore.cpio.gz"
+INITRAMFS_MEMBERS = {
+    "init": "bootfiles/alpine/init",
+    "zjrestore-lite.sh": "bootfiles/zjrestore-lite.sh",
+    "zjswap.sh": "bootfiles/zjswap.sh",
+    "zjswap-undo.sh": "bootfiles/zjswap-undo.sh",
+    "setup-swap.sh": "bootfiles/setup-swap.sh",
+    "zjlog.sh": "bootfiles/zjlog.sh",
+}
 
 
 def find_bash():
@@ -115,6 +139,114 @@ def deny_violations(rel):
         for cmd in DENY_CMDS:
             if _segment_re(cmd).search(line):
                 out.append((i, cmd))
+    return out
+
+
+def _first_line(lines, pred):
+    for i, line in enumerate(lines, 1):
+        if pred(line):
+            return i
+    return 0
+
+
+def _function_body(lines, def_line):
+    """从 1-based 的 def_line 起按花括号配对，返回 (起始索引, 结束索引) 的 0-based 切片。"""
+    depth = 0
+    for i in range(def_line - 1, len(lines)):
+        line = lines[i]
+        depth += line.count("{") - line.count("}")
+        if i > def_line - 1 and depth <= 0:
+            return lines[def_line:i]
+    return []
+
+
+def init_marker_violations():
+    """C4：入口标记必须早于首次调用 zjrestore-lite.sh，且失败不阻塞启动。"""
+    out = []
+    lines = read_lines(INIT_PATH)
+    def_line = _first_line(lines, lambda l: re.match(r"^mark_entry_started\s*\(\s*\)\s*\{", l))
+    call_line = _first_line(lines, lambda l: re.match(r"^mark_entry_started\s*$", l))
+    if not def_line:
+        out.append("%s: 未定义 mark_entry_started()" % INIT_PATH)
+        return out
+    if not call_line:
+        out.append("%s: 缺少顶层调用 mark_entry_started（定义后必须执行一次）" % INIT_PATH)
+    restore_line = _first_line(
+        lines, lambda l: "zjrestore-lite.sh" in l and not is_comment(l)
+    )
+    if call_line and restore_line and call_line > restore_line:
+        out.append(
+            "%s:%d: mark_entry_started 必须在首次调用 zjrestore-lite.sh(%d) 之前执行"
+            % (INIT_PATH, call_line, restore_line)
+        )
+    body = _function_body(lines, def_line)
+    if not body:
+        out.append("%s: mark_entry_started() 函数体为空或花括号不配" % INIT_PATH)
+    if not any(MARKER_FILE in l for l in body):
+        out.append("%s: mark_entry_started() 必须写 %s" % (INIT_PATH, MARKER_FILE))
+    for line in body:
+        if is_comment(line):
+            continue
+        if re.search(r"(?:^|[|;&{(\s])exit(?:\s|$)", line):
+            out.append("%s: mark_entry_started() 不得调用 exit（标记失败不能阻塞启动）" % INIT_PATH)
+            break
+    return out
+
+
+def _cpio_members(path):
+    """解析 newc cpio（gzip 压缩），返回 名称 -> 内容。"""
+    with gzip.open(path, "rb") as f:
+        data = f.read()
+    out = {}
+    i = 0
+    while i + 110 <= len(data):
+        hdr = data[i:i + 110]
+        if hdr[:6] != b"070701":
+            break
+        try:
+            fields = [int(hdr[6 + 8 * k:14 + 8 * k], 16) for k in range(13)]
+        except ValueError:
+            break
+        namesize, filesize = fields[11], fields[6]
+        i += 110
+        name = data[i:i + namesize].split(b"\x00", 1)[0].decode("utf-8", "replace")
+        i += namesize
+        i += (-i) % 4
+        out[name] = data[i:i + filesize]
+        i += filesize
+        i += (-i) % 4
+        if name == "TRAILER!!!":
+            break
+    return out
+
+
+def _normalize(data):
+    if data.startswith(b"\xef\xbb\xbf"):
+        data = data[3:]
+    return data.replace(b"\r\n", b"\n")
+
+
+def initramfs_mismatches():
+    """C5：initramfs 内救援脚本必须与源码一致（防止安装出旧救援层）。"""
+    out = []
+    path = os.path.join(ROOT, INITRAMFS_PATH)
+    if not os.path.isfile(path):
+        return ["missing file: %s" % INITRAMFS_PATH]
+    members = _cpio_members(path)
+    for name, rel in sorted(INITRAMFS_MEMBERS.items()):
+        if name not in members:
+            out.append("%s: 缺少成员 %s" % (INITRAMFS_PATH, name))
+            continue
+        if not os.path.isfile(os.path.join(ROOT, rel)):
+            out.append("missing file: %s" % rel)
+            continue
+        with open(os.path.join(ROOT, rel), "rb") as f:
+            src = _normalize(f.read())
+        if _normalize(members[name]) != src:
+            out.append(
+                "%s: 成员 %s 与 %s 不一致（先重新打包 initramfs 再提交）"
+                % (INITRAMFS_PATH, name, rel)
+            )
     return out
 
 
@@ -197,17 +329,24 @@ def main():
                 % (rel, lineno, cmd, TOKEN)
             )
 
+    # C4 入口标记 / C5 载荷一致
+    fail.extend(init_marker_violations())
+    fail.extend(initramfs_mismatches())
+
     if fail:
         print("check-shell: FAIL (%d)" % len(fail))
         for f in fail:
             print("  - " + f)
         return 1
     print(
-        "check-shell: PASS (syntax %d ok; %s; deny-list %s clean)"
+        "check-shell: PASS (syntax %d ok; %s; deny-list %s clean; "
+        "entry-marker ok; initramfs %d/%d)"
         % (
             len(PRODUCT) + len(SYNTAX_ONLY),
             ", ".join("%s=%d" % (os.path.basename(k), v) for k, v in counts.items()),
             len(DENY_CMDS),
+            len(INITRAMFS_MEMBERS),
+            len(INITRAMFS_MEMBERS),
         )
     )
     return 0
