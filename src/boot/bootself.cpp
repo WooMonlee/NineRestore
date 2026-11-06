@@ -26,6 +26,13 @@ const unsigned char kVolPlaceholder[16] = {0x2a, 0x7e, 0x15, 0x51, 0x01, 0x00,
 const int kEspHits = 5;
 const int kVolHits = 10;
 
+// NTFS 引导扇区固定 512 字节；紧跟其后的引导代码续块固定 4096 字节
+// （与 Windows 自身写入的布局一致，见各调用点注释）。
+constexpr DWORD kBootSectorBytes = 512;
+constexpr DWORD kBootCodeBytes = 4096;
+// BCD 文件/模板的最小合理长度（低于此值视为损坏/空文件，不拿来用）。
+constexpr size_t kMinBcdFileBytes = 4096;
+
 std::string A(const std::wstring& w) {
     if (w.empty()) return {};
     int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr,
@@ -332,18 +339,18 @@ bool ReadVolRaw(const std::wstring& volRoot, unsigned long long off, void* buf,
 // 引导区现状：0x54 是微软代码（fa 33 c0）且**续段有实质内容**（两者是配套的一对，
 // 只写其一会黑屏，见 PIT-052/053）。
 bool PbrLooksMicrosoft(const std::wstring& volRoot, std::string& detail) {
-    unsigned char sec0[512] = {};
+    unsigned char sec0[kBootSectorBytes] = {};
     if (!ReadVolRaw(volRoot, 0, sec0, (DWORD)sizeof(sec0))) {
         detail = "read sector 0 failed";
         return false;
     }
     const bool codeOk =
         sec0[0x54] == 0xFA && sec0[0x55] == 0x33 && sec0[0x56] == 0xC0;
-    std::vector<unsigned char> cont(4096, 0);
+    std::vector<unsigned char> cont(kBootCodeBytes, 0);
     int nz = 0;
     bool contOk = false;
-    if (ReadVolRaw(volRoot, 512, cont.data(), 4096)) {
-        for (size_t i = 0; i < 512; ++i)
+    if (ReadVolRaw(volRoot, kBootSectorBytes, cont.data(), kBootCodeBytes)) {
+        for (size_t i = 0; i < kBootSectorBytes; ++i)
             if (cont[i]) ++nz;
         contOk = nz >= 64;
     }
@@ -388,7 +395,7 @@ bool IsNtfsVolume(const std::wstring& volRoot, std::string& detail) {    std::ws
                  std::to_string(GetLastError());
         return false;
     }
-    unsigned char b[512] = {};
+    unsigned char b[kBootSectorBytes] = {};
     DWORD rd = 0;
     bool ok = ReadFile(h, b, sizeof(b), &rd, nullptr) != 0 && rd == sizeof(b);
     CloseHandle(h);
@@ -419,7 +426,7 @@ bool EnsureNtfsBootRegion(const std::wstring& volRoot,
         return true;
     }
     const DWORD bps = LogicalSectorSize(volRoot);
-    if (bps > 512) {
+    if (bps > kBootSectorBytes) {
         // 4Kn：引导代码的"后续 8 个扇区"是 4096B×8，与随包 512B 扇区布局不符；
         // 且微软不支持 4Kn 盘的 BIOS 引导（PIT-133）→ 跳过并告警，不写坏盘。
         log += "pbr: WARN 4Kn volume (logical sector=" + std::to_string(bps) +
@@ -434,7 +441,7 @@ bool EnsureNtfsBootRegion(const std::wstring& volRoot,
         return false;
     }
     if (!ReadAll(exeDir + L"\\bootfiles\\ntfs-boot-cont.bin", cont, 1 << 20) ||
-        cont.size() < 4096) {
+        cont.size() < kBootCodeBytes) {
         log += "pbr: asset ntfs-boot-cont.bin missing/short (size=" +
                std::to_string(cont.size()) + ")\n";
         return false;
@@ -497,7 +504,7 @@ bool EnsureNtfsBootRegion(const std::wstring& volRoot,
         DWORD wr = 0;
         return WriteFile(h, buf, nb, &wr, &ov) != 0 && wr == nb;
     };
-    unsigned char sec0[512] = {};
+    unsigned char sec0[kBootSectorBytes] = {};
     if (!volRead(0, sec0, (DWORD)sizeof(sec0))) {
         log += "pbr: read sector 0 failed\n";
         if (locked)
@@ -515,7 +522,7 @@ bool EnsureNtfsBootRegion(const std::wstring& volRoot,
     // 走到这里说明引导区**确有缺陷**：代码段与续段是配套的一对，必须**整对**写，
     // 绝不"只补一半"（只写 426B 会黑屏，PIT-052）。
     {
-        unsigned char patched[512];
+        unsigned char patched[kBootSectorBytes];
         memcpy(patched, sec0, sizeof(patched));
         memcpy(patched + 0x54, code.data(), 426);
         SetLastError(0);
@@ -524,7 +531,8 @@ bool EnsureNtfsBootRegion(const std::wstring& volRoot,
             log += "pbr: volume write of boot sector denied err=" +
                    std::to_string(GetLastError()) +
                    " (security software?); trying physical-disk fallback\n";
-            w1 = phys.open(volRoot, log) && phys.write(0, patched, 512);
+            w1 = phys.open(volRoot, log) &&
+                 phys.write(0, patched, kBootSectorBytes);
             if (w1) {
                 physUsed = true;
                 log += "pbr: boot sector written via physical disk\n";
@@ -533,25 +541,26 @@ bool EnsureNtfsBootRegion(const std::wstring& volRoot,
     }
     // 扇区 1..8（引导代码续段）：每次都写，保证 mkntfs/format 留下的占位代码
     // 被覆盖（PIT-053）。
-    w2 = volWrite(512, cont.data(), 4096);
+    w2 = volWrite(kBootSectorBytes, cont.data(), kBootCodeBytes);
     if (!w2) {
         log += "pbr: volume write of boot continuation denied; trying "
                "physical-disk fallback\n";
-        w2 = phys.open(volRoot, log) && phys.write(512, cont.data(), 4096);
+        w2 = phys.open(volRoot, log) &&
+             phys.write(kBootSectorBytes, cont.data(), kBootCodeBytes);
         if (w2) physUsed = true;
     }
     FlushFileBuffers(h);
 
-    unsigned char back[512] = {};
+    unsigned char back[kBootSectorBytes] = {};
     bool rok = volRead(0, back, (DWORD)sizeof(back));
-    std::vector<unsigned char> backCont(4096, 0);
-    bool cok = volRead(512, backCont.data(), 4096) &&
-               memcmp(backCont.data(), cont.data(), 4096) == 0;
+    std::vector<unsigned char> backCont(kBootCodeBytes, 0);
+    bool cok = volRead(kBootSectorBytes, backCont.data(), kBootCodeBytes) &&
+               memcmp(backCont.data(), cont.data(), kBootCodeBytes) == 0;
     // 物理直写后卷缓存可能还是旧值 → 用物理通道复核，避免误报 INCOMPLETE
     if (physUsed && (!rok || !cok)) {
-        if (phys.read(0, back, 512)) rok = true;
-        if (phys.read(512, backCont.data(), 4096))
-            cok = memcmp(backCont.data(), cont.data(), 4096) == 0;
+        if (phys.read(0, back, kBootSectorBytes)) rok = true;
+        if (phys.read(kBootSectorBytes, backCont.data(), kBootCodeBytes))
+            cok = memcmp(backCont.data(), cont.data(), kBootCodeBytes) == 0;
     }
     if (locked)
         DeviceIoControl(h, FSCTL_UNLOCK_VOLUME, nullptr, 0, nullptr, 0, &ret,
@@ -581,7 +590,7 @@ bool BcdFileLooksUsable(const std::wstring& bcdPath, std::string& detail) {
         detail = "unreadable";
         return false;
     }
-    if (b.size() < 4096) {
+    if (b.size() < kMinBcdFileBytes) {
         detail = "too small (" + std::to_string(b.size()) + "B)";
         return false;
     }
@@ -701,7 +710,7 @@ bool StageBiosBootTree(const std::wstring& destRoot, const std::wstring& winDir,
     } else {
         std::vector<unsigned char> tpl;
         const std::wstring tplPath = exeDir + L"\\bootfiles\\bcd\\bios.bcd";
-        if (ReadAll(tplPath, tpl, 1 << 20) && tpl.size() >= 4096) {
+        if (ReadAll(tplPath, tpl, 1 << 20) && tpl.size() >= kMinBcdFileBytes) {
             if (WriteAll(bcdDst, tpl.data(), tpl.size())) {
                 log += "bios: BCD <- template (" + std::to_string(tpl.size()) +
                        "B, device=boot)\n";
@@ -884,7 +893,7 @@ bool EnsureUefiBootFiles(const std::wstring& espRoot,
     } else {
         std::vector<unsigned char> tpl;
         const std::wstring tplPath = exeDir + L"\\bootfiles\\bcd\\uefi.bcd";
-        if (!ReadAll(tplPath, tpl, 1 << 20) || tpl.size() < 4096) {
+        if (!ReadAll(tplPath, tpl, 1 << 20) || tpl.size() < kMinBcdFileBytes) {
             log += "uefi: template missing: " + A(tplPath) + "\n";
             err = "uefi.bcd template missing from bootfiles\\bcd";
             ok = false;

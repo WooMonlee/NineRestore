@@ -31,6 +31,7 @@
 #include "common/compname.h"  // MakeComputerName / WindowsMajorOfDir  // AppDir()（导出驱动目录用）
 #include "common/sysinfo.h"
 #include "common/progress.h"
+#include "common/units.h"
 #include "disk/disk.h"
 #include "disk/partinit.h"
 #include "gui/initdisk_dlg.h"
@@ -75,7 +76,7 @@ bool ImagePathReady(const std::wstring& p) {
 // 分区行容量列用整数 GB（老界面观感："28 / 89 GB"、"可用 61 GB"）
 std::wstring FormatGb(uint64_t bytes) {
     wchar_t buf[48];
-    swprintf(buf, 48, L"%.0f GB", (double)bytes / (1024.0 * 1024.0 * 1024.0));
+    swprintf(buf, 48, L"%.0f GB", (double)bytes / kGiB);
     return buf;
 }
 
@@ -742,8 +743,7 @@ void CMainForm::OnTaskComplete(int rc) {
             swprintf(buf, 256,
                      Tr(L"\n现在是第 %d 个时间点，合计 %.1f GB。"),
                      m_backupTimepoints,
-                     static_cast<double>(m_backupTotalBytes) /
-                         (1024.0 * 1024.0 * 1024.0));
+                     static_cast<double>(m_backupTotalBytes) / kGiB);
             tp = buf;
         }
         if (!m_skippedFiles.empty()) {
@@ -1344,7 +1344,7 @@ void CMainForm::ToggleBootMenu() {
             sysrecover::SwapSpaceEstimate est;
             if (sysrecover::QuerySwapSpace(m_wimPath, m_selImageIndex, part, est) &&
                 est.content > 0)
-                needGb = (double)est.content / (1024.0 * 1024.0 * 1024.0);
+                needGb = (double)est.content / kGiB;
         }
         std::wstring full = msg;
         if (needGb > 0.0) {

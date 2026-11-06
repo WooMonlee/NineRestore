@@ -31,6 +31,7 @@
 #include "../common/process.h"
 #include "../common/progress.h"
 #include "../common/relocate.h"
+#include "../common/units.h"
 #include "../common/pathutil.h"  // DriversRoot()
 #include "../common/selfarch.h"
 #include "../common/singleton.h"
@@ -1036,7 +1037,7 @@ int CmdList(const std::vector<std::string>& a) {
         std::printf("\n  ]\n}\n");
         return 0;
     }
-    const double gb = 1024.0 * 1024 * 1024;
+    const double gb = sysrecover::kGiB;
     for (const auto& d : disks) {
         std::wprintf(L"Disk %u  %ls  %.0fGB  %hs%s\n", d.index,
                      d.model.empty() ? L"?" : d.model.c_str(),

@@ -12,6 +12,16 @@
 namespace sysrecover {
 namespace {
 
+// 枚举/读取用的缓冲区与容量上限（数值沿用原实现，只给它们名字）。
+constexpr DWORD kLayoutBufInitialBytes = 8192;   // IOCTL_DISK_GET_DRIVE_LAYOUT_EX 初始缓冲
+constexpr size_t kLayoutBufMaxBytes = 1u << 20;  // 不足再翻倍，到此放弃
+constexpr size_t kStoragePropBufBytes = 1024;    // IOCTL_STORAGE_QUERY_PROPERTY 缓冲
+constexpr int kStorageTextChars = 128;           // 型号/序列号等属性字符串最大长度
+constexpr int kDevicePathChars = 64;             // "\\.\PhysicalDriveN" 路径缓冲
+constexpr uint32_t kMaxPhysicalDrives = 128;     // PhysicalDrive 枚举上限（防死循环）
+constexpr DWORD kAtaBlockBytes = 512;            // ATA/SMART 数据块大小
+constexpr DWORD kSatProtocolDataBytes = 512;     // SAT 透传协议数据长度
+
 // RAII 句柄
 struct Handle {
     HANDLE h = INVALID_HANDLE_VALUE;
@@ -148,7 +158,7 @@ std::vector<VolumeRec> EnumerateVolumes() {
 }
 
 bool ReadLayout(HANDLE h, std::vector<BYTE>& buf) {
-    buf.assign(8192, 0);
+    buf.assign(kLayoutBufInitialBytes, 0);
     for (;;) {
         DWORD ret = 0;
         if (DeviceIoControl(h, IOCTL_DISK_GET_DRIVE_LAYOUT_EX, nullptr, 0,
@@ -157,7 +167,7 @@ bool ReadLayout(HANDLE h, std::vector<BYTE>& buf) {
         DWORD err = GetLastError();
         if (err != ERROR_INSUFFICIENT_BUFFER && err != ERROR_MORE_DATA)
             return false;
-        if (buf.size() >= (1u << 20))
+        if (buf.size() >= kLayoutBufMaxBytes)
             return false;
         buf.resize(buf.size() * 2);
     }
@@ -171,7 +181,7 @@ void FillDiskProps(HANDLE h, DiskInfo& d) {
                         sizeof(len), &ret, nullptr))
         d.sizeBytes = len.Length.QuadPart;
     // 型号/序列号/可移动
-    BYTE propBuf[1024] = {};
+    BYTE propBuf[kStoragePropBufBytes] = {};
     STORAGE_PROPERTY_QUERY q = {};
     q.PropertyId = StorageDeviceProperty;
     q.QueryType = PropertyStandardQuery;
@@ -181,37 +191,37 @@ void FillDiskProps(HANDLE h, DiskInfo& d) {
             reinterpret_cast<STORAGE_DEVICE_DESCRIPTOR*>(propBuf);
         d.model.clear();
         if (desc->VendorIdOffset) {
-            char tmp[128] = {};
+            char tmp[kStorageTextChars] = {};
             strncpy_s(tmp, reinterpret_cast<char*>(propBuf) +
                                desc->VendorIdOffset,
                       sizeof(tmp) - 1);
             // 去尾空格
             for (int i = (int)strlen(tmp) - 1; i >= 0 && tmp[i] == ' '; --i)
                 tmp[i] = 0;
-            wchar_t w[128] = {};
-            MultiByteToWideChar(CP_ACP, 0, tmp, -1, w, 128);
+            wchar_t w[kStorageTextChars] = {};
+            MultiByteToWideChar(CP_ACP, 0, tmp, -1, w, kStorageTextChars);
             d.model = w;
         }
         if (desc->ProductIdOffset) {
-            char tmp[128] = {};
+            char tmp[kStorageTextChars] = {};
             strncpy_s(tmp, reinterpret_cast<char*>(propBuf) +
                                desc->ProductIdOffset,
                       sizeof(tmp) - 1);
             for (int i = (int)strlen(tmp) - 1; i >= 0 && tmp[i] == ' '; --i)
                 tmp[i] = 0;
-            wchar_t w[128] = {};
-            MultiByteToWideChar(CP_ACP, 0, tmp, -1, w, 128);
+            wchar_t w[kStorageTextChars] = {};
+            MultiByteToWideChar(CP_ACP, 0, tmp, -1, w, kStorageTextChars);
             if (!d.model.empty())
                 d.model += L" ";
             d.model += w;
         }
         if (desc->SerialNumberOffset) {
-            char tmp[128] = {};
+            char tmp[kStorageTextChars] = {};
             strncpy_s(tmp, reinterpret_cast<char*>(propBuf) +
                                desc->SerialNumberOffset,
                       sizeof(tmp) - 1);
-            wchar_t w[128] = {};
-            MultiByteToWideChar(CP_ACP, 0, tmp, -1, w, 128);
+            wchar_t w[kStorageTextChars] = {};
+            MultiByteToWideChar(CP_ACP, 0, tmp, -1, w, kStorageTextChars);
             d.serial = w;
         }
         // 注意（M12 复核）：BusTypeUsb 与 RemovableMedia 都会把 isRemovable 置真，
@@ -245,8 +255,8 @@ std::vector<DiskInfo> EnumerateDisks(bool includeUsb) {
 
     // M12：上限从 16 放宽到 128。PhysicalDrive 编号是连续递增的，超过 128 的
     // 属于异常环境（多盘阵列/测试台）；这里保留硬上限只为防死循环。
-    for (uint32_t idx = 0; idx < 128; ++idx) {
-        wchar_t path[64] = {};
+    for (uint32_t idx = 0; idx < kMaxPhysicalDrives; ++idx) {
+        wchar_t path[kDevicePathChars] = {};
         swprintf_s(path, L"\\\\.\\PhysicalDrive%u", idx);
         Handle h(CreateFileW(path, GENERIC_READ,
                              FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
@@ -497,13 +507,13 @@ std::wstring DescribePartitions() {
 #pragma pack(push, 1)
 struct AtaSmartIn {
     ATA_PASS_THROUGH_EX apt{};
-    unsigned char data[512]{};
+    unsigned char data[kAtaBlockBytes]{};
 };
 #pragma pack(pop)
 
 Handle OpenPhysicalDrive(uint32_t diskIndex) {
-    wchar_t path[64];
-    swprintf(path, 64, L"\\\\.\\PhysicalDrive%u", diskIndex);
+    wchar_t path[kDevicePathChars];
+    swprintf(path, kDevicePathChars, L"\\\\.\\PhysicalDrive%u", diskIndex);
     return Handle(CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
                               FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                               OPEN_EXISTING, 0, nullptr));
@@ -526,7 +536,7 @@ bool ReadSmartData(uint32_t diskIndex, unsigned char* out) {
     AtaSmartIn in{};
     in.apt.Length = sizeof(ATA_PASS_THROUGH_EX);
     in.apt.AtaFlags = ATA_FLAGS_DATA_IN | ATA_FLAGS_DRDY_REQUIRED;
-    in.apt.DataTransferLength = 512;
+    in.apt.DataTransferLength = kAtaBlockBytes;
     in.apt.TimeOutValue = 10;
     in.apt.DataBufferOffset = static_cast<ULONG_PTR>(
         reinterpret_cast<unsigned char*>(in.data) -
@@ -536,7 +546,7 @@ bool ReadSmartData(uint32_t diskIndex, unsigned char* out) {
     if (!DeviceIoControl(h.h, IOCTL_ATA_PASS_THROUGH, &in, sizeof(in), &in,
                          sizeof(in), &br, nullptr))
         return false;
-    memcpy(out, in.data, 512);
+    memcpy(out, in.data, kAtaBlockBytes);
     return true;
 }
 
@@ -619,9 +629,10 @@ bool ReadNvmeSmart(uint32_t diskIndex, unsigned char* out) {
     d->DataType = NVMeDataTypeLogPage;
     d->ProtocolDataRequestValue = 0x02;  // SMART / Health Information（Log 02h）
     d->ProtocolDataOffset = sizeof(STORAGE_PROTOCOL_SPECIFIC_DATA);
-    d->ProtocolDataLength = 512;
+    d->ProtocolDataLength = kSatProtocolDataBytes;
 
-    unsigned char buf[sizeof(STORAGE_PROTOCOL_DATA_DESCRIPTOR) + 512] = {};
+    unsigned char buf[sizeof(STORAGE_PROTOCOL_DATA_DESCRIPTOR) +
+                      kSatProtocolDataBytes] = {};
     DWORD br = 0;
     if (!DeviceIoControl(h.h, IOCTL_STORAGE_QUERY_PROPERTY, in, sizeof(in), buf,
                          sizeof(buf), &br, nullptr))
@@ -633,18 +644,18 @@ bool ReadNvmeSmart(uint32_t diskIndex, unsigned char* out) {
     // 数据地址 = 协议字段基址(descriptor+8) + ProtocolDataOffset（MSDN 口径）；
     // 常见返回值是 40（=sizeof 协议字段），即数据紧随描述符之后。
     if (sd->ProtocolDataOffset < sizeof(STORAGE_PROTOCOL_SPECIFIC_DATA) ||
-        sd->ProtocolDataLength < 512)
+        sd->ProtocolDataLength < kSatProtocolDataBytes)
         return false;
     const unsigned char* data = (const unsigned char*)sd + sd->ProtocolDataOffset;
-    if (data + 512 > buf + sizeof(buf))
+    if (data + kSatProtocolDataBytes > buf + sizeof(buf))
         return false;
-    memcpy(out, data, 512);
+    memcpy(out, data, kSatProtocolDataBytes);
     return true;
 }
 
 DiskHealth QueryDiskHealth(uint32_t diskIndex) {
     DiskHealth h;
-    unsigned char d[512] = {};
+    unsigned char d[kAtaBlockBytes] = {};
     if (ReadSmartData(diskIndex, d)) {  // ── ATA/SATA 路径
         h.smartKnown = true;
         h.reallocatedSectors = SmartAttrRaw(d, 5);

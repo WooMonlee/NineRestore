@@ -62,6 +62,9 @@ std::wstring ProgramData() {
     return s + L"\\ProgramData";
 }
 
+// 本程序在 ProgramData 下的固定子目录（%ProgramData%\SysRecover）。
+constexpr wchar_t kProgramDataSubdir[] = L"\\SysRecover";
+
 std::wstring Sys32(const wchar_t* exe) {
     wchar_t dir[MAX_PATH] = {};
     GetSystemDirectoryW(dir, MAX_PATH);
@@ -411,7 +414,8 @@ bool SelfElevate(const std::wstring& logDir) {
 // %ProgramData%\SysRecover\computer-name.txt，这里在首次登录（已提权）时落到
 // 注册表。与 Rename-Computer 等价；新名字要**下次重启**才生效（Windows 机制）。
 void ApplyComputerName() {
-    const std::wstring p = ProgramData() + L"\\SysRecover\\computer-name.txt";
+    const std::wstring p = ProgramData() + kProgramDataSubdir +
+                           L"\\computer-name.txt";
     HANDLE h = CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                            OPEN_EXISTING, 0, nullptr);
     if (h == INVALID_HANDLE_VALUE) return;
@@ -463,7 +467,8 @@ void RemoveStartupCmd() {
 }
 
 void WriteDoneMarker() {
-    const std::wstring p = ProgramData() + L"\\SysRecover\\boot-cleanup.done";
+    const std::wstring p = ProgramData() + kProgramDataSubdir +
+                           L"\\boot-cleanup.done";
     HANDLE h = CreateFileW(p.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
@@ -481,7 +486,7 @@ void WriteDoneMarker() {
 int wmain(int argc, wchar_t** argv) {
     const bool elevatedArg =
         argc > 1 && wcscmp(argv[1], L"--elevated") == 0;
-    const std::wstring pd = ProgramData() + L"\\SysRecover";
+    const std::wstring pd = ProgramData() + kProgramDataSubdir;
     CreateDirectoryW((ProgramData()).c_str(), nullptr);
     CreateDirectoryW(pd.c_str(), nullptr);
     gLog = pd + L"\\boot-cleanup.log";

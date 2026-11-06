@@ -22,6 +22,7 @@
 #include "../common/relocate.h"
 #include "../common/rescue_decision.h"  // DecideRescueReport（纯逻辑，单测覆盖）
 #include "../common/selfarch.h"
+#include "../common/units.h"
 #include "../common/version.h"
 #include "../common/zip.h"
 #include "../disk/disk.h"
@@ -993,12 +994,11 @@ int DiagReportText(std::string& out, const std::vector<DiskInfo>* disks) {
 void DiskListText(std::string& out, const std::vector<DiskInfo>* disks) {
     std::vector<DiskInfo> dsCache;
     const auto& disksRef = UseDisks(disks, dsCache);
-    const double gb = 1024.0 * 1024 * 1024;
     char buf[720];
     for (const auto& d : disksRef) {
         snprintf(buf, sizeof(buf), "Disk %u  %s  %.0fGB  %s%s\r\n", d.index,
                  ToUtf8(d.model.empty() ? std::wstring(L"?") : d.model).c_str(),
-                 d.sizeBytes / gb, sysrecover::StyleName(d.style),
+                 d.sizeBytes / kGiB, sysrecover::StyleName(d.style),
                  d.isRemovable ? "  [Removable]" : "");
         out += buf;
         for (const auto& p : d.parts) {
@@ -1008,7 +1008,7 @@ void DiskListText(std::string& out, const std::vector<DiskInfo>* disks) {
                      ToUtf8(p.letter.empty() ? std::wstring(L"-") : p.letter)
                          .c_str(),
                      ToUtf8(p.fs.empty() ? std::wstring(L"?") : p.fs).c_str(),
-                     p.sizeBytes / gb, p.freeBytes / gb,
+                     p.sizeBytes / kGiB, p.freeBytes / kGiB,
                      p.isSystem ? "  [System]" : "",
                      p.isEsp ? "  [ESP]" : "",
                      p.isRecovery ? "  [Recovery]" : "");
@@ -1278,7 +1278,7 @@ int CollectDeployArtifacts(const std::wstring& dstDir, wchar_t onlyDrive,
                      d.index, ToUtf8(d.model).c_str(),
                      ToUtf8(d.serial.empty() ? std::wstring(L"?") : d.serial)
                          .c_str(),
-                     d.sizeBytes / (1024.0 * 1024 * 1024),
+                     d.sizeBytes / kGiB,
                      sysrecover::StyleName(d.style));
             map += buf;
             for (const auto& p : d.parts) {
