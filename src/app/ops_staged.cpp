@@ -352,6 +352,25 @@ static int RestorePreflight(StageCtx& c) {
             return 4;
         }
     }
+    // 0.8) 可还原性预检（2026-11-06 实机）：镜像必须有目标系统的注册表
+    //   `\Windows\System32\config\SYSTEM`。安装源镜像（install.wim/esd）、
+    //   只含部分文件的合成镜像即使有 winload.exe，还原后也必然 0xc000000f
+    //   （实机已复现），用户会当成产品的 bug。判据只看 wimlib 元数据目录表，
+    //   不靠文件名/大小猜；查不了（加密容器）不阻断。
+    {
+        const int eff = req.index < 1 ? 1 : req.index;
+        bool hasSystem = false;
+        if (ImageHasSystemHive(req.image, eff, &hasSystem) == 0 && !hasSystem) {
+            err = Tr("该镜像不是可还原的系统镜像（缺少 "
+                     "\\Windows\\System32\\config\\SYSTEM：安装源镜像（如 "
+                     "install.wim/esd）、只含部分文件的合成镜像都不支持还原），"
+                     "已中止，未动目标分区。");
+            LogError(err);
+            AppendHistory("restore-rejected", req.image, req.image, 0,
+                          "not a restorable system image (no config/SYSTEM)");
+            return 4;
+        }
+    }
     // 0.9) 异机还原前置检查（2026-10-21，0.9）：仅 Win10/11；只允许 Windows
     //      侧路径（A 引擎 / PE 就地）；x64 镜像需 64 位环境（DISM 才能服务）。
     if (req.universal) {

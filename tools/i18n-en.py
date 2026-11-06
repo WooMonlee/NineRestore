@@ -685,6 +685,7 @@ EN = {
     '该命令需要管理员权限（要写引导/分区/固件变量）。\n请右键「以管理员身份运行」，或从管理员命令行执行。\n**本次未执行任何操作**。': 'This command needs administrator rights (boot/partition/firmware writes).\nRight-click "Run as administrator", or run it from an elevated command prompt.\n**Nothing was executed**.',
     '该文件不是可用的镜像：': 'This file is not a usable image: ',
     '该镜像不是 Windows 7 及以上的系统镜像（缺少 \\Windows\\system32\\winload.exe；Vista 以前系统 / 安装源/ 不完整镜像均不支持还原），已中止，未动目标分区。': 'This image is not a Windows 7 or later system image (missing \\Windows\\system32\\winload.exe; pre-Vista systems / install-source images / incomplete images are not supported for restore). Aborted before touching the target partition.',
+    '该镜像不是可还原的系统镜像（缺少 \\Windows\\System32\\config\\SYSTEM：安装源镜像（如 install.wim/esd）、只含部分文件的合成镜像都不支持还原），已中止，未动目标分区。': 'This image is not a restorable system image (missing \\Windows\\System32\\config\\SYSTEM; install-source images such as install.wim/esd and synthetic images with only part of the files are not supported for restore). Aborted before touching the target partition.',
     '该镜像已加密，请输入密码：': 'This image is encrypted. Enter the password: ',
     '该镜像需要先解压': 'This image must be extracted first',
     '请先选择保存位置': 'Please choose a save location first',

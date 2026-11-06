@@ -199,6 +199,20 @@ int ImageHasWinload(const std::wstring& path, int index, bool* exists) {
     return -1;
 }
 
+// 2026-11-06 实机：安装源类镜像（install.esd/wim）里没有目标系统的注册表
+// （\Windows\System32\config\SYSTEM），还原后必然 0xc000000f。这里只查
+// **第一个映像的目录表**（wimlib 元数据，秒级），不靠文件名/大小猜。
+// 加密容器（.zje，本机自产、不可能是安装源）不查询 → 返回 -1，不阻断。
+int ImageHasSystemHive(const std::wstring& path, int index, bool* exists) {
+    if (exists)
+        *exists = false;
+    if (ImageIsEncrypted(path))
+        return -1;
+    WimEngine eng;
+    return eng.ImagePathExists(path, index, L"\\Windows\\System32\\config\\SYSTEM",
+                               exists);
+}
+
 std::wstring ResolveImagePlain(const std::wstring& path, ProgressFn progress,
                                std::wstring& err, bool* temp) {
     err.clear();

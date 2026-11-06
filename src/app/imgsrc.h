@@ -37,6 +37,10 @@ int ImageContentSize(const std::wstring& path, int index,
                      unsigned long long* bytes);
 // 是否含 \Windows\system32\winload.exe（不支持的系统预检）。
 int ImageHasWinload(const std::wstring& path, int index, bool* exists);
+// 是否含 \Windows\System32\config\SYSTEM（"可还原系统镜像"预检，2026-11-06）：
+// 只读元数据目录表，不看文件名。返回 0=查询成功（*exists 有效）；
+// 非 0=无法判定（加密容器等），调用方按"不阻断"处理。
+int ImageHasSystemHive(const std::wstring& path, int index, bool* exists);
 
 // ── 明文解析（只有解压/校验/extract 才需要）──
 // 非加密 → 原样返回（*temp=false）；
