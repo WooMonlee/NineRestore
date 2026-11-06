@@ -82,17 +82,27 @@ bool SetComputerNameOffline(const std::wstring& winDir, const std::wstring& name
         return false;
     }
     auto setSz = [&](const std::wstring& sub, const wchar_t* value,
-                     const std::wstring& data) {
+                     const std::wstring& data) -> bool {
         HKEY k = nullptr;
         if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, sub.c_str(), 0, nullptr, 0,
                             KEY_SET_VALUE, nullptr, &k, nullptr) !=
-            ERROR_SUCCESS)
-            return;
-        RegSetValueExW(k, value, 0, REG_SZ, (const BYTE*)data.c_str(),
-                       (DWORD)((data.size() + 1) * sizeof(wchar_t)));
+            ERROR_SUCCESS) {
+            log += "rename: open " + W2U(sub) + " failed\n";
+            return false;
+        }
+        const LONG wr =
+            RegSetValueExW(k, value, 0, REG_SZ, (const BYTE*)data.c_str(),
+                           (DWORD)((data.size() + 1) * sizeof(wchar_t)));
         RegCloseKey(k);
+        if (wr != ERROR_SUCCESS) {
+            log += "rename: set " + W2U(value) + " failed rc=" +
+                   std::to_string(wr) + "\n";
+            return false;
+        }
+        return true;
     };
     bool wrote = false;
+    bool allOk = true;
     HKEY root = nullptr;
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kTmp, 0, KEY_READ, &root) ==
         ERROR_SUCCESS) {
@@ -105,13 +115,23 @@ bool SetComputerNameOffline(const std::wstring& winDir, const std::wstring& name
             const std::wstring cs(sub);
             if (_wcsnicmp(cs.c_str(), L"ControlSet", 10) != 0) continue;
             const std::wstring base = std::wstring(kTmp) + L"\\" + cs;
-            setSz(base + L"\\Control\\ComputerName\\ComputerName",
-                  L"ComputerName", name);
-            setSz(base + L"\\Control\\ComputerName\\ActiveComputerName",
-                  L"ComputerName", name);
-            setSz(base + L"\\Services\\Tcpip\\Parameters", L"Hostname", name);
-            setSz(base + L"\\Services\\Tcpip\\Parameters", L"NV Hostname", name);
-            wrote = true;
+            bool ok = true;
+            if (!setSz(base + L"\\Control\\ComputerName\\ComputerName",
+                       L"ComputerName", name))
+                ok = false;
+            if (!setSz(base + L"\\Control\\ComputerName\\ActiveComputerName",
+                       L"ComputerName", name))
+                ok = false;
+            if (!setSz(base + L"\\Services\\Tcpip\\Parameters", L"Hostname",
+                       name))
+                ok = false;
+            if (!setSz(base + L"\\Services\\Tcpip\\Parameters", L"NV Hostname",
+                       name))
+                ok = false;
+            if (ok)
+                wrote = true;
+            else
+                allOk = false;
         }
         RegCloseKey(root);
     }
@@ -120,7 +140,7 @@ bool SetComputerNameOffline(const std::wstring& winDir, const std::wstring& name
         log += "rename: no ControlSet found in SYSTEM hive\n";
     else
         log += "rename: " + W2U(name) + " stored offline\n";
-    return wrote;
+    return wrote && allOk;
 }
 
 

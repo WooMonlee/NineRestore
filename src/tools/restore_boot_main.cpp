@@ -433,22 +433,44 @@ void ApplyComputerName() {
         DeleteFileW(p.c_str());
         return;
     }
-    auto setSz = [&](const std::wstring& sub, const wchar_t* value) {
+    auto setSz = [&](const std::wstring& sub, const wchar_t* value) -> bool {
         HKEY k = nullptr;
-        if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, sub.c_str(), 0, nullptr, 0,
-                            KEY_SET_VALUE, nullptr, &k, nullptr) !=
-            ERROR_SUCCESS)
-            return;
-        RegSetValueExW(k, value, 0, REG_SZ, (const BYTE*)name.c_str(),
-                       (DWORD)((name.size() + 1) * sizeof(wchar_t)));
+        const LONG open = RegCreateKeyExW(HKEY_LOCAL_MACHINE, sub.c_str(), 0,
+                                          nullptr, 0, KEY_SET_VALUE, nullptr,
+                                          &k, nullptr);
+        if (open != ERROR_SUCCESS) {
+            Log("computer name: open key failed err=" + std::to_string(open));
+            return false;
+        }
+        const LONG wr =
+            RegSetValueExW(k, value, 0, REG_SZ, (const BYTE*)name.c_str(),
+                           (DWORD)((name.size() + 1) * sizeof(wchar_t)));
         RegCloseKey(k);
+        if (wr != ERROR_SUCCESS) {
+            Log("computer name: set " +
+                std::string(value, value + std::wcslen(value)) +
+                " failed err=" + std::to_string(wr));
+            return false;
+        }
+        return true;
     };
     const std::wstring cs = L"SYSTEM\\CurrentControlSet";
-    setSz(cs + L"\\Control\\ComputerName\\ComputerName", L"ComputerName");
-    setSz(cs + L"\\Control\\ComputerName\\ActiveComputerName",
-          L"ComputerName");
-    setSz(cs + L"\\Services\\Tcpip\\Parameters", L"Hostname");
-    setSz(cs + L"\\Services\\Tcpip\\Parameters", L"NV Hostname");
+    bool ok = true;
+    if (!setSz(cs + L"\\Control\\ComputerName\\ComputerName",
+               L"ComputerName"))
+        ok = false;
+    if (!setSz(cs + L"\\Control\\ComputerName\\ActiveComputerName",
+               L"ComputerName"))
+        ok = false;
+    if (!setSz(cs + L"\\Services\\Tcpip\\Parameters", L"Hostname"))
+        ok = false;
+    if (!setSz(cs + L"\\Services\\Tcpip\\Parameters", L"NV Hostname"))
+        ok = false;
+    // 写失败时保留源文件：名字不丢，便于排查/下次重试；全部成功才删。
+    if (!ok) {
+        Log("computer name: registry write incomplete; source kept");
+        return;
+    }
     DeleteFileW(p.c_str());
     Log("computer name applied: " + std::string(name.begin(), name.end()) +
         " (effective after next reboot)");
