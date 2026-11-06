@@ -450,6 +450,8 @@ $(PORTABLE_STUB_GUI): src/tools/portable_main.cpp src/common/xpress.h $(PORTABLE
 	$(MINGW32)/bin/i686-w64-mingw32-g++ -O2 -std=c++17 $(WARN_FLAGS) -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 $< $(PORTABLE_RC) $(VI_X86_DIR)/portable_stub_gui.o -o $@ -static -municode -mwindows -s -lshell32 -luser32
 
 
+# ⚠️ 最后一个参数 D:/ 是**约定的发布位置**：每个新版本的单文件直接放 D 盘根目录
+# （用户 2026-11 明确要求）。这不是"产物写错盘"，别再改回 dist/ 或加盘根守门。
 portable: package $(PORTABLE_STUB) $(PORTABLE_STUB_GUI)
 	@echo === portable: single-file pack (GUI=no console flash) ===
 	$(PYTHON) tools/portable-pack.py "$(PORTABLE_STUB_GUI)" "$(PORTABLE_OUT)" dist D:/
