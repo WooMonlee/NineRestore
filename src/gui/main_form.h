@@ -147,6 +147,8 @@ private:
     bool        m_restoreKeepOld = false;  // swap 时 true=保留 ~old 可返回；block 恒 false
     void ApplyModeUi();
     void UpdateMainAction();
+    // 空闲态状态栏 = 当前模式说明（切 Tab 与"镜像加载成功"共用，见 main_form.cpp）。
+    void SetIdleStatus();
     std::wstring& ActivePath() {
         return m_backupMode ? m_backupPath : m_wimPath;
     }

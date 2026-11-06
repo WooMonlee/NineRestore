@@ -2597,6 +2597,8 @@ void CMainForm::LoadWimImages(const std::wstring& path) {
     LogInfo("GUI image loaded: " + W2U(path) + " (" +
             std::to_string(images.size()) + " subimage(s), first idx=" +
             std::to_string(m_selImageIndex) + ")");
+    // 成功路径必须刷掉上一条"镜像不可用"：否则用户改正路径后，状态栏仍挂着旧错误。
+    SetIdleStatus();
     UpdateMainAction();
 }
 
@@ -3419,6 +3421,13 @@ void CMainForm::ApplyModeUi() {
     // 放在 UpdateMainAction() **之后**：那里面在按钮不可用时会写
     // 「请先选择镜像文件」之类的提示，会把说明行冲掉。
     SetImagePathEdit(ActivePath());
+    SetIdleStatus();
+}
+
+// 空闲态状态栏：中文/英文只此一处，切 Tab 与"镜像加载成功"共用。
+// 解决 2026-11-06 实机缺陷：先输错路径（状态栏写"镜像不可用"），再选中合法镜像时
+// 成功路径不写状态栏 → 错误文案一直挂着，用户会以为镜像仍不可用。
+void CMainForm::SetIdleStatus() {
     SetStatus(Tr(m_backupMode
                      ? L"把当前系统热备份为镜像文件（VSS 快照，可在运行中备份）"
                      : L"选择镜像与目标分区后开始；还原系统盘会重启进恢复环境，非系统盘就地还原"));
