@@ -2,7 +2,11 @@
 
 > 版本号唯一来源是 `src/common/version.h`；发布时 `version.h` / git tag / `dist/version.json` 三处同源。
 
-## 1.0.0-rc1（2026-11-05）
+## 1.0.0-beta.1（2026-11-06）
+
+> **这是测试版（Beta），不是正式版。** 二进制未做代码签名，也未在实机上跑通完整备份/还原闭环；
+> 面向真实磁盘使用前请先在不重要的机器或虚拟机上验证。内部版本串 `1.0.0-beta.1`，
+> 界面显示名「1.0.0 测试版」（英文界面显示 `1.0.0 Beta`）。
 
 基线：SysRecover **0.9.96**（commit `8401cdab`）。本版是「九转还原」工程化重构 + P0/P1 整改，
 不改变产品定位与磁盘格式（镜像仍是 WIM/ESD，加密镜像仍是 ZJENC1）。
@@ -59,6 +63,25 @@
 - **L7**：删除 `formatTarget` 分支内恒为 false 的 `oldPreserved` 回滚死代码。
 - **L3**：`ops.cpp`（4705 行单体）已拆为 13 个 `ops_*.cpp`（阶段 2，函数集合 67/67 一致，行为不变）。
 
+### 界面 / 版本呈现（beta.1 新增）
+
+- 「**异机还原**」改为还原模式第三步的常驻勾选框（原「使用异机还原」藏在下拉菜单里）；
+  「**打包日志**」移到「更多功能>>」菜单第一项（原为常驻按钮）。控件声明顺序与视觉从左到右
+  一致，Tab 焦点不走样；菜单命令用常量 id，不依赖索引。
+- 英文文案同步：`异机还原=Universal`、`打包日志=Package log`、新增 `测试版=Beta`；
+  删除 4 个随改动失效的旧键（`使用异机还原` / `已关闭异机还原` / `已启用异机还原（…）` / `异机`）。
+- 版本显示名由 `src/gui/ui_skin.cpp::VersionDisplay()` 从 `version.h` 派生：
+  `1.0.0-beta.N` → 「1.0.0 测试版」，`1.0.0-rc.N` → 「1.0.0 RC」，正式版原样；不另写第二份数字。
+- **Windows VERSIONINFO**：`tools/gen-versioninfo.py` 从 `version.h` 生成 `.rc`（公司名/版权
+  集中在 `SYSRECOVER_COMPANY` / `SYSRECOVER_COPYRIGHT` 两个宏），按架构用自己的 `windres`
+  编译并链接。GUI/CLI/Check、三个启动器、`zj-ea-apply`、`zj-restore-boot`、两个单文件 stub
+  全部带资源；单文件先给 stub 加资源、再追加载荷，所以外层 exe 在「属性 → 详细信息」里
+  直接能看到 `九转还原` / `1.0.0-beta.1` / `DreamGrain` / MIT 版权。
+- `make check` 与 `make dist-check` 都加了 PowerShell 断言（`(Get-Item exe).VersionInfo`
+  必须与 `version.h` 同值），缺资源或不一致直接失败。
+- `tools/version.py` / `tools/check-docs.py` 支持 SemVer 预发布后缀；`bump()` 会把
+  `1.0.0-beta.1` 提升到 `1.0.1`（丢弃后缀）。
+
 ### 工程 / 发布
 
 - **L2**：CI 增加 x86 32 位单测与冒烟、修正 x86 产物路径；新增 release job：
@@ -79,9 +102,14 @@
 | 阶段 | 标识 | 说明 |
 |---|---|---|
 | 开发 | `1.0.0`（`version.h`）| 主分支持续修复；每次提交前跑双架构构建 + `make check` |
-| 发布候选 | git tag `v1.0.0-rc.N` | `version.h` 保持 `1.0.0`；RC 只修 P0/P1，不加功能 |
-| 正式发布 | git tag `v1.0.0` | 7 天观察期无新的 P0/P1、发布闸门全绿（`docs/26` §2）后打 tag |
+| 测试版 | `1.0.0-beta.N` + tag `v1.0.0-beta.N` | `version.h` 写完整预发布串（如 `1.0.0-beta.1`），界面显示「1.0.0 测试版」；供小范围试用，不加功能 |
+| 发布候选 | `1.0.0-rc.N` + tag `v1.0.0-rc.N` | RC 只修 P0/P1，不加功能 |
+| 正式发布 | `1.0.0` + tag `v1.0.0` | 7 天观察期无新的 P0/P1、发布闸门全绿（`docs/26` §2）后打 tag |
 
+- 预发布后缀（`-beta.N` / `-rc.N`）由人指定，`tools/version.py --bump` 不会自动加；
+  `bump()` 会丢弃后缀并把补丁号 +1。
 - 修订号规则：主/次版本由人指定，补丁号每解决一个问题 +1（`python tools/version.py --bump`）。
 - 跨层契约版本单独计（`SYSRECOVER_CONTRACT_VERSION`），只有改字段才递增。
 - 发布物：`dist/` 目录版 + `dist/SHA256SUMS.txt`；单文件版由 `make portable` 生成（可选）。
+- **签名顺序约束**：若以后做代码签名，必须**先打包、再签名** —— 单文件是"stub + 追加载荷"，
+  签名之后再往 PE 末尾追加数据会让签名失效。

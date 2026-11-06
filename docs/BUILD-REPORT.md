@@ -273,15 +273,16 @@ test_zjswap: PASS (A fail-closed/rollback, B happy path, C marker gate, D post-v
 | ② 纯结构重构 | `ops.cpp`（4705 行）拆为 13 个 `ops_*.cpp`；函数集合 67/67 一致、行为不变；每提交可编译；格式化收敛先行为一致 |
 | ③ P0 数据安全 | H1 交换 fail-closed + 后置校验、H2 引导降级回执、H3 旧系统保留回滚、H4 校验契约、H5 空间预检/残留清理、H6 救援侧启动项、H7 单实例锁；H1 回归脚本"改前失败、改后通过" |
 | ④ P1 + 测试 + CI | M1~M15 全部（配对/身份校验/不静默覆盖/预检/长路径/USB 开关/备份完整性/契约回读/ESP 降级等）；L1/L4/L5/L6/L7；CI x86 门禁 + release 打包/SHA256；测试③④可复现步骤 |
-| ⑤ 发布工程 | 版本 1.0.0、`v1.0.0-rc1` 标签；`CHANGELOG.md`、已知问题页、README 中英事实修正；`package → sha256(73) → dist-check` 全绿 |
+| ⑤ 发布工程 | 版本 1.0.0-beta.1、`v1.0.0-beta.1` 标签；`CHANGELOG.md`、已知问题页、README 中英事实修正；VERSIONINFO 资源（含单文件外层 stub）；`package → sha256(75) → dist-check` 全绿 |
 
 ### 9.3 测试结果（1.0.0 本机）
 
 - 双架构构建：`ARCH=x64 all`、`ARCH=x86 all` 退出码 **0**。
 - `make check`：**80 cases / 636 checks / 0 failures**；含 `test_zjswap` A~D、回执判定、WIM 结构预检。
-- 门禁：i18n `863/863`、docs PASS（`version=1.0.0 contract_version=1 契约键 34（救援读 22）`）、
-  widths OK（1 WARN，历史项）、shell PASS（deny-list 8 clean）、config/layers/secrets 全 PASS。
-- 发布链：`package` 0 → `SHA256SUMS: 73 file(s)` → `check-dist: PASS`。
+- 门禁：i18n `860/860`、docs PASS（`version=1.0.0-beta.1 contract_version=1 契约键 34（救援读 22）`）、
+  widths OK（1 WARN，历史项）、shell PASS（deny-list 8 clean）、config/layers/secrets 全 PASS、
+  **versioninfo PASS（x64/x86 三个 exe 各 8 个字段与 version.h 同值）**。
+- 发布链：`package` 0 → `SHA256SUMS: 75 file(s)` → `check-dist: PASS`（含单文件外层 exe 的 VersionInfo）。
 - H1 证据：改前 `FAIL: A: exit=0 (want 4)` / `~new was removed` / `~old left behind` / `new tree leaked`；
   改后 `test_zjswap: PASS`。
 
@@ -311,3 +312,32 @@ test_zjswap: PASS (A fail-closed/rollback, B happy path, C marker gate, D post-v
 5. USB 固定盘勾选后可见且标注正确，默认仍隐藏。
 6. ≥16 核机器备份线程被限制为 8，峰值内存可控。
 7. NVRAM 写保护/写满时临时 UEFI 启动项清理失败能被上层感知（退出码 1）。
+
+## 10. 版本资源（VERSIONINFO）实测（2026-11-06）
+
+生成方式：`tools/gen-versioninfo.py` 从 `src/common/version.h` 读版本/产品/公司/版权，
+按 profile 生成 `.rc`（`#pragma code_page(65001)`），再按架构各用自己的 `windres` 编译并链接：
+x64 用 `mingw64/bin/windres`，x86 用 `mingw32/bin/windres`；x64/x86 的 `.o` 分目录存放，不混用。
+
+单文件版是「自建 stub + 追加载荷」（`src/app/ops_selfpack.cpp` 先整段拷贝 stub 字节、
+再在 PE 末尾追加压缩载荷），因此顺序天然是"先给 stub 加资源、再追加载荷"——
+实测外层 exe 的 `.rsrc` 完好，资源管理器能直接读到版本。
+
+读取命令（与用户在资源管理器看到的是同一份数据）：
+
+```powershell
+(Get-Item .\dist\x64\SysRecoverUI.exe).VersionInfo |
+  Select-Object ProductName,ProductVersion,FileVersion,CompanyName,LegalCopyright,FileDescription,OriginalFilename,InternalName
+```
+
+实测输出（x64 / x86 / 单文件外层，节选）：
+
+| 文件 | ProductName | ProductVersion | FileVersion | CompanyName | LegalCopyright |
+|---|---|---|---|---|---|
+| `dist/x64/SysRecoverUI.exe` | 九转还原 | 1.0.0-beta.1 | 1.0.0-beta.1 | DreamGrain | Copyright (c) 2026 DreamGrain. MIT License |
+| `dist/SysRecoverUI_x86.exe` | 九转还原 | 1.0.0-beta.1 | 1.0.0-beta.1 | DreamGrain | 同上 |
+| `dist/SysRecover-Portable.exe`（外层） | 九转还原 | 1.0.0-beta.1 | 1.0.0-beta.1 | DreamGrain | 同上 |
+
+自动化：`make check` 调 `tools/check-versioninfo.py dist/x64/...`；
+`make dist-check` 额外校验单文件外层与 `bootfiles/portable-stub*.exe`。
+**签名顺序约束**：以后若做代码签名，必须"先打包、再签名"，签名后追加载荷会让签名失效。
