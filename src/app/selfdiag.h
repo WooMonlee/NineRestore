@@ -63,6 +63,11 @@ MenuRescueState CheckMenuRescueExecution(std::string& installTime,
 // 用户已经看过"菜单未执行"提示（写 .menu-ack）→ 下次启动才允许清理失败现场。
 void AcknowledgeMenuRescue();
 
+// 失败现场是否必须保留（尚未被用户看过）：
+//   · 菜单标记在、但 .menu-ack 不在；
+//   · 最新回执是 FAILED/OK_BOOT_UNFIXED、且与 .last-rescue-status 去重键不同。
+bool RescueEvidenceShouldBeKept();
+
 // 支持包出包成功后清理散落在各盘的日志（用户规格 4：不该到处放）：
 // <盘根>\ZJRESTORE-{last.log,probe.txt,status.txt}、zjrestore-boot.log、
 // ZJRESTORE-logs\、非活动 <盘>\ZJRESTORE\logs\、ESP 的 \EFI\ZJRESTORE\logs\*。

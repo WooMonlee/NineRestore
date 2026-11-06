@@ -1227,6 +1227,34 @@ std::string LatestReceiptTime() {
     return best;
 }
 
+// 最新一条失败回执的去重键（与 CheckLastRescueFailure 同一算法）。
+bool LatestFailedKey(std::string& key) {
+    std::wstring base = LogBaseDir() + L"\\logs";
+    std::vector<std::wstring> files;
+    FindStatusFiles(base + L"\\collected", 4, files);
+    FindStatusFiles(base, 1, files);
+    std::string bestTime, bestStep, bestBuild;
+    for (const auto& f : files) {
+        std::string t;
+        if (!ReadSmallFile(f, t))
+            continue;
+        const std::string tm = StatusField(t, "time");
+        const std::string result = StatusField(t, "result");
+        if (result != "FAILED" && result != "OK_BOOT_UNFIXED")
+            continue;
+        if (bestTime.empty() || tm > bestTime) {
+            bestTime = tm;
+            bestStep = result == "OK_BOOT_UNFIXED" ? "boot-unfixed"
+                                                   : StatusField(t, "step");
+            bestBuild = StatusField(t, "build");
+        }
+    }
+    if (bestTime.empty())
+        return false;
+    key = bestTime + "|" + bestBuild + "|" + bestStep;
+    return true;
+}
+
 }  // namespace
 
 MenuRescueState CheckMenuRescueExecution(std::string& installTime,
@@ -1252,9 +1280,37 @@ MenuRescueState CheckMenuRescueExecution(std::string& installTime,
 
 void AcknowledgeMenuRescue() { WriteUtf8File(MenuAckPath(), "seen"); }
 
+bool RescueEvidenceShouldBeKept() {
+    // 1) 菜单装过、提示还没被用户看过：保留现场（否则下次启动擦掉唯一证据）。
+    std::string marker;
+    if (ReadSmallFile(MenuMarkerPath(), marker) &&
+        GetFileAttributesW(MenuAckPath().c_str()) == INVALID_FILE_ATTRIBUTES) {
+        std::string it, d;
+        if (CheckMenuRescueExecution(it, d) == MenuRescueState::NeverExecuted)
+            return true;
+    }
+    // 2) 最新失败回执还没被 CheckLastRescueFailure 提示过（去重键不同）。
+    std::string key;
+    if (LatestFailedKey(key)) {
+        std::string old;
+        if (!ReadSmallFile(LogBaseDir() + L"\\logs\\.last-rescue-status", old))
+            return true;
+        while (!old.empty() && (old.back() == '\n' || old.back() == '\r' ||
+                                old.back() == ' '))
+            old.pop_back();
+        return old != key;
+    }
+    return false;
+}
+
 // 收集后清理散落日志（用户 2026-10-04 规格 4：不该到处放这种东西）。
 int CleanupStrayLogs() {
     int n = 0;
+    // 2026-11-06：失败现场（盘根 status/last.log/三件套 + ZJRESTORE 残留 +
+    // ESP 日志）在用户看过提示之前必须保留，不能"下次启动就把证据擦掉"。
+    const bool keepEvidence = RescueEvidenceShouldBeKept();
+    if (keepEvidence)
+        LogInfo("rescue evidence kept (notice not acknowledged yet)");
     std::wstring activeBase = LogBaseDir();
     DWORD mask = GetLogicalDrives();
     for (wchar_t c = L'C'; c <= L'Z'; ++c) {
@@ -1271,11 +1327,15 @@ int CleanupStrayLogs() {
               L"ZJRESTORE-status.txt", L"zjrestore-boot.log",
               L"ZJRESTORE-apply.out", L"ZJRESTORE-mkntfs.out",
               L"ZJRESTORE-esp.out"}) {
+            if (keepEvidence)
+                break;
             std::wstring p = root + nm;
             SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_NORMAL);
             if (DeleteFileW(p.c_str()))
                 ++n;
         }
+        if (keepEvidence)
+            continue;
         std::wstring fb = root + L"ZJRESTORE-logs";
         if (GetFileAttributesW(fb.c_str()) != INVALID_FILE_ATTRIBUTES) {
             RemoveTreeAny(fb);
@@ -1325,7 +1385,8 @@ int CleanupStrayLogs() {
     }
     // ESP：清 \EFI\ZJRESTORE\logs\*（救援模块本身保留）
     std::string log;
-    std::wstring esp = sysrecover::MountEsp(log);
+    std::wstring esp = keepEvidence ? std::wstring()
+                                    : sysrecover::MountEsp(log);
     if (!esp.empty()) {
         for (const wchar_t* nm :
              {L"ZJRESTORE-last.log", L"ZJRESTORE-probe.txt",
