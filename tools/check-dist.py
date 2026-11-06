@@ -41,6 +41,27 @@ REQUIRED = [
 ]
 
 
+# dist/bootfiles 里这些资产必须与仓库 bootfiles/ 逐字节一致。
+# 背景（N10，2026-11-06 实机事故）：`make all` 只重建 exe，不刷新 dist 资源，
+# 于是 dist 里装的是 11-02 的旧救援载荷（zjswap.sh 旧措辞 + 旧 initramfs），
+# 实机“解压并安装”因此复现 SetupCl 0x8007139F 死循环。只跑 all 后直接装机 = 拿旧代码验新版。
+MIRRORED_FROM_BOOTFILES = [
+    "bootfiles/vmlinuz-zjrestore",
+    "bootfiles/initramfs-zjrestore.cpio.gz",
+    "bootfiles/zjrestore-lite.sh",
+    "bootfiles/zjlog.sh",
+    "bootfiles/zj-ea-apply.exe",
+    "bootfiles/zj-restore-boot.exe",
+    "bootfiles/mbr-boot-code.bin",
+    "bootfiles/ntfs-boot-code.bin",
+    "bootfiles/ntfs-boot-cont.bin",
+    "bootfiles/bcd/bios.bcd",
+    "bootfiles/bcd/uefi.bcd",
+    "bootfiles/grldr",
+    "bootfiles/grldr.mbr",
+]
+
+
 def sha256(p: Path) -> str:
     h = hashlib.sha256()
     with p.open("rb") as f:
@@ -58,6 +79,14 @@ def main() -> int:
     for rel in REQUIRED:
         if not (dist / rel).is_file():
             bad.append("missing " + rel)
+    # C6：dist 救援资产必须与仓库源逐字节一致（否则装机验的是旧代码）
+    for rel in MIRRORED_FROM_BOOTFILES:
+        src = ROOT / rel
+        dst = dist / rel
+        if not src.is_file() or not dst.is_file():
+            continue
+        if sha256(dst) != sha256(src):
+            bad.append("stale dist payload (need `make package`, not `make all`): " + rel)
     vh = (ROOT / "src" / "common" / "version.h").read_text(encoding="utf-8")
     m = re.search(r'SYSRECOVER_VERSION\s+"([^"]+)"', vh)
     want = m.group(1) if m else ""
