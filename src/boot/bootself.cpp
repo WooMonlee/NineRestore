@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "../common/i18n.h"  // W2U（日志里的路径转 UTF-8）
 #include "../common/process.h"
 
 namespace sysrecover {
@@ -32,17 +33,6 @@ constexpr DWORD kBootSectorBytes = 512;
 constexpr DWORD kBootCodeBytes = 4096;
 // BCD 文件/模板的最小合理长度（低于此值视为损坏/空文件，不拿来用）。
 constexpr size_t kMinBcdFileBytes = 4096;
-
-std::string A(const std::wstring& w) {
-    if (w.empty()) return {};
-    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr,
-                                nullptr);
-    std::string s(n > 0 ? n - 1 : 0, 0);
-    if (n > 0)
-        WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, s.data(), n, nullptr,
-                            nullptr);
-    return s;
-}
 
 bool Exists(const std::wstring& p) {
     return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES;
@@ -101,7 +91,7 @@ bool CopyForce(const std::wstring& src, const std::wstring& dst,
                std::string& log) {
     SetFileAttributesW(dst.c_str(), FILE_ATTRIBUTE_NORMAL);
     if (CopyFileW(src.c_str(), dst.c_str(), FALSE)) return true;
-    log += "copy FAIL " + A(src) + " -> " + A(dst) + " (err=" +
+    log += "copy FAIL " + W2U(src) + " -> " + W2U(dst) + " (err=" +
            std::to_string(GetLastError()) + ")\n";
     return false;
 }
@@ -163,7 +153,7 @@ bool CopyChildDirs(const std::wstring& src, const std::wstring& dst,
 bool CopySoftFile(const std::wstring& src, const std::wstring& dst,
                   std::string& log) {
     if (!Exists(src)) {
-        log += "soft: missing " + A(src) + "\n";
+        log += "soft: missing " + W2U(src) + "\n";
         return false;
     }
     EnsureDirTree(dst.substr(0, dst.find_last_of(L'\\')));
@@ -391,7 +381,7 @@ bool IsNtfsVolume(const std::wstring& volRoot, std::string& detail) {    std::ws
                            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                            OPEN_EXISTING, 0, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
-        detail = "open " + A(dev) + " failed err=" +
+        detail = "open " + W2U(dev) + " failed err=" +
                  std::to_string(GetLastError());
         return false;
     }
@@ -472,7 +462,7 @@ bool EnsureNtfsBootRegion(const std::wstring& volRoot,
                            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                            OPEN_EXISTING, 0, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
-        log += "pbr: open " + A(dev) + " for write failed err=" +
+        log += "pbr: open " + W2U(dev) + " for write failed err=" +
                std::to_string(GetLastError()) + "\n";
         return false;
     }
@@ -632,7 +622,7 @@ bool GetVolumeGuidRaw(const std::wstring& volRoot, unsigned char out[16],
                            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                            OPEN_EXISTING, 0, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
-        log += "guid: open " + A(dev) + " failed err=" +
+        log += "guid: open " + W2U(dev) + " failed err=" +
                std::to_string(GetLastError()) + "\n";
         return false;
     }
@@ -670,7 +660,7 @@ bool StageBiosBootTree(const std::wstring& destRoot, const std::wstring& winDir,
         const std::wstring cands[] = {winDir + L"\\Boot\\PCAT\\bootmgr"};
         for (const auto& c : cands) {
             if (Exists(c) && CopyForce(c, dstBootmgr, log)) {
-                log += "bios: bootmgr <- " + A(c) + "\n";
+                log += "bios: bootmgr <- " + W2U(c) + "\n";
                 got = true;
                 break;
             }
@@ -681,13 +671,13 @@ bool StageBiosBootTree(const std::wstring& destRoot, const std::wstring& winDir,
             if (GetWindowsDirectoryW(wd, MAX_PATH)) {
                 std::wstring host = std::wstring(wd) + L"\\Boot\\PCAT\\bootmgr";
                 if (Exists(host) && CopyForce(host, dstBootmgr, log)) {
-                    log += "bios: bootmgr <- host " + A(host) + "\n";
+                    log += "bios: bootmgr <- host " + W2U(host) + "\n";
                     got = true;
                 }
                 if (!got) {
                     std::wstring hb = std::wstring(wd, 3) + L"bootmgr";
                     if (Exists(hb) && CopyForce(hb, dstBootmgr, log)) {
-                        log += "bios: bootmgr <- host feed " + A(hb) + "\n";
+                        log += "bios: bootmgr <- host feed " + W2U(hb) + "\n";
                         got = true;
                     }
                 }
@@ -721,7 +711,7 @@ bool StageBiosBootTree(const std::wstring& destRoot, const std::wstring& winDir,
                 ok = false;
             }
         } else {
-            log += "bios: template missing: " + A(tplPath) + "\n";
+            log += "bios: template missing: " + W2U(tplPath) + "\n";
             err = "bios.bcd template missing from bootfiles\\bcd";
             ok = false;
         }
@@ -842,7 +832,7 @@ bool EnsureUefiBootFiles(const std::wstring& espRoot,
             cands.push_back(hostWd + L"\\Boot\\EFI\\bootmgfw.efi");
         for (const auto& c : cands) {
             if (Exists(c) && CopyForce(c, dstMgfw, log)) {
-                log += "uefi: bootmgfw.efi <- " + A(c) + "\n";
+                log += "uefi: bootmgfw.efi <- " + W2U(c) + "\n";
                 got = true;
                 break;
             }
@@ -894,7 +884,7 @@ bool EnsureUefiBootFiles(const std::wstring& espRoot,
         std::vector<unsigned char> tpl;
         const std::wstring tplPath = exeDir + L"\\bootfiles\\bcd\\uefi.bcd";
         if (!ReadAll(tplPath, tpl, 1 << 20) || tpl.size() < kMinBcdFileBytes) {
-            log += "uefi: template missing: " + A(tplPath) + "\n";
+            log += "uefi: template missing: " + W2U(tplPath) + "\n";
             err = "uefi.bcd template missing from bootfiles\\bcd";
             ok = false;
         } else {
