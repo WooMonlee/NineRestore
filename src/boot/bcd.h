@@ -135,6 +135,60 @@ std::string BcdGetBootsequence(std::string& log);
 // 备份 BCD（bcdedit /export），失败不致命。
 bool BcdExport(const std::wstring& backupPath);
 
+// 解析 `bcdedit /enum {current}` 里是否还有 safeboot 元素。
+// 元素名是 ASCII（safeboot / bootsequence 同族），值 Minimal/Network/...
+// 也不随系统语言变化；所以只认「首 token == safeboot 且第二 token 非空」。
+inline bool ParseSafeBootSet(const std::string& out) {
+    size_t pos = 0;
+    for (;;) {
+        size_t eol = out.find_first_of("\r\n", pos);
+        if (eol == std::string::npos) eol = out.size();
+        size_t a = pos;
+        while (a < eol && (out[a] == ' ' || out[a] == '\t')) ++a;
+        size_t b = a;
+        while (b < eol && out[b] != ' ' && out[b] != '\t') ++b;
+        std::string key = out.substr(a, b - a);
+        for (size_t i = 0; i < key.size(); ++i)
+            key[i] = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(key[i])));
+        if (key == "safeboot") {
+            size_t c = b;
+            while (c < eol && (out[c] == ' ' || out[c] == '\t')) ++c;
+            return c < eol;  // 有值 = 置位（Minimal/Network/AlternateShell）
+        }
+        if (eol >= out.size()) break;
+        pos = eol + 1;
+    }
+    return false;
+}
+
+// 安全模式开关（「日志」按钮的诊断动作）。2026-11-06 改为**一次性语义**：
+//   · 设置前先武装「下一次登录自动清除」（登录计划任务，SYSTEM + 最高权限），
+//     用户即使不再打开本程序，也会自动退出安全模式（见 BcdSetSafeBootOnce）；
+//   · 武装失败 → 拒绝设置（宁可不进，也不把用户锁在安全模式里）；
+//   · BcdSetSafeBoot 是底层原语：写后读回校验，清除方向幂等（本来没有也算成功）。
+enum class SafeBootState { None, Minimal, Unknown };
+
+// 读 `bcdedit /enum {current}` 判断 safeboot 是否被置位。
+// Unknown = bcdedit 执行失败（判定不了，调用方应按"可能置位"提示）。
+SafeBootState BcdGetSafeBootState(std::string& log);
+
+// 写/清 safeboot（带读回校验）；清除幂等。原文追加进 log。
+bool BcdSetSafeBoot(bool enable, std::string& log);
+
+// 一次性语义：true = 武装自动退出后设置；false = 清除并撤销自动退出。
+bool BcdSetSafeBootOnce(bool enable, std::string& log);
+
+// 武装/撤销「下一次登录自动清除 safeboot」的任务（幂等）。
+bool BcdArmSafeBootAutoExit(std::string& log);
+bool BcdDisarmSafeBootAutoExit(std::string& log);
+
+// 测试注入点（仅单元测试）：替换真实进程调用，夹具可模拟 bcdedit/schtasks。
+// 传 nullptr 恢复真实调用。生产代码从不调用。
+using BcdToolRunner = int (*)(const std::wstring& exe, const std::wstring& args,
+                              std::string& out);
+void BcdSetToolRunnerForTest(BcdToolRunner fn);
+
 // ── 任意 BCD 存储（/store）的操作：产物断言与死条目清理（PIT-209）──────
 // UEFI 的库是 <ESP>\EFI\Microsoft\Boot\BCD；BIOS 的库是 <目标>:\Boot\BCD。
 // 注意：不指定 /store 时 bcdedit 操作的是**正在运行的系统**的库 —— 在 PE 里

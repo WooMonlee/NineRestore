@@ -191,12 +191,14 @@ private:
     void OnMenuDone(int rc, bool install);  // worker 完成回主线程（WM_MENU_DONE）
     void RefreshBootMenuBtn();   // 按是否已安装刷新按钮文字
     // 「日志」按钮（2026-10-03 用户规格）：一键收集 各盘日志 + explorer 转储 +
-    // 事件日志 → 打包到桌面。
+    // 事件日志 → 打包到桌面；结果框里顺便提供「进入/退出安全模式」。
     void ExportSupportFlow();
     void OnSupportDone(sysrecover::SupportBundle* r);
     // 启动时（收集完 diag/list/痕迹后）检查救援层失败回执（用户 2026-10-04
     // 规格 2）：有未报告的失败 → 弹 3 行提示，「打开日志文件夹」直达 collected。
     void ShowRescueFailureNotice();  // P3（PIT-148）：A/B 类失败 → Ask3 + 一键重试
+    // 启动兜底：safeboot 仍被置位（上一轮进了安全模式且自动退出没跑成）。
+    void ShowSafeBootExitNotice();
     // 启动兜底：装了常驻菜单、但重启后没有任何新回执 → "菜单未被引导执行"。
     void ShowMenuRescueNotice();
     void StartRetryStagedRestore();  // 一键重试 worker 入口（读 conf → StageRestore）
