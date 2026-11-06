@@ -114,6 +114,14 @@ private:
     void HandleDroppedFiles(WPARAM wParam);  // WM_DROPFILES：拖入的镜像填进第一步
     void LoadWimImages(const std::wstring& path);
     void StartRestore();   // UI 校验 + 确认 → StartRestoreAsync
+    // StartRestore 里的两段确认框（拆出以便阅读；文案/行为不变）。
+    // 返回 false = 用户取消；选项结果直接写进下面的 m_* 成员。
+    bool AskRebootRestoreConfirm(const sysrecover::PartitionInfo& part,
+                                 bool universal,
+                                 const std::wstring& bootNote);
+    bool AskInPlaceRestoreConfirm(const sysrecover::PartitionInfo& part,
+                                  const std::wstring& logNote,
+                                  const std::wstring& bootNote);
     void StartBackup();    // UI 校验 + 确认 → StartBackupAsync
     // 增量备份（2026-10-28 用户规格，docs/31）：入口在「更多功能>>」，
     // 把当前分区的新状态作为**新时间点追加**到已存在的 .wim/.esd（同文件多快照）。

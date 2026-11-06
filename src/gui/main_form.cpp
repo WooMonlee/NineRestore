@@ -2616,6 +2616,52 @@ void CMainForm::ApplyCpuCapFromUi() {
 
 // ────────────────── 还原（UI 校验 + worker 线程暂存） ──────────────────
 
+namespace {
+
+// 确认框里「还原日志将放到 X: 盘」的提示：只有程序自身在目标盘或只读盘上时才需要提。
+// （用户 2026-09-23：合并进确认框，不再单独弹第二个 MessageBox。）
+std::wstring RestoreLogNote(const PartitionInfo& part) {
+    std::wstring ed = ExeDir();
+    wchar_t exL = ed.empty() ? 0 : ed[0];
+    wchar_t tgL = part.letter.empty() ? 0 : part.letter[0];
+    wchar_t exRoot[4] = {exL, L':', L'\\', 0};
+    const bool onTarget = exL && tgL && towupper(exL) == towupper(tgL);
+    const bool fixedDisk = exL && GetDriveTypeW(exRoot) == DRIVE_FIXED;
+    if (!onTarget && fixedDisk) return std::wstring();
+    std::wstring dd = FindDataDrive();
+    LogInfo("logs will be placed on data drive (exe dir is target/read-only)");
+    return dd.empty() ? std::wstring()
+                      : (Tr(L"（还原日志将放到 ") + dd.substr(0, 1) + Tr(L": 盘）"));
+}
+
+// 启动方式与目标盘风格不一致时的提示行（只提示、不阻止 —— 用户明确要求保留选择权）。
+std::wstring RestoreBootModeNote(bool sessionUefi, bool targetGpt) {
+    if (!sessionUefi && targetGpt)
+        return Tr(L"当前恢复环境以 Legacy 方式启动、目标盘为 GPT："
+                  L"还原后请在 BIOS 中改为 UEFI 启动；若启动菜单里没有 "
+                  L"Windows，用「修复引导」。");
+    if (sessionUefi && !targetGpt)
+        return Tr(L"当前恢复环境以 UEFI 方式启动、目标盘为 MBR："
+                  L"还原后请在 BIOS 中改为 Legacy/CSM 启动。");
+    return std::wstring();
+}
+
+// PIT-211：机器名 = W<大版本><厂家><YYMMDDHHMMSS>
+std::wstring MakeRestoreComputerName(const PartitionInfo& part) {
+    std::wstring vendor;
+    LocalBootMenuKey(&vendor);
+    int major = WindowsMajorOfDir(
+        (part.letter.empty() ? std::wstring(L"C") : part.letter.substr(0, 1)) +
+        L":\\Windows");
+    if (major == 0) major = 10;
+    SYSTEMTIME nowSt = {};
+    GetLocalTime(&nowSt);
+    return MakeComputerName(vendor, major, nowSt.wYear, nowSt.wMonth, nowSt.wDay,
+                            nowSt.wHour, nowSt.wMinute, nowSt.wSecond);
+}
+
+}  // namespace
+
 void CMainForm::StartRestore() {
     if (m_wimPath.empty()) { SetStatus(Tr(L"请先选择镜像文件")); return; }
     if (m_selPart < 0 || m_selPart >= (int)m_parts.size()) {
@@ -2641,224 +2687,22 @@ void CMainForm::StartRestore() {
     // 非静默模式：需重启时弹三选（取消/还原后重启/重启后还原）；就地还原仍二选。
     // 静默模式：不弹框，直接暂存并重启（静默默认 = 还原后重启 / keepOld=false）。
     if (!IsSilent()) {
+        std::string why;
+        InPlaceReason whyReason = INPLACE_OK;
+        const bool needReboot = !CanRestoreInPlace(part, why, &whyReason);
         // 提示文案必须与**真实行为**一致（PIT-072）：PE 里 / 还原到非系统盘走的是
         // "就地还原、不重启"，以前这里一律写"重启后还原"，用户 2026-09-21 在 PE 里
         // 实测被误导。判断复用 ops 层同一个函数（CanRestoreInPlace），两边不漂移。
-        std::string why;
-        InPlaceReason whyReason = INPLACE_OK;
-        bool needReboot = !CanRestoreInPlace(part, why, &whyReason);
-        // 日志落点：（用户 2026-09-23）**合并进本确认框**，不要再弹第二个 MessageBox。
-        // 只在"程序在目标盘或只读盘上"时才需要提这一句。
-        std::wstring logNote;
-        {
-            std::wstring ed = ExeDir();
-            wchar_t exL = ed.empty() ? 0 : ed[0];
-            wchar_t tgL = part.letter.empty() ? 0 : part.letter[0];
-            wchar_t exRoot[4] = {exL, L':', L'\\', 0};
-            bool onTarget = exL && tgL && towupper(exL) == towupper(tgL);
-            bool fixedDisk = exL && GetDriveTypeW(exRoot) == DRIVE_FIXED;
-            if (onTarget || !fixedDisk) {
-                std::wstring dd = FindDataDrive();
-                logNote = dd.empty() ? std::wstring()
-                                     : (Tr(L"（还原日志将放到 ") + dd.substr(0, 1) + Tr(L": 盘）"));
-                LogInfo("logs will be placed on data drive (exe dir is target/"
-                        "read-only)");
-            }
-        }
-        wchar_t confirm[1200];
-        // 2026-10-20：启动方式与目标盘风格不一致时，在确认框里追加一行提示
-        // （只提示、不阻止 —— 用户明确要求保留选择权；具体文案见下）。
-        std::wstring bootNote;
-        {
-            const bool sessionUefi = sysrecover::IsUefiBootSession();
-            const bool targetGpt =
-                m_selPart >= 0 && m_selPart < (int)m_partStyles.size() &&
-                m_partStyles[m_selPart] == sysrecover::PartitionStyle::GPT;
-            if (!sessionUefi && targetGpt)
-                bootNote = Tr(L"当前恢复环境以 Legacy 方式启动、目标盘为 GPT："
-                              L"还原后请在 BIOS 中改为 UEFI 启动；若启动菜单里没有 "
-                              L"Windows，用「修复引导」。");
-            else if (sessionUefi && !targetGpt)
-                bootNote = Tr(L"当前恢复环境以 UEFI 方式启动、目标盘为 MBR："
-                              L"还原后请在 BIOS 中改为 Legacy/CSM 启动。");
-        }
-        // 2026-10-14 用户规格：确认框三选 —— 取消 / 还原后重启 / 重启后还原。
-        // 还原后重启 = A 引擎（Windows 解压 + Linux 交换），可返回旧系统；
-        // 重启后还原 = B 引擎（Linux 直写），C 盘内容全丢。
-        // 文案按用户给定原文（Ask3 恰好 3 行）；盘符/分区号沿用现有格式化惯例。
+        const std::wstring logNote = RestoreLogNote(part);
+        const bool sessionUefi = IsUefiBootSession();
+        const bool targetGpt =
+            m_selPart >= 0 && m_selPart < (int)m_partStyles.size() &&
+            m_partStyles[m_selPart] == PartitionStyle::GPT;
+        const std::wstring bootNote = RestoreBootModeNote(sessionUefi, targetGpt);
         if (needReboot) {
-            // 2026-10-19（1019 案 W3）：第 4 行前移特殊镜像提示 —— 含 EFS 加密
-            // 文件/特殊重解析点的镜像走「重启后还原」会被暂存预检拒绝（W1/W2），
-            // 在选择时刻就告诉用户该选哪个（CConfirmDlg 已扩到 4 行）。
-            // 2026-10-20（用户规格）：空间不足时，开始前就显示「需要/可用」，
-            // 并把「还原后重启」按钮变成红色「空间不足」且不可点；空间够则
-            // 与以前完全一样（不追加提示）。默认回车落在「取消」（安全项）。
-            sysrecover::SwapSpaceEstimate se{};
-            bool spaceShort = false;
-            if (sysrecover::QuerySwapSpace(m_wimPath, m_selImageIndex, part,
-                                           se) &&
-                se.freeBytes > 0 && !se.enough) {
-                spaceShort = true;
-                LogWarn("A-engine space short: need=" +
-                        std::to_string(se.required) + " free=" +
-                        std::to_string(se.freeBytes) +
-                        " (mid button disabled)");
-            }
-            if (sysrecover::ImageIsEncrypted(m_wimPath))
-                swprintf(confirm, 1200,
-                         Tr(L"即将把镜像还原到 %ls: 盘（磁盘%u 分区%u）。\n"
-                            L"还原后重启，是解压镜像后重启修复引导，可以恢复到现在状态\n"
-                            L"重启后还原，是重启格式化%ls: 盘后还原镜像，无法恢复现在状态\n"
-                            L"加密镜像：重启后还原需要输入密码"),
-                         part.letter.empty() ? L"?" : part.letter.c_str(),
-                         part.diskIndex, part.partNumber,
-                         part.letter.empty() ? L"?" : part.letter.c_str());
-            else
-                swprintf(confirm, 1200,
-                         Tr(L"即将把镜像还原到 %ls: 盘（磁盘%u 分区%u）。\n"
-                            L"还原后重启，是解压镜像后重启修复引导，可以恢复到现在状态\n"
-                            L"重启后还原，是重启格式化%ls: 盘后还原镜像，无法恢复现在状态\n"
-                            L"含 EFS 加密文件或特殊重解析点的镜像，请选「还原后重启」"),
-                         part.letter.empty() ? L"?" : part.letter.c_str(),
-                         part.diskIndex, part.partNumber,
-                         part.letter.empty() ? L"?" : part.letter.c_str());
-            if (spaceShort) {
-                wchar_t sp[192];
-                swprintf(sp, 192,
-                         Tr(L"A 引擎需要约 %.1f GB 可用空间，当前 %.1f GB"
-                            "（已禁用）"),
-                         se.required / 1073741824.0,
-                         se.freeBytes / 1073741824.0);
-                wcscat(confirm, L"\n");
-                wcscat(confirm, sp);
-            }
-            // 2026-10-30：异机还原只能在 Windows 侧注入驱动 → 「重启后还原」
-            // （B 引擎）直接置灰并说明，不再让用户点完再弹"请去 PE"。
-            if (universal) {
-                wcscat(confirm, L"\n");
-                wcscat(confirm,
-                       Tr(L"异机还原需要在 Windows 侧注入启动驱动：只能选「还原后重启」"
-                          L"（不需要 PE）"));
-            }
-            // PIT-211：机器名 = W<大版本><厂家><YYMMDDHHMMSS>
-            std::wstring vendor;
-            sysrecover::LocalBootMenuKey(&vendor);
-            int major = sysrecover::WindowsMajorOfDir(
-                (part.letter.empty() ? std::wstring(L"C")
-                                     : part.letter.substr(0, 1)) +
-                L":\\Windows");
-            if (major == 0) major = 10;
-            SYSTEMTIME nowSt = {};
-            GetLocalTime(&nowSt);
-            const std::wstring newName = sysrecover::MakeComputerName(
-                vendor, major, nowSt.wYear, nowSt.wMonth, nowSt.wDay,
-                nowSt.wHour, nowSt.wMinute, nowSt.wSecond);
-            ConfirmOptions opt;
-            opt.showFormatSwap = true;
-            {
-                // 目标分区"没被占用"才谈得上格式化（PE / 非系统盘）。
-                std::string fwhy;
-                InPlaceReason freason = INPLACE_OK;
-                opt.formatSwapEnabled =
-                    sysrecover::CanRestoreInPlace(part, fwhy, &freason);
-            }
-            opt.formatSwap = opt.formatSwapEnabled;
-            opt.showFormatBlock = true;
-            opt.formatBlock = true;
-            opt.showRename = true;
-            opt.rename = false;
-            opt.renameLabel = Tr(L"改机器名：") + newName;
-            if (!bootNote.empty()) {
-                wcscat(confirm, L"\n");
-                wcscat(confirm, bootNote.c_str());
-            }
-            int r = CConfirmDlg::Ask3(
-                m_hWnd, Tr(L"确认还原"), confirm, Tr(L"取消"),
-                spaceShort ? Tr(L"空间不足") : Tr(L"还原后重启"),
-                Tr(L"重启后还原"), /*defaultIdx=*/spaceShort ? 0 : 1,
-                /*midDisabled=*/spaceShort, /*escIdx=*/0,
-                /*centerTitle=*/false, /*rightDisabled=*/universal,
-                &opt);
-            if (r == 0) return;  // 取消
-            m_formatSwap = opt.formatSwap;
-            m_targetMode = opt.formatBlock ? "format" : "keep";
-            m_computerName = opt.rename ? newName : std::wstring();
-            if (r == 2 && universal) {
-                // 双保险（按钮已禁用，正常走不到这里）
-                MessageBoxW(m_hWnd,
-                            Tr(L"异机还原需要在 Windows 侧注入启动驱动，"
-                               L"只能选「还原后重启」——不需要进 PE。"),
-                            Tr(L"异机还原"), MB_OK | MB_ICONWARNING);
-                return;
-            }
-            if (r == 1) {        // 还原后重启：A 引擎 swap + keepOld
-                m_restoreEngine  = "swap";
-                m_restoreKeepOld = true;
-            } else {             // 重启后还原：B 引擎 block，内容全丢
-                m_restoreEngine  = "block";
-                m_restoreKeepOld = false;
-            }
+            if (!AskRebootRestoreConfirm(part, universal, bootNote)) return;
         } else {
-            swprintf(confirm, 1200,
-                     Tr(L"即将把镜像还原到 %ls: 盘（磁盘%u 分区%u）。\n"
-                        L"该分区上的所有数据将丢失！%ls\n"
-                        L"目标分区当前未被占用，将立即就地还原，不需要重启。"),
-                     part.letter.empty() ? L"?" : part.letter.c_str(),
-                     part.diskIndex, part.partNumber, logNote.c_str());
-            if (!bootNote.empty()) {
-                wcscat(confirm, L"\n");
-                wcscat(confirm, bootNote.c_str());
-            }
-            std::wstring vendor2;
-            sysrecover::LocalBootMenuKey(&vendor2);
-            int major2 = sysrecover::WindowsMajorOfDir(
-                (part.letter.empty() ? std::wstring(L"C")
-                                     : part.letter.substr(0, 1)) +
-                L":\\Windows");
-            if (major2 == 0) major2 = 10;
-            SYSTEMTIME nowSt2 = {};
-            GetLocalTime(&nowSt2);
-            const std::wstring newName2 = sysrecover::MakeComputerName(
-                vendor2, major2, nowSt2.wYear, nowSt2.wMonth, nowSt2.wDay,
-                nowSt2.wHour, nowSt2.wMinute, nowSt2.wSecond);
-            ConfirmOptions opt2;
-            // PIT-214（用户 2026-11-03）：格式化是**可选项**，默认勾选；
-            // 取消后保留文件系统、只清空内容（不是"保留旧文件"）。
-            // PIT-216：保留旧系统（旧系统移到 ~old，可「返回旧系统」）——
-            // 空间按"镜像内容 + 余量"估；不够就置灰。
-            {
-                sysrecover::SwapSpaceEstimate se2{};
-                const bool spaceOk2 =
-                    sysrecover::QuerySwapSpace(m_wimPath, m_selImageIndex, part,
-                                               se2) &&
-                    se2.enough;
-                opt2.showPreserveOld = true;
-                opt2.preserveOldEnabled = spaceOk2;
-                opt2.preserveOld = false;
-                opt2.preserveOldLabel = spaceOk2
-                    ? Tr(L"保留旧系统（移到 ~old，可返回旧系统）")
-                    : Tr(L"保留旧系统（空间不足，已禁用）");
-            }
-            opt2.showFormatBlock = true;
-            opt2.formatBlockLabel =
-                Tr(L"格式化目标分区（取消则保留文件系统、仅清空内容）");
-            opt2.formatBlockEnabled = true;
-            opt2.formatBlock = true;
-            opt2.showRename = true;
-            opt2.rename = false;
-            opt2.renameLabel = Tr(L"改机器名：") + newName2;
-            if (CConfirmDlg::Ask2(m_hWnd, Tr(L"确认还原"), confirm, Tr(L"取消"),
-                                  Tr(L"开始还原"), /*defaultIsRight=*/true,
-                                  Tr(L"丢失！"), &opt2) != 1)
-                return;
-            m_formatSwap = false;
-            m_formatTarget = opt2.formatBlock;
-            m_preserveOld = opt2.preserveOld;
-            if (m_preserveOld) m_formatTarget = false;  // 保留旧系统时不做格式化
-            m_computerName = opt2.rename ? newName2 : std::wstring();
-            // 就地还原不走交换，引擎无意义但保持默认 swap（StageRestore 内部按需处理）
-            m_restoreEngine  = "swap";
-            m_restoreKeepOld = false;
+            if (!AskInPlaceRestoreConfirm(part, logNote, bootNote)) return;
         }
     }
     // （日志落点的提示已**合并进上面的确认框**，不再单独弹窗 —— 用户 2026-09-23
@@ -2879,6 +2723,173 @@ void CMainForm::StartRestore() {
         SetStatus(Tr(L"线程创建失败"));
         MessageBoxW(m_hWnd, Tr(L"无法创建工作线程，请重试"), Tr(L"错误"), MB_OK | MB_ICONERROR);
     }
+}
+
+
+// 需要重启时的三选确认（A 引擎「还原后重启」/ B 引擎「重启后还原」）。
+// 返回 false = 用户取消；选项写进 m_* 成员。
+bool CMainForm::AskRebootRestoreConfirm(const PartitionInfo& part,
+                                        bool universal,
+                                        const std::wstring& bootNote) {
+    wchar_t confirm[1200];
+    // 2026-10-19（1019 案 W3）：第 4 行前移特殊镜像提示 —— 含 EFS 加密
+    // 文件/特殊重解析点的镜像走「重启后还原」会被暂存预检拒绝（W1/W2），
+    // 在选择时刻就告诉用户该选哪个（CConfirmDlg 已扩到 4 行）。
+    // 2026-10-20（用户规格）：空间不足时，开始前就显示「需要/可用」，
+    // 并把「还原后重启」按钮变成红色「空间不足」且不可点；空间够则
+    // 与以前完全一样（不追加提示）。默认回车落在「取消」（安全项）。
+    sysrecover::SwapSpaceEstimate se{};
+    bool spaceShort = false;
+    if (sysrecover::QuerySwapSpace(m_wimPath, m_selImageIndex, part,
+                                   se) &&
+        se.freeBytes > 0 && !se.enough) {
+        spaceShort = true;
+        LogWarn("A-engine space short: need=" +
+                std::to_string(se.required) + " free=" +
+                std::to_string(se.freeBytes) +
+                " (mid button disabled)");
+    }
+    if (sysrecover::ImageIsEncrypted(m_wimPath))
+        swprintf(confirm, 1200,
+                 Tr(L"即将把镜像还原到 %ls: 盘（磁盘%u 分区%u）。\n"
+                    L"还原后重启，是解压镜像后重启修复引导，可以恢复到现在状态\n"
+                    L"重启后还原，是重启格式化%ls: 盘后还原镜像，无法恢复现在状态\n"
+                    L"加密镜像：重启后还原需要输入密码"),
+                 part.letter.empty() ? L"?" : part.letter.c_str(),
+                 part.diskIndex, part.partNumber,
+                 part.letter.empty() ? L"?" : part.letter.c_str());
+    else
+        swprintf(confirm, 1200,
+                 Tr(L"即将把镜像还原到 %ls: 盘（磁盘%u 分区%u）。\n"
+                    L"还原后重启，是解压镜像后重启修复引导，可以恢复到现在状态\n"
+                    L"重启后还原，是重启格式化%ls: 盘后还原镜像，无法恢复现在状态\n"
+                    L"含 EFS 加密文件或特殊重解析点的镜像，请选「还原后重启」"),
+                 part.letter.empty() ? L"?" : part.letter.c_str(),
+                 part.diskIndex, part.partNumber,
+                 part.letter.empty() ? L"?" : part.letter.c_str());
+    if (spaceShort) {
+        wchar_t sp[192];
+        swprintf(sp, 192,
+                 Tr(L"A 引擎需要约 %.1f GB 可用空间，当前 %.1f GB"
+                    "（已禁用）"),
+                 se.required / 1073741824.0,
+                 se.freeBytes / 1073741824.0);
+        wcscat(confirm, L"\n");
+        wcscat(confirm, sp);
+    }
+    // 2026-10-30：异机还原只能在 Windows 侧注入驱动 → 「重启后还原」
+    // （B 引擎）直接置灰并说明，不再让用户点完再弹"请去 PE"。
+    if (universal) {
+        wcscat(confirm, L"\n");
+        wcscat(confirm,
+               Tr(L"异机还原需要在 Windows 侧注入启动驱动：只能选「还原后重启」"
+                  L"（不需要 PE）"));
+    }
+    // PIT-211：机器名 = W<大版本><厂家><YYMMDDHHMMSS>
+    const std::wstring newName = MakeRestoreComputerName(part);
+    ConfirmOptions opt;
+    opt.showFormatSwap = true;
+    {
+        // 目标分区"没被占用"才谈得上格式化（PE / 非系统盘）。
+        std::string fwhy;
+        InPlaceReason freason = INPLACE_OK;
+        opt.formatSwapEnabled =
+            sysrecover::CanRestoreInPlace(part, fwhy, &freason);
+    }
+    opt.formatSwap = opt.formatSwapEnabled;
+    opt.showFormatBlock = true;
+    opt.formatBlock = true;
+    opt.showRename = true;
+    opt.rename = false;
+    opt.renameLabel = Tr(L"改机器名：") + newName;
+    if (!bootNote.empty()) {
+        wcscat(confirm, L"\n");
+        wcscat(confirm, bootNote.c_str());
+    }
+    int r = CConfirmDlg::Ask3(
+        m_hWnd, Tr(L"确认还原"), confirm, Tr(L"取消"),
+        spaceShort ? Tr(L"空间不足") : Tr(L"还原后重启"),
+        Tr(L"重启后还原"), /*defaultIdx=*/spaceShort ? 0 : 1,
+        /*midDisabled=*/spaceShort, /*escIdx=*/0,
+        /*centerTitle=*/false, /*rightDisabled=*/universal,
+        &opt);
+    if (r == 0) return false;  // 取消
+    m_formatSwap = opt.formatSwap;
+    m_targetMode = opt.formatBlock ? "format" : "keep";
+    m_computerName = opt.rename ? newName : std::wstring();
+    if (r == 2 && universal) {
+        // 双保险（按钮已禁用，正常走不到这里）
+        MessageBoxW(m_hWnd,
+                    Tr(L"异机还原需要在 Windows 侧注入启动驱动，"
+                       L"只能选「还原后重启」——不需要进 PE。"),
+                    Tr(L"异机还原"), MB_OK | MB_ICONWARNING);
+        return false;
+    }
+    if (r == 1) {        // 还原后重启：A 引擎 swap + keepOld
+        m_restoreEngine  = "swap";
+        m_restoreKeepOld = true;
+    } else {             // 重启后还原：B 引擎 block，内容全丢
+        m_restoreEngine  = "block";
+        m_restoreKeepOld = false;
+    }
+    return true;
+}
+
+// 就地还原的二选确认。返回 false = 用户取消。
+bool CMainForm::AskInPlaceRestoreConfirm(const PartitionInfo& part,
+                                         const std::wstring& logNote,
+                                         const std::wstring& bootNote) {
+    wchar_t confirm[1200];
+    swprintf(confirm, 1200,
+             Tr(L"即将把镜像还原到 %ls: 盘（磁盘%u 分区%u）。\n"
+                L"该分区上的所有数据将丢失！%ls\n"
+                L"目标分区当前未被占用，将立即就地还原，不需要重启。"),
+             part.letter.empty() ? L"?" : part.letter.c_str(),
+             part.diskIndex, part.partNumber, logNote.c_str());
+    if (!bootNote.empty()) {
+        wcscat(confirm, L"\n");
+        wcscat(confirm, bootNote.c_str());
+    }
+    const std::wstring newName2 = MakeRestoreComputerName(part);
+    ConfirmOptions opt2;
+    // PIT-214（用户 2026-11-03）：格式化是**可选项**，默认勾选；
+    // 取消后保留文件系统、只清空内容（不是"保留旧文件"）。
+    // PIT-216：保留旧系统（旧系统移到 ~old，可「返回旧系统」）——
+    // 空间按"镜像内容 + 余量"估；不够就置灰。
+    {
+        sysrecover::SwapSpaceEstimate se2{};
+        const bool spaceOk2 =
+            sysrecover::QuerySwapSpace(m_wimPath, m_selImageIndex, part,
+                                       se2) &&
+            se2.enough;
+        opt2.showPreserveOld = true;
+        opt2.preserveOldEnabled = spaceOk2;
+        opt2.preserveOld = false;
+        opt2.preserveOldLabel = spaceOk2
+            ? Tr(L"保留旧系统（移到 ~old，可返回旧系统）")
+            : Tr(L"保留旧系统（空间不足，已禁用）");
+    }
+    opt2.showFormatBlock = true;
+    opt2.formatBlockLabel =
+        Tr(L"格式化目标分区（取消则保留文件系统、仅清空内容）");
+    opt2.formatBlockEnabled = true;
+    opt2.formatBlock = true;
+    opt2.showRename = true;
+    opt2.rename = false;
+    opt2.renameLabel = Tr(L"改机器名：") + newName2;
+    if (CConfirmDlg::Ask2(m_hWnd, Tr(L"确认还原"), confirm, Tr(L"取消"),
+                          Tr(L"开始还原"), /*defaultIsRight=*/true,
+                          Tr(L"丢失！"), &opt2) != 1)
+        return false;
+    m_formatSwap = false;
+    m_formatTarget = opt2.formatBlock;
+    m_preserveOld = opt2.preserveOld;
+    if (m_preserveOld) m_formatTarget = false;  // 保留旧系统时不做格式化
+    m_computerName = opt2.rename ? newName2 : std::wstring();
+    // 就地还原不走交换，引擎无意义但保持默认 swap（StageRestore 内部按需处理）
+    m_restoreEngine  = "swap";
+    m_restoreKeepOld = false;
+    return true;
 }
 
 void CMainForm::StartRestoreAsync() {
