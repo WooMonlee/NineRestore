@@ -429,6 +429,7 @@ LRESULT CMainForm::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
     }
     if (msg == WM_CHECK_RESCUE) {
         ShowRescueFailureNotice();
+        ShowSafeBootExitNotice();
     }
     if (msg == WM_STARTUP_LAZY) {
         // 起后台线程做启动后置工作（diag/收集/清理/枚举 —— 可能被慢速 USB2
@@ -866,8 +867,8 @@ void CMainForm::OnSupportDone(sysrecover::SupportBundle* rp) {
     LogInfo("support bundle exported: " + W2U(r.zipPath) + " (dumps=" +
             std::to_string(r.dumps) + ", events=" + std::to_string(r.eventFiles) +
             ")");
-    // ⚠️ CConfirmDlg 只显示正文**前 3 行**（PIT-093）且单行有宽度上限——
-    // 文案必须压成 3 行短句；文件名靠「完成」后的资源管理器选中来展示。
+    // ⚠️ CConfirmDlg 的正文按 '\n' 分行（≤6 行）且单行有宽度上限——
+    // 文案必须压成短句；文件名靠「完成」后的资源管理器选中来展示。
     bool safe = ::GetSystemMetrics(SM_CLEANBOOT) != 0;
     std::wstring msg = std::wstring(Tr(L"诊断包已导出到桌面。\n")) +
                        Tr(L"请把这个文件发给技术支持；\n");
@@ -878,6 +879,10 @@ void CMainForm::OnSupportDone(sysrecover::SupportBundle* rp) {
                                    Tr(L"退出安全模式并重启"),
                                    /*defaultIsRight=*/false);
     } else {
+        // 进安全模式的风险前置说明（2026-11-06）：双系统 {current} 未必指向
+        // 用户以为的系统；BitLocker 机器改 BCD 后重启可能要求恢复密钥。
+        msg += Tr(L"双系统下 {current} 可能是另一个系统；\n");
+        msg += Tr(L"BitLocker 机器重启可能要求恢复密钥。\n");
         msg += Tr(L"是否重启进安全模式再测一次？");
         choice = CConfirmDlg::Ask2(m_hWnd, Tr(L"日志"), msg, Tr(L"完成"),
                                    Tr(L"重启进安全模式再测"),
@@ -885,7 +890,8 @@ void CMainForm::OnSupportDone(sysrecover::SupportBundle* rp) {
     }
     if (choice == 1) {
         std::string log;
-        bool ok = sysrecover::BcdSetSafeBoot(!safe, log);
+        // 一次性语义：设置前先武装"下一次登录自动清除"，装不上就拒绝设置。
+        bool ok = sysrecover::BcdSetSafeBootOnce(!safe, log);
         LogInfo(std::string("safe boot toggle: ") + log);
         if (!ok) {
             MessageBoxW(m_hWnd, (Tr(L"安全模式设置失败：") + U2W(log)).c_str(),
@@ -945,6 +951,42 @@ void CMainForm::ShowRescueFailureNotice() {
         if (r == 1)
             StartRetryStagedRestore();
     }
+}
+
+// 启动兜底（2026-11-06）：safeboot 仍被置位。正常情况下「日志」入口设置时会
+// 武装"下一次登录自动清除"；这里兜两种情况：用户手动塞了 safeboot、自动退出
+// 任务被安全软件拦住、或旧版本留下的设置。提示必须明确，不能默认成功。
+void CMainForm::ShowSafeBootExitNotice() {
+    std::string log;
+    sysrecover::SafeBootState st = sysrecover::BcdGetSafeBootState(log);
+    if (st == sysrecover::SafeBootState::None) return;
+    LogWarn(std::string("startup: safeboot state=") +
+            (st == sysrecover::SafeBootState::Minimal ? "minimal" : "unknown") +
+            " | " + log);
+    if (st == sysrecover::SafeBootState::Unknown) return;  // 判定不了就别乱弹
+    const bool inSafe = ::GetSystemMetrics(SM_CLEANBOOT) != 0;
+    std::wstring msg =
+        inSafe ? Tr(L"当前处于安全模式（safeboot 仍被置位）。\n")
+               : Tr(L"BCD 里仍开着安全模式，下次启动会进入安全模式。\n");
+    msg += Tr(L"双系统下 {current} 可能是另一个系统；\n");
+    msg += Tr(L"BitLocker 机器重启可能要求恢复密钥。\n");
+    msg += Tr(L"是否现在退出安全模式并重启？");
+    int choice = CConfirmDlg::Ask2(m_hWnd, Tr(L"安全模式"), msg,
+                                   Tr(L"暂时保留"), Tr(L"退出并重启"),
+                                   /*defaultIsRight=*/false);
+    if (choice != 1) {
+        LogInfo("safe boot exit declined by user");
+        return;
+    }
+    std::string slog;
+    bool ok = sysrecover::BcdSetSafeBootOnce(false, slog);
+    LogInfo("safe boot exit: " + slog);
+    if (!ok) {
+        MessageBoxW(m_hWnd, (Tr(L"退出安全模式失败：") + U2W(slog)).c_str(),
+                    Tr(L"安全模式"), MB_OK | MB_ICONERROR);
+        return;
+    }
+    RebootNow();
 }
 
 // 一键重试（P3 / PIT-148）：读 conf → StageRestore；成功后若需重启则自动

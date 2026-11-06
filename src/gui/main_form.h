@@ -189,6 +189,8 @@ private:
     // 启动时（收集完 diag/list/痕迹后）检查救援层失败回执（用户 2026-10-04
     // 规格 2）：有未报告的失败 → 弹 3 行提示，「打开日志文件夹」直达 collected。
     void ShowRescueFailureNotice();  // P3（PIT-148）：A/B 类失败 → Ask3 + 一键重试
+    // 启动兜底：safeboot 仍被置位（上一轮进了安全模式且自动退出没跑成）。
+    void ShowSafeBootExitNotice();
     void StartRetryStagedRestore();  // 一键重试 worker 入口（读 conf → StageRestore）
     bool RebootNow();  // true = 已发起重启（PE 走 wpeutil）
     bool AskBusyClose();          // 忙时关闭：true = 用户选了「终止并退出」

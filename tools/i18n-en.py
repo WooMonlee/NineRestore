@@ -868,4 +868,13 @@ EN = {
     '备份目标空间不足：预计至少需要约 ': 'Not enough space on the backup target: at least about ',
     '目标卷是 FAT32，单个镜像文件不能超过 4GB；源卷已用约 ': 'The target volume is FAT32; a single image file cannot exceed 4GB. The source volume already uses about ',
     '测试版': 'Beta',
+    '安全模式': 'Safe Mode',
+    '暂时保留': 'Keep For Now',
+    '退出并重启': 'Exit and Reboot',
+    '退出安全模式失败：': 'Failed to exit safe mode: ',
+    '当前处于安全模式（safeboot 仍被置位）。\n': 'Currently in safe mode (safeboot is still set).\n',
+    'BCD 里仍开着安全模式，下次启动会进入安全模式。\n': 'Safe mode is still enabled in BCD; the next boot will enter safe mode.\n',
+    '双系统下 {current} 可能是另一个系统；\n': 'On dual-boot systems {current} may refer to the other system;\n',
+    'BitLocker 机器重启可能要求恢复密钥。\n': 'BitLocker machines may ask for the recovery key after a reboot.\n',
+    '是否现在退出安全模式并重启？': 'Exit safe mode and reboot now?',
 }
