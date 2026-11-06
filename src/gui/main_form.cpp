@@ -288,7 +288,63 @@ LRESULT CMainForm::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         return HandleImagePathEditMessage(msg, wParam);
     if (msg == WM_TIMER && wParam >= 1 && wParam <= 3)
         return HandleTimerMessage(wParam);
+    if (msg == WM_PROGRESS_UPDATE) {
+        // 防御（PIT-096）：lParam 是 worker new 的 std::wstring*，正常永不为 0；
+        // 为 0 = 消息撞车/异常投递，必须丢弃 —— 解引用空指针就是 2026-09-30
+        // 用户实测的崩溃点（read address 0x8）。已另有消息重编号根治撞车。
+        if (lParam) {
+            OnProgressUpdate((int)wParam, *reinterpret_cast<std::wstring*>(lParam));
+            delete reinterpret_cast<std::wstring*>(lParam);
+        } else {
+            LogWarn("progress msg with null lParam ignored (msg=" +
+                    std::to_string((unsigned)msg) + " wParam=" +
+                    std::to_string((unsigned long long)wParam) + ")");
+        }
+        return 0;
+    }
+    if (msg == WM_TASK_COMPLETE) {
+        OnTaskComplete((int)wParam);
+        return 0;
+    }
+    if (msg == WM_SUPPORT_DONE) {
+        OnSupportDone(reinterpret_cast<sysrecover::SupportBundle*>(lParam));
+    }
+    if (msg == WM_CHECK_RESCUE) {
+        ShowRescueFailureNotice();
+        ShowMenuRescueNotice();
+    }
+    if (msg == WM_STARTUP_LAZY) {
+        // 起后台线程做启动后置工作（diag/收集/清理/枚举 —— 可能被慢速 USB2
+        // 盘卡住，故绝不能在 InitWindow 里同步跑，见 StartupLazyWork）。
+        if (!m_startWorker.joinable())
+            m_startWorker = std::thread([this] { StartupLazyWork(); });
+        return 0;
+    }
+    if (msg == WM_PARTS_READY) {
+        // 后台枚举完成 → 回主线程填分区下拉（handler 接管指针所有权）。
+        auto* disks = reinterpret_cast<std::vector<DiskInfo>*>(lParam);
+        if (disks) {
+            PopulatePartitions(*disks);
+            delete disks;
+        }
+        return 0;
+    }
     if (msg == WM_RETRY_DONE) return OnRetryDone(wParam, lParam);
+    if (msg == WM_MENU_DONE) {
+        // 装/删菜单 worker 完成（2026-10-18）：wParam=rc, lParam=install(0/1)。
+        OnMenuDone((int)wParam, lParam != 0);
+        return 0;
+    }
+    if (msg == WM_MENU_SCAN_DONE) {
+        // 「安装到启动」扫描完成（2026-10-28）：wParam=1 表示可在救援层直接还原。
+        OnMenuScanDone(wParam != 0);
+        return 0;
+    }
+    if (msg == WM_SKIN_EMPTY_PARTITION) {
+        // 分区下拉为空时被点击（2026-10-20）：直接打开发分区向导。
+        if (!m_busy && !m_backupMode) OpenInitDiskWizard();
+        return 0;
+    }
     if (msg == WM_PART_INIT_DONE) return OnInitPartDone(wParam);
     if (msg == WM_FIXBOOT_DONE) return OnFixBootDone(wParam);
     if (msg == WM_VERIFY_DONE) return OnVerifyDone(wParam);
