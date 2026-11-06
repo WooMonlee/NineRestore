@@ -1,4 +1,6 @@
-/* SysRecover.rc —— CLI 的提权清单资源脚本（由 windres 编译）。
+/* SysRecover.rc —— CLI 的清单资源脚本（由 windres 编译）。
+   注意：清单是 asInvoker + 运行期按需提权（PIT-200），**不是** requireAdministrator；
+   需要管理员的命令由程序自己 ShellExecuteExW(runas) 重启提权进程。
    与 GUI 的 SysRecoverUI.rc 同法：RT_MANIFEST(24) 的 id 必须是 1
    （CREATEPROCESS_MANIFEST_RESOURCE_ID），否则加载器不读、UAC 不弹。
    2026-09-26 用户裁定：CLI 不带图标 —— dist 根目录两个 exe，只有 GUI（入口）

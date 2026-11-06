@@ -1,3 +1,4 @@
-/* x64 总入口（GUI）：图标 + 提权清单。真正的程序在 x64\SysRecoverUI.exe。 */
+/* 根目录 GUI 通用启动器（32 位，PIT-199）：品牌图标 + 提权清单。
+   真正的程序在 x64\SysRecoverUI.exe（或同目录的 SysRecoverUI_x86.exe）。 */
 1 ICON "SysRecover.ico"
 1 24 "SysRecoverUI.manifest"

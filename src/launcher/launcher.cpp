@@ -1,7 +1,8 @@
-// SysRecover 总入口（x64）：图标由 .rc 提供，真正的程序在 x64\ 子目录。
-// 根目录 SysRecoverUI.exe / SysRecover.exe 都是这个小型 x64 启动器；
-// 32 位入口是 SysRecoverUI_x86.exe / SysRecover_x86.exe。
-// 这样 x64-only PE（没有 WOW64）也能直接启动，不需要 32 位自举。
+// SysRecover 总入口（**32 位通用启动器**，PIT-199）。
+// 根目录 SysRecoverUI.exe / SysRecover.exe / SysRecoverCheck.exe 都由本文件编出
+// （固定用 mingw32）：64 位系统转发到 x64\ 下的真程序，32 位系统转发到同目录
+// *_x86.exe。这样 32 位 Windows 不会报"不是有效的 Win32 应用程序"，
+// 纯 x64 PE（无 WOW64）也能直接启动。
 #include <windows.h>
 #include <tlhelp32.h>
 

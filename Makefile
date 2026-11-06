@@ -3,15 +3,17 @@
 #         x86 = D:\Prog\ProgIDE\mingw32 (GCC 14.2.0, i686-w64-mingw32,  UCRT)
 # 用法（PowerShell）：
 #   $env:Path = "D:\Prog\ProgIDE\mingw64\bin;" + $env:Path
-#   mingw32-make -f Makefile package        # ★ 发布包：x64 总入口 + x64/ + x86 兼容入口 + 共享资源
+#   mingw32-make -f Makefile package        # ★ 发布包：32 位通用启动器（根）+ x64/ + x86 兼容入口 + 共享资源
 #   mingw32-make -f Makefile all            # 仅 x64 真程序 → dist/x64
 #   mingw32-make -f Makefile ARCH=x86 all   # 仅 x86 兼容程序 → dist/*_x86.exe
 #   mingw32-make -f Makefile check          # 单元测试（纯逻辑，零依赖）
 #   mingw32-make -f Makefile clean          # 清理（当前 ARCH）
 #
-# 架构设计（2026-10-26 调整）：根目录 = x64 总入口（带图标，调用 x64\ 真程序）；
-# 32 位 Windows 用同目录 *_x86.exe。x64-only PE（无 WOW64）直接跑根入口，不再需要
-# 32 位自举。**Linux 救援层固定 x86_64**（与宿主位数无关）。见 docs/08 §0。
+# 架构设计（PIT-199 定稿）：根目录的 SysRecover*.exe 是**32 位通用启动器**
+# （launchers 目标，固定用 mingw32 编译）：64 位系统转发到 x64\ 下的真程序，
+# 32 位系统转发到同目录 *_x86.exe。所以纯 x64 PE（无 WOW64）也能跑，且 32 位
+# Windows 不会报"不是有效的 Win32 应用程序"。**Linux 救援层固定 x86_64**
+# （与宿主位数无关）。见 docs/08 §0。
 
 ARCH ?= x64
 MINGW32 ?= D:/Prog/ProgIDE/mingw32
@@ -23,7 +25,8 @@ ifeq ($(ARCH),x86)
   AR       = $(MINGW)/bin/ar.exe
   WINDRES  = $(MINGW)/bin/windres.exe
   OBJDIR   = build-x86
-  # x86 是**32 位兼容入口**：产物带 _x86 后缀（根目录总入口是 x64 启动器）
+  # x86 是**32 位兼容入口**：产物带 _x86 后缀（根目录总入口是 32 位启动器，
+  # 但启动器只转发，真正的兼容程序仍在这里）
   DISTDIR  = dist
   CLI_NAME = SysRecover_x86.exe
   GUI_NAME = SysRecoverUI_x86.exe
@@ -37,7 +40,7 @@ else
   AR       = $(MINGW)/bin/ar.exe
   WINDRES  = $(MINGW)/bin/windres.exe
   OBJDIR   = build
-  # x64 真程序放在 x64/；根目录 SysRecover*.exe 是 x64 总入口启动器
+  # x64 真程序放在 x64/；根目录 SysRecover*.exe 是 32 位通用启动器（见 launchers）
   DISTDIR  = dist/x64
   CLI_NAME = SysRecover.exe
   GUI_NAME = SysRecoverUI.exe
@@ -150,7 +153,8 @@ APP_LIB  = $(OBJDIR)/libapp.a
 # ---- CLI（console） ----
 CLI_MAIN = src/cli/main.cpp
 CLI_OUT = $(DISTDIR)/$(CLI_NAME)
-# 提权清单（requireAdministrator）：见本文件 GUI 段与 PIT-018。
+# CLI 的清单是 **asInvoker + 运行期按需提权**（PIT-200；与 GUI 的
+# requireAdministrator 不同，别再写成提权清单）。
 CLI_RC     = src/cli/SysRecover.rc
 CLI_RC_OBJ = $(OBJDIR)/SysRecover_rc.o
 
