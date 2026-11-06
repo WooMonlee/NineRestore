@@ -474,8 +474,8 @@ int WimEngine::QuickPrecheck(const std::wstring& imagePath, std::wstring& why) {
     bool xmlTooLarge = false;
     std::string xml;
     if (rd >= sizeof(hdr)) {
-        const unsigned long long xmlSize = WimResSize(hdr.xmlSize);
-        const unsigned long long xmlOff = hdr.xmlOffset;
+        const unsigned long long xmlSize = WimResSize(hdr.xmlData.sizeFlags);
+        const unsigned long long xmlOff = hdr.xmlData.offset;
         if (xmlSize > 256ull * 1024 * 1024) {
             xmlTooLarge = true;
         } else if (xmlSize != 0 && xmlOff <= fileSize &&

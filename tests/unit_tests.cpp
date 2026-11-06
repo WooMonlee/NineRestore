@@ -1882,8 +1882,13 @@ static WimHeaderRaw MakeWimHeader(unsigned int images) {
     h.partNumber = 1;
     h.totalParts = 1;
     h.imageCount = images;
-    h.xmlSize = 48;
-    h.xmlOffset = sizeof(WimHeaderRaw);
+    // 真实 WIM（wimlib/DISM 都一样）里 xmlData 之后还有 bootMetadata 资源；
+    // 旧预检把 offsetTable 当 xmlData、把 xmlData 当 bootMetadata，这里按真实
+    // 三段资源摆位，保证"合法镜像可通过"这条不会再退化（2026-11-06 实机回归）。
+    h.xmlData.sizeFlags = 48;
+    h.xmlData.offset = sizeof(WimHeaderRaw);
+    h.bootMetadata.sizeFlags = 48;
+    h.bootMetadata.offset = sizeof(WimHeaderRaw) + 48;
     return h;
 }
 
@@ -1906,10 +1911,11 @@ TEST(wim_precheck_accepts_wellformed) {
 }
 
 TEST(wim_precheck_blocks_truncated_copy) {
-    // XML 偏移 208 + 48 字节，但文件只有 100 字节：典型"拷贝到一半中断"
+    // 头部读全了、但 XML 资源尾部被截断：典型"拷贝到一半中断"
     const WimHeaderRaw h = MakeWimHeader(1);
-    const WimPrecheckOutcome o =
-        RunWimPrecheck(h, 100, true, "<WIM><IMAGE INDEX=\"1\"/></WIM>");
+    const unsigned long long truncated = sizeof(WimHeaderRaw) + 20;  // XML 需 48 字节
+    const WimPrecheckOutcome o = RunWimPrecheck(
+        h, truncated, true, "<WIM><IMAGE INDEX=\"1\"/></WIM>");
     CHECK(!o.ok);
     CHECK(o.reason == wim_precheck_reason::kResourceOutOfRange);
 }

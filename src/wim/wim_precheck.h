@@ -11,8 +11,18 @@
 
 namespace sysrecover {
 
-// WIM 头里本预检要用到的字段（前 100 字节；按 WIM 规范顺序）。
+// 资源表条目（RESHDR_DISK_SHORT，24 字节）：size/flags、offset、原始大小。
+// 旧实现只按 16 字节（size+offset）解析，漏掉了 offset_table 与 original_size，
+// 导致 xmlData 被当成 offset_table、bootMetadata 被当成 xmlData —— 实测
+// （2026-11-06 实机验证）连 DISM 自己生成的合法 WIM 都会被误判"资源表越界"。
 #pragma pack(push, 1)
+struct WimResEntryRaw {
+    unsigned long long sizeFlags;
+    unsigned long long offset;
+    unsigned long long originalSize;
+};
+
+// WIM 头里本预检要用到的字段（前 148 字节；按 WIM 规范顺序）。
 struct WimHeaderRaw {
     unsigned char magic[8];
     unsigned int cbSize;
@@ -23,13 +33,11 @@ struct WimHeaderRaw {
     unsigned short partNumber;
     unsigned short totalParts;
     unsigned int imageCount;
-    unsigned long long xmlSize;
-    unsigned long long xmlOffset;
-    unsigned long long bootSize;
-    unsigned long long bootOffset;
+    WimResEntryRaw offsetTable;
+    WimResEntryRaw xmlData;
+    WimResEntryRaw bootMetadata;
     unsigned int bootIndex;
-    unsigned long long intSize;
-    unsigned long long intOffset;
+    WimResEntryRaw integrity;
 };
 #pragma pack(pop)
 
@@ -112,14 +120,17 @@ inline WimPrecheckOutcome CheckWimStructure(unsigned long long fileSize,
         out.reason = wim_precheck_reason::kNoImages;
         return out;
     }
-    const unsigned long long xmlSize = WimResSize(h.xmlSize);
-    const unsigned long long bootSize = WimResSize(h.bootSize);
-    const unsigned long long intSize = WimResSize(h.intSize);
+    const unsigned long long xmlSize = WimResSize(h.xmlData.sizeFlags);
+    const unsigned long long xmlOffset = h.xmlData.offset;
+    const unsigned long long bootSize = WimResSize(h.bootMetadata.sizeFlags);
+    const unsigned long long bootOffset = h.bootMetadata.offset;
+    const unsigned long long intSize = WimResSize(h.integrity.sizeFlags);
+    const unsigned long long intOffset = h.integrity.offset;
     auto outOfRange = [&](unsigned long long sz, unsigned long long off) {
         return sz != 0 && (off > fileSize || sz > fileSize - off);
     };
-    if (xmlSize == 0 || outOfRange(xmlSize, h.xmlOffset) ||
-        outOfRange(bootSize, h.bootOffset) || outOfRange(intSize, h.intOffset)) {
+    if (xmlSize == 0 || outOfRange(xmlSize, xmlOffset) ||
+        outOfRange(bootSize, bootOffset) || outOfRange(intSize, intOffset)) {
         out.ok = false;
         out.reason = wim_precheck_reason::kResourceOutOfRange;
         return out;
@@ -155,7 +166,7 @@ inline WimPrecheckOutcome CheckWimStructure(unsigned long long fileSize,
         return out;
     }
     // 完整性表：有就要求落在文件内（上面已查）；这里只拦"声明了却为空"。
-    if (intSize == 0 && h.intOffset != 0) {
+    if (intSize == 0 && intOffset != 0) {
         out.ok = false;
         out.reason = wim_precheck_reason::kIntegrityInvalid;
         return out;
