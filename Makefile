@@ -145,7 +145,7 @@ APP_SRC = src/disk/disk.cpp src/disk/partinit.cpp src/disk/partscript.cpp src/di
       src/common/relocate.cpp src/common/pathutil.cpp src/common/compname.cpp src/common/cpucap.cpp src/common/ea.cpp src/common/refscan.cpp src/common/bioskey.cpp src/boot/bcd.cpp src/boot/grub.cpp \
       src/boot/uefi.cpp src/boot/bcd_parse.cpp src/boot/bootpath.cpp src/boot/bootself.cpp src/boot/task.cpp src/boot/bootfix.cpp \
       src/app/safety.cpp src/app/advice.cpp \
-      src/app/shortcut.cpp src/app/ops_util.cpp src/app/ops_format.cpp src/app/ops_preserve.cpp src/app/ops_boot.cpp src/app/ops_selfpack.cpp src/app/ops_space.cpp src/app/ops_inplace.cpp src/app/ops_backup.cpp src/app/ops_returnold.cpp src/app/ops_staged.cpp src/app/imgsrc.cpp src/app/selfdiag.cpp src/app/universal.cpp \
+      src/app/shortcut.cpp src/app/ops_util.cpp src/app/ops_format.cpp src/app/ops_preserve.cpp src/app/ops_boot.cpp src/app/ops_selfpack.cpp src/app/ops_space.cpp src/app/ops_inplace.cpp src/app/ops_backup.cpp src/app/ops_returnold.cpp src/app/ops_staged.cpp src/app/imgsrc.cpp src/app/selfdiag.cpp src/app/universal.cpp src/app/request_precheck.cpp \
       src/app/swapleft.cpp
 APP_OBJS = $(patsubst src/%.cpp,$(OBJDIR)/app/%.o,$(APP_SRC))
 APP_LIB  = $(OBJDIR)/libapp.a
@@ -322,7 +322,7 @@ TEST_UNITS = src/common/sysinfo.cpp src/wim/exclude.cpp src/boot/task.cpp src/co
       src/common/i18n.cpp src/common/crypt.cpp src/common/selfarch.cpp src/common/relocate.cpp src/common/pathutil.cpp src/boot/bcd_parse.cpp src/boot/bootpath.cpp \
       src/common/ea.cpp src/common/refscan.cpp src/app/swapleft.cpp src/common/logger.cpp src/common/bioskey.cpp \
       src/disk/partscript.cpp src/boot/bootself.cpp src/common/process.cpp \
-      src/boot/bcd.cpp
+      src/boot/bcd.cpp src/app/request_precheck.cpp
 TEST_BIN   = $(OBJDIR)/tests.exe
 $(TEST_BIN): $(TEST_SRC) $(TEST_UNITS) src/common/rescue_decision.h src/common/version.h tests/tiny_test.h | $(OBJDIR)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(TEST_SRC) $(TEST_UNITS) -o $(TEST_BIN) -static -mconsole -ladvapi32 -lole32 -luuid -lntdll -lbcrypt

@@ -13,6 +13,7 @@
 #include "tiny_test.h"
 
 #include "app/advice.h"
+#include "app/request_precheck.h"
 #include "app/swapleft.h"
 #include "boot/bcd.h"
 #include "boot/bcd_parse.h"
@@ -2043,4 +2044,26 @@ TEST(safeboot_enum_failure_is_unknown) {
     CHECK_EQ(StateOf(log), static_cast<int>(SafeBootState::Unknown));
     CHECK(!BcdSetSafeBoot(true, log));  // 判定不了 → fail-closed
     BcdSetToolRunnerForTest(nullptr);
+}
+
+// ───────────────── 备份/还原参数前置校验（B9） ─────────────────
+
+TEST(precheck_image_path_extension) {
+    CHECK(LooksLikeImagePath(L"D:\\imgs\\a.wim"));
+    CHECK(LooksLikeImagePath(L"D:\\imgs\\a.WIM"));   // 大小写不敏感
+    CHECK(LooksLikeImagePath(L"D:\\imgs\\a.EsD"));
+    CHECK(LooksLikeImagePath(L"D:\\imgs\\a.swm"));
+    CHECK(LooksLikeImagePath(L"D:\\imgs\\a.zje"));
+    CHECK(!LooksLikeImagePath(L"D:\\imgs\\a.txt"));
+    CHECK(!LooksLikeImagePath(L"D:\\imgs\\wim"));    // 缺扩展名分隔点
+    CHECK(!LooksLikeImagePath(L"wim"));
+}
+
+TEST(precheck_image_path_ready) {
+    // 真实存在的目录不是镜像（UNC 共享根/目录输入时不能同步去开）
+    CHECK(!ImagePathReady(L"C:\\Windows"));
+    // 不存在但"像镜像"：仍交给 wimlib 去开（UAC/UNC 拿不到属性时的原语义）
+    CHECK(ImagePathReady(L"C:\\__zj_no_such_file__.wim"));
+    // 不存在且不像镜像：不尝试打开
+    CHECK(!ImagePathReady(L"C:\\__zj_no_such_file__.txt"));
 }

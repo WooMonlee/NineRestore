@@ -13,6 +13,7 @@
 #include "app/ops.h"
 #include "app/imgsrc.h"
 #include "app/universal.h"
+#include "app/request_precheck.h"
 #include "app/safety.h"
 #include "app/selfdiag.h"
 #include "app/swapleft.h"
@@ -40,38 +41,6 @@
 using namespace sysrecover;
 
 namespace {
-
-// 路径是否"像镜像文件"（以 .wim/.esd/.swm 结尾，忽略大小写）。用**手写**比较，
-// 不引 locale（避免 <cwctype> 依赖）。
-bool LooksLikeImagePath(const std::wstring& p) {
-    if (p.size() < 4) return false;
-    size_t n = p.size();
-    auto eq = [&](const wchar_t* ext) {
-        for (int i = 0; i < 4; ++i) {
-            wchar_t a = p[n - 4 + i];
-            if (a >= L'A' && a <= L'Z') a = (wchar_t)(a - L'A' + L'a');
-            if (a != ext[i]) return false;
-        }
-        return true;
-    };
-    return eq(L".wim") || eq(L".esd") || eq(L".swm") || eq(L".zje");
-}
-
-// 镜像路径是否"值得尝试打开"。
-// ⚠️ 不要只用 GetFileAttributesW 预筛：GUI 带 requireAdministrator 清单（提权进程），
-// 受 **UAC 会话隔离**影响，提权后的登录会话对 UNC 路径（\\server\share\...）常拿不到
-// 属性 → 返回 INVALID → 以前直接跳过 LoadWimImages → 主按钮**一直灰且无任何报错**
-// （用户 2026-09-23 实测：本地路径能变蓝，网络/UNC 路径不变蓝）。改为：只要路径
-// 像镜像文件就交给 wimlib 去开 —— 开得了按钮变蓝，开不了也会给出明确错误。
-bool ImagePathReady(const std::wstring& p) {
-    // ⚠️ 目录不是镜像：UNC 共享根（\\server\share\）在输入过程中会先变成
-    // 合法目录，若当成镜像去开，会同步阻塞并触发文本同步/光标跳动
-    //（2026-10-21 VM 实测：输入汉字跑到最前面）。
-    const DWORD a = ::GetFileAttributesW(p.c_str());
-    if (a != INVALID_FILE_ATTRIBUTES)
-        return (a & FILE_ATTRIBUTE_DIRECTORY) == 0;
-    return LooksLikeImagePath(p);
-}
 
 // 分区行容量列用整数 GB（老界面观感："28 / 89 GB"、"可用 61 GB"）
 std::wstring FormatGb(uint64_t bytes) {
