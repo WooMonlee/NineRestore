@@ -116,6 +116,45 @@ for m in \
 done
 done
 
+# ── 早期入口标记（2026-11-06 现场需求）─────────────────────────────────────
+# 用户选完 "SysRecover" 却静默回到 Windows 时，我们拿不到任何记录。init 是内核
+# 起来后的第一段代码：在动任何分区之前，先往 ESP 的 EFI/ZJRESTORE 追加一行带
+# 时间戳的 entry-started 标记。之后即便镜像/日志面全部挂不上（日志只落在内存），
+# 也能证明"进过救援层"——把"固件没加载 / 内核没起" 和 "起来了卡后段" 分开。
+# 任何一步失败都静默跳过，绝不阻塞启动（这里只读挂载点探测 + 一次 append）。
+mark_entry_started(){
+    [ -d /sys/firmware/efi ] || return 0
+    _ml=/tmp/zj_entry_marker.log
+    for _dd in /dev/nvme*n*p* /dev/sd*[0-9] /dev/vd*[0-9] /dev/mmcblk*p*; do
+        [ -b "$_dd" ] || continue
+        _dt=$(timeout 10 blkid -s TYPE -o value "$_dd" 2>>"$_ml")
+        case "$_dt" in vfat|fat|fat32|msdos) ;; *) continue ;; esac
+        mkdir -p /tmp/zj_espmark 2>>"$_ml"
+        if timeout 10 mount -t vfat -o rw "$_dd" /tmp/zj_espmark 2>>"$_ml"; then
+            if [ -d /tmp/zj_espmark/EFI/ZJRESTORE ]; then
+                _mf=/tmp/zj_espmark/EFI/ZJRESTORE/entry-started.txt
+                {
+                    printf '%s entry-started kernel=%s build=%s boot=%s\n' \
+                        "$(date '+%F %T')" "$(uname -r)" \
+                        "$(cat /zjrescue-version 2>>"$_ml")" \
+                        "$(cat /proc/sys/kernel/random/boot_id 2>>"$_ml")"
+                } >> "$_mf" 2>>"$_ml"
+                # 只留最近 50 条，避免反复进救援把 ESP 塞满（ESP 空间很紧）
+                _mc=$(wc -l < "$_mf" 2>>"$_ml")
+                if [ "${_mc:-0}" -gt 50 ]; then
+                    tail -n 50 "$_mf" > /tmp/zj_espmark.new 2>>"$_ml" &&
+                        mv /tmp/zj_espmark.new "$_mf" 2>>"$_ml"
+                fi
+                sync 2>>"$_ml"
+                say "entry marker written ($_dd)"
+            fi
+            umount /tmp/zj_espmark 2>>"$_ml"
+        fi
+    done
+    return 0
+}
+mark_entry_started
+
 say "modules loaded; waiting for disks"
 sleep 3
 say "nvme dmesg: $(dmesg 2>/dev/null | grep -iE 'nvme|pcie' | tail -n 5 | tr '\n' '|')"
