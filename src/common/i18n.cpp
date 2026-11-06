@@ -16,6 +16,9 @@ std::unordered_map<std::string, std::string> g_dict;
 std::unordered_map<std::wstring, std::wstring> g_wide;
 std::string g_lang = "zh-CN";
 
+}  // namespace（下面的编码转换是公共 API，必须离开匿名命名空间）
+
+// ── UTF-8 ↔ UTF-16（全项目唯一实现；各翻译单元不得再复制一份）────────────────
 std::string W2U(const wchar_t* w) {
     if (!w || !*w)
         return {};
@@ -54,6 +57,8 @@ std::wstring U2W(const char* p, size_t len) {
 std::wstring U2W(const std::string& s) {
     return U2W(s.data(), s.size());
 }
+
+namespace {
 
 // 语言标签归一：zh* → "zh-CN"（源语言），en* → "en"，其它原样（小写，如 ja/de/fr）。
 std::string NormalizeLang(const char* s) {

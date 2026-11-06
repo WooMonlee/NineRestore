@@ -27,6 +27,15 @@ void InitI18n(const char* forced);
 const char* LangTag();   // "zh-CN" / "en" / "ja"…（进程内稳定，不会悬空）
 bool IsSourceLang();     // true = 中文界面（无需翻译）
 
+// ── UTF-8 ↔ UTF-16 转换（全项目唯一实现）──────────────────────────────
+// 语义：宽 → 窄 恒为 UTF-8；窄 → 宽 假定输入是 UTF-8。
+// 空串/空指针 → 空结果；转换失败 → 空结果（调用方按"空"处理）。
+// 注意：不要在各 .cpp 里再写一份（历史上曾有 9 份副本，行为还不一致）。
+std::string W2U(const wchar_t* w);
+std::string W2U(const std::wstring& w);
+std::wstring U2W(const char* p, size_t len);
+std::wstring U2W(const std::string& s);
+
 // 取译文。窄串 = UTF-8，宽串 = UTF-16。返回内部存储的指针 ——
 // 在下一次 InitI18n/ClearI18n 之前稳定（std::unordered_map 节点地址不受 rehash 影响）。
 const char* Tr(const char* src);

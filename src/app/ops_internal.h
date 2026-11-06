@@ -17,6 +17,7 @@
 
 #include "../disk/disk.h"
 #include "ops.h"
+#include "../common/i18n.h"  // W2U/U2W 的唯一实现在这里
 
 namespace sysrecover {
 
@@ -25,8 +26,6 @@ bool IsNetworkPath(const std::wstring& p);
 std::wstring MenuFlagPath();
 bool HasInstalledMenu();
 void SetMenuFlag(bool installed);
-std::string W2U(const std::wstring& w);
-std::wstring U2W(const std::string& s);
 std::wstring ExePath();
 bool IsDir(const std::wstring& p);
 // M9：长路径前缀（\\?\ / \\?\UNC\）；已带前缀或相对路径原样返回。

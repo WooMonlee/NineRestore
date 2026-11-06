@@ -14,25 +14,12 @@
 #include "../disk/disk.h"
 #include "../common/process.h"
 #include "../common/selfarch.h"
+#include "../common/i18n.h"  // W2U（全项目唯一实现）
 #include "../common/version.h"
 #include "../common/zip.h"  // Crc32（部署后校验，A6）
 
 namespace sysrecover {
 namespace {
-
-// 宽字符串 → UTF-8（按实际长度分配；不再用固定 512 的栈缓冲，见问题清单 L-04）。
-std::string W2U(const std::wstring& w) {
-    if (w.empty())
-        return {};
-    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr,
-                                0, nullptr, nullptr);
-    if (n <= 0)
-        return {};
-    std::string s(n, 0);
-    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &s[0], n, nullptr,
-                        nullptr);
-    return s;
-}
 
 // 文件 CRC32（部署后校验用，A6：救援文件必须与 bootfiles 源一致 —— 防旧版残留/
 // 半截拷贝导致"旧救援配新契约"混用；用户 2026-10-04 要求杜绝）。

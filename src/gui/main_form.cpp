@@ -40,22 +40,6 @@ using namespace sysrecover;
 
 namespace {
 
-std::wstring U2W(const std::string& s) {
-    if (s.empty()) return {};
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
-    std::wstring ws(n, 0);
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &ws[0], n);
-    return ws;
-}
-
-std::string W2U(const std::wstring& ws) {
-    if (ws.empty()) return {};
-    int n = WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), (int)ws.size(), nullptr, 0, nullptr, nullptr);
-    std::string s(n, 0);
-    WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), (int)ws.size(), &s[0], n, nullptr, nullptr);
-    return s;
-}
-
 // 路径是否"像镜像文件"（以 .wim/.esd/.swm 结尾，忽略大小写）。用**手写**比较，
 // 不引 locale（避免 <cwctype> 依赖）。
 bool LooksLikeImagePath(const std::wstring& p) {

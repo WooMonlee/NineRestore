@@ -9,24 +9,12 @@
 #include <vector>
 
 #include "../common/version.h"
+#include "../common/i18n.h"  // W2U（全项目唯一实现）
 
 namespace sysrecover {
 namespace {
 
 std::wstring g_crashDir;
-
-std::string W2U(const std::wstring& w) {
-    if (w.empty())
-        return {};
-    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr,
-                                0, nullptr, nullptr);
-    if (n <= 0)
-        return {};
-    std::string s(n, 0);
-    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &s[0], n, nullptr,
-                        nullptr);
-    return s;
-}
 
 void AppendFile(const std::wstring& path, const std::string& text) {
     HANDLE h = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ,

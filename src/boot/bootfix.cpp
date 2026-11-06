@@ -15,24 +15,11 @@
 
 #include <cstdio>
 
+#include "../common/i18n.h"   // W2U（全项目唯一实现）
 #include "../common/selfarch.h"
 #include "bootself.h"
 
 namespace sysrecover {
-namespace {
-
-std::string W2U(const std::wstring& w) {
-    if (w.empty()) return {};
-    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr,
-                                nullptr);
-    std::string s(n > 0 ? n - 1 : 0, 0);
-    if (n > 0)
-        WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, s.data(), n, nullptr,
-                            nullptr);
-    return s;
-}
-
-}  // namespace
 
 bool PrepareBootFixFiles(const std::wstring& recoveryDir, std::string& log) {
     // recoveryDir 形如 "C:\ZJRESTORE"（= 目标盘上的恢复目录）→ 目标盘根 "C:\"。

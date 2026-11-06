@@ -6,9 +6,7 @@
 #include "wim.h"
 #include "wim_precheck.h"
 
-#include <windows.h>  // WideCharToMultiByte（XML 是 UTF-16LE，见 ImageSize）
-
-#include <windows.h>
+#include <windows.h>  // XML 是 UTF-16LE（见 ImageSize），转换用 common/i18n.h 的 U2W
 #include <fcntl.h>
 #include <io.h>
 
@@ -100,15 +98,7 @@ struct ProgCtx {
 };
 
 std::string WideToUtf8(const wchar_t* w) {
-    if (!w || !*w)
-        return {};
-    int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr,
-                                nullptr);
-    if (n <= 1)
-        return {};
-    std::string s(static_cast<size_t>(n - 1), 0);
-    WideCharToMultiByte(CP_UTF8, 0, w, -1, s.data(), n, nullptr, nullptr);
-    return s;
+    return W2U(w);
 }
 
 int Pct(uint64_t done, uint64_t total) {
@@ -654,16 +644,6 @@ unsigned long long XmlNum(const std::string& seg, const char* tag) {
     if (n == 0)
         n = strtoull(v.c_str(), nullptr, 16);  // 无 0x 前缀的纯十六进制
     return n;
-}
-
-std::wstring U2W(const std::string& s) {
-    if (s.empty())
-        return {};
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
-    std::wstring w(n > 0 ? n - 1 : 0, 0);
-    if (n > 0)
-        MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &w[0], n);
-    return w;
 }
 
 }  // namespace

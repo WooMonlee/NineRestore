@@ -7,22 +7,11 @@
 #include <cstring>
 #include <string>
 
+#include "../common/i18n.h"  // W2U（全项目唯一实现）
 #include "../common/version.h"
 
 namespace sysrecover {
 namespace {
-
-std::string W2U(const std::wstring& w) {
-    if (w.empty())
-        return {};
-    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0,
-                                nullptr, nullptr);
-    std::string s(n > 0 ? n - 1 : 0, 0);
-    if (n > 0)
-        WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, s.data(), n, nullptr,
-                            nullptr);
-    return s;
-}
 
 // JSON 字符串转义（反斜杠/引号），供 json 侧写 Windows 路径。
 std::string JsonEsc(const std::string& s) {

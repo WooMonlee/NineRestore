@@ -9,6 +9,7 @@
 #include <cwchar>
 #include <vector>
 
+#include "../common/i18n.h"   // U2W（全项目唯一实现）
 #include "../common/process.h"
 #include "bcd_parse.h"
 
@@ -187,15 +188,6 @@ std::string W2U8(const std::wstring& w) {
     return s;
 }
 
-std::wstring U2W8(const std::string& s) {
-    if (s.empty()) return std::wstring();
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
-    if (n <= 0) return std::wstring();
-    std::wstring w((size_t)n, 0);
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &w[0], n);
-    return w;
-}
-
 std::string ToLowerAscii(std::string v) {
     for (auto& c : v)
         c = (char)std::tolower((unsigned char)c);
@@ -245,7 +237,7 @@ VolState StateOnLetter(wchar_t letter) {
 
 // BCD 里的 device 值 → 这个分区到底还能不能启动。
 VolState ClassifyDevice(const std::string& raw, const VolMap& map) {
-    std::wstring v = U2W8(raw);
+    std::wstring v = U2W(raw);
     const size_t b = v.find_first_not_of(L" \t");
     if (b == std::wstring::npos) return VolState::Unknown;
     const size_t e = v.find_last_not_of(L" \t");
@@ -307,8 +299,8 @@ std::vector<std::string> VolumeIds(const std::wstring& winDir) {
 
 std::wstring FirstOsDefaultDevice(const std::vector<BcdEntryInfo>& os) {
     for (const auto& e : os)
-        if (e.isDefault) return U2W8(e.device);
-    return os.empty() ? std::wstring() : U2W8(os.front().device);
+        if (e.isDefault) return U2W(e.device);
+    return os.empty() ? std::wstring() : U2W(os.front().device);
 }
 
 }  // namespace
@@ -400,7 +392,7 @@ int BcdPruneDeadEntries(const std::wstring& storePath,
         tgtLetter = std::wstring(1, (wchar_t)towupper(targetWinDir[0])) + L":";
     auto isTargetDevice = [&](const std::string& dev) {
         if (tgtLetter.empty()) return false;
-        std::wstring v = U2W8(dev);
+        std::wstring v = U2W(dev);
         const std::wstring kPart = L"partition=";
         if (v.size() >= kPart.size() &&
             _wcsnicmp(v.c_str(), kPart.c_str(), kPart.size()) == 0)
@@ -426,7 +418,7 @@ int BcdPruneDeadEntries(const std::wstring& storePath,
                  st == VolState::Missing ? "partition gone" : "no Windows",
                  e.device.empty() ? "?" : e.device.c_str());
         log += line;
-        if (BcdDeleteEntry(storePath, U2W8(e.id), log)) ++removed;
+        if (BcdDeleteEntry(storePath, U2W(e.id), log)) ++removed;
     }
     // PIT-216：同一分区 + 同一 winload 路径的**重复条目**（bcdboot 跑过多次、
     // 或我们以前的"拷贝条目"测试留下的）——保留 default，其余删掉。
@@ -455,7 +447,7 @@ int BcdPruneDeadEntries(const std::wstring& storePath,
                     continue;
                 }
                 log += "prune: duplicate boot entry " + e.id + " removed\n";
-                if (BcdDeleteEntry(storePath, U2W8(e.id), log)) ++removed;
+                if (BcdDeleteEntry(storePath, U2W(e.id), log)) ++removed;
             }
         }
     }
@@ -491,7 +483,7 @@ bool BcdQuietSingleOsMenu(const std::wstring& storePath, std::string& log) {
                ")\n";
         return false;
     }
-    BcdSetStoreBootmgr(storePath, L"displayorder", U2W8(keep).c_str(), log);
+    BcdSetStoreBootmgr(storePath, L"displayorder", U2W(keep).c_str(), log);
     BcdSetStoreBootmgr(storePath, L"timeout", L"0", log);
     BcdDelStoreBootmgr(storePath, L"displaybootmenu", log);
     log += "menu: single OS -> no boot menu wait\n";
