@@ -1725,32 +1725,68 @@ if [ "$REPAIR_BOOT" = "1" ]; then
             say "WARN: target is 4Kn (logical sector=$_lbs): Windows does not support BIOS boot from 4Kn; on a BIOS/MBR machine the restored system will not boot (4Kn requires UEFI/GPT)"
         fi
     fi
+    # >>> zj-boot-region
+    # BIOS 分区引导区（PBR）判据 —— 与 Windows 侧 EnsureNtfsBootRegion 等价：
+    #   · 扇区 0 的 0x54..0x57 必须是 FA 33 C0 8E（微软 NTFS 引导代码指纹）
+    #   · 扇区 1 起的后续代码段不能全零（辅助条件；两段配套，缺一跳 0x226 就是黑屏，PIT-053）
+    # 只判"扇区 1 非空"会漏判：代码段被写坏时续段仍可能有残留字节 → 误判完好，
+    # 看着修好了、实际 BIOS 起不来。
+    # 参数：$1 目标分区（块设备；单测可传普通文件）
+    #       $2 代码段 blob（默认 /ntfs-boot-code.bin）
+    #       $3 续段 blob（默认 /ntfs-boot-cont.bin）
+    #       $4 分区总扇区数（>0 时同步更新卷末尾备份引导扇区；0=不更新）
+    # 返回：0 本来完好 或 已重写并通过复核；1 需要重写但缺 blob；3 重写后复核失败
+    zj_repair_boot_region() {
+        _br_dev=$1
+        _br_code=${2:-/ntfs-boot-code.bin}
+        _br_cont=${3:-/ntfs-boot-cont.bin}
+        _br_total=${4:-0}
+        _br_g=$(dd if="$_br_dev" bs=1 skip=84 count=4 2>/dev/null | od -An -tx1 | tr -d ' \n')
+        _br_s1=$(dd if="$_br_dev" bs=512 skip=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')
+        _br_nz=0
+        if [ -n "$_br_s1" ]; then
+            case "$_br_s1" in
+                *[1-9a-f]*) _br_nz=1 ;;
+            esac
+        fi
+        if [ "$_br_g" = "fa33c08e" ] && [ "$_br_nz" = "1" ]; then
+            say "boot region ok (0x54=$_br_g)"
+            return 0
+        fi
+        if [ ! -f "$_br_code" ] || [ ! -f "$_br_cont" ]; then
+            say "ERROR: boot region bad (0x54=$_br_g, sector1_nonzero=$_br_nz) and no built-in blob"
+            return 1
+        fi
+        say "boot region bad (0x54=$_br_g, sector1_nonzero=$_br_nz) -> rewrite built-in boot region"
+        dd if="$_br_code" of="$_br_dev" bs=1 seek=84 count=426 conv=notrunc
+        dd if="$_br_cont" of="$_br_dev" bs=512 seek=1 conv=notrunc
+        if [ "$_br_total" -gt 0 ] 2>/dev/null; then
+            _br_last=$(( _br_total - 1 ))
+            if [ "$_br_last" -gt 0 ]; then
+                dd if="$_br_code" of="$_br_dev" bs=1 skip=0 seek=$((_br_last * 512 + 84)) count=426 conv=notrunc
+            fi
+        fi
+        sync
+        _br_g2=$(dd if="$_br_dev" bs=1 skip=84 count=4 2>/dev/null | od -An -tx1 | tr -d ' \n')
+        if [ "$_br_g2" = "fa33c08e" ]; then
+            say "boot region rewritten"
+            return 0
+        fi
+        say "ERROR: boot region rewrite failed (0x54=$_br_g2)"
+        return 3
+    }
+    # <<< zj-boot-region
     if [ "$PT_TYPE" = "gpt" ]; then
         # UEFI/GPT：引导在 ESP 上（UEFI 固件 → \EFI\Microsoft\Boot\bootmgfw.efi →
         # ESP 的 BCD → 本目标分区的 winload.efi）。ESP 全程不动，所以**不需要**
         # 改分区引导区/PBR（那是 BIOS 才要做的）。
         say "UEFI/GPT: ESP untouched, skip PBR/boot-region repair"
     elif [ "$KEPT_FS" = "1" ]; then
-        # 保留了原有 NTFS → 分区引导区通常原封未动，无需改写。但要防「上一次
-        # 失败还原把引导区写坏」：若扇区 1 全 0（缺 Windows 引导代码的后续部分）
-        # 则用内置的完整引导区修复（第一扇区只写代码段，BPB 保持本分区自己的）。
-        _s1=$(dd if="$TARGET_DEV" bs=512 skip=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')
-        if echo "$_s1" | grep -q '[1-9a-f]'; then
-            say "boot region kept intact (sector1 non-empty)"
-        elif [ -f /ntfs-boot-code.bin ] && [ -f /ntfs-boot-cont.bin ]; then
-            say "boot region incomplete -> rewrite built-in boot region"
-            dd if=/ntfs-boot-code.bin of="$TARGET_DEV" bs=1 seek=84 count=426 conv=notrunc 2>/dev/null
-            dd if=/ntfs-boot-cont.bin of="$TARGET_DEV" bs=512 seek=1 conv=notrunc 2>/dev/null
-            sync
-            _g=$(dd if="$TARGET_DEV" bs=1 skip=84 count=4 2>/dev/null | od -An -tx1 | tr -d ' \n')
-            if [ "$_g" = "fa33c08e" ]; then
-                say "boot region rewritten (0x54=$_g)"
-            else
-                say "ERROR: boot region rewrite failed (0x54=$_g)"
-            fi
-        else
-            say "WARN: boot region incomplete and no built-in blob"
-        fi
+        # 保留了原有 NTFS → 分区引导区多数情况原封未动，但仍要判"是否真的完好"：
+        # 判据与 Windows 侧 EnsureNtfsBootRegion 等价（0x54 代码指纹 + 扇区 1 续段），
+        # 任一不满足就用内置两段重写，并同步卷末尾备份引导扇区。
+        _psz=$(cat "/sys/class/block/$(basename "$TARGET_DEV")/size" 2>/dev/null)
+        zj_repair_boot_region "$TARGET_DEV" /ntfs-boot-code.bin /ntfs-boot-cont.bin "${_psz:-0}"
     elif [ -f /ntfs-boot-code.bin ] && [ -f /ntfs-boot-cont.bin ]; then
         # 这里是 mkntfs 新建的分区：mkntfs 只写它自己的"不可引导"占位代码
         # （扇区里能读到 "This is not a bootable disk..."），必须整体换成微软

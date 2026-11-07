@@ -2220,3 +2220,28 @@
     **就地还原也能保留旧系统** —— 把目标分区的顶层内容整体改名进 `~old`（同卷秒级），
     再把镜像解压到根；失败自动搬回（回滚）。之后可用「返回旧系统」回退。
     空间不够时勾选框置灰；与"格式化"互斥。
+
+### PIT-217
+
+- PIT-217 **BIOS 分区引导区判据收紧：Linux 侧不再"扇区 1 非空即完好"，改成与 Windows 侧等价（`0x54=FA33C08E` + 续段非零），坏就重写**（`1.0 beta.3` / `1.0.0.3`，2026-11-07）
+  · 起因：另一路验证核对源码发现两条路径口径冲突——Windows 侧 `EnsureNtfsBootRegion`
+    有"判据 + 写入 + 复核"，而 Linux 侧 `zjrestore-lite.sh` 在"保留原 NTFS"分支
+    只判扇区 1 有没有任意非零字节，命中就 `boot region kept intact`。代码段被写坏、
+    续段还剩残留字节时会被判成完好 → **看着修好了、BIOS 实际起不来**。
+  · 修复：新增可单测的函数 `zj_repair_boot_region`（脚本内 `# >>> zj-boot-region` 标记块）：
+    ① 读 `0x54..0x57` 必须等于 `fa33c08e`；② 扇区 1 起的续段非全零（降级为辅助条件）；
+    ③ 任一不满足 → 用内置 `ntfs-boot-code.bin` + `ntfs-boot-cont.bin` 重写，
+    并按 `$4=分区总扇区数` 同步更新卷末尾的备份引导扇区；④ 写后回读复核。
+  · 日志三态：`boot region ok (0x54=fa33c08e)` / `boot region rewritten` /
+    `ERROR: boot region rewrite failed (0x54=...)`；删除含糊的 `kept intact`。
+  · 单测 `tests/test_boot_region.sh`（已并入 `make check`）：0x54 正确+续段非零（跳过且
+    一个字节不动）、0x54 错误（重写）、续段全零（重写）、缺 blob（返回 1 并报错）、
+    末尾备份扇区同步，以及"脚本里不得再出现 kept intact"。
+  · **C2 消音分类审查（本 PIT 同时用作 `check-shell` 基线升级依据）**，新增 4 处、删除 2 处：
+    - A 类（探测读，允许 `2>/dev/null`）：`dd` 读 `0x54`、`dd` 读扇区 1、写后回读复核、
+      `cat /sys/class/block/<dev>/size` —— 只取数据，失败由返回值/后续判定兜底；
+      不消音会把"设备不可读"的噪声盖到屏幕日志上。
+    - B 类（实际写盘，禁止消音）：两处 `dd of=<分区>` 一律不消音（本次由有消音改为无消音），
+      写失败必须可见；最终仍以高层复核 `0x54` 作为判定依据。
+  · 基线 `tools/shell-stderr-baseline.txt` 184 → 185（净增 1，全部为 A 类探测读）。
+

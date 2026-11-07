@@ -3,6 +3,30 @@
 > 版本号唯一来源是 `src/common/version.h`；发布时 `version.h` / git tag / `dist/version.json` 三处同源。
 > 命名规则见 `docs/37-版本命名规范.md`（测试版 `1.0 beta.N` / 内部 `1.0.0.N` / 文件 `九转大还原1.0-beta.N.exe`）。
 
+## 1.0 beta.3（2026-11-07，内部 `1.0.0.3`）
+
+> 测试版（Beta）。相对 beta.2 的核心改动：**Linux 救援侧 PBR 判据收紧到与 Windows 侧等价**。
+
+### BIOS/MBR：保留原 NTFS 时不再"扇区 1 非零即完好"
+
+- **问题**：`zjrestore-lite.sh` 在 `KEPT_FS=1`（保留原 NTFS）分支只看分区**扇区 1 是否有任意非零字节**，
+  命中就报 `boot region kept intact`。即使 `0x54` 处的代码指纹已被写坏，仍会被判成完好
+  → 屏幕"修好了"、实际起不来。
+- **新判据（与 Windows 侧 `EnsureNtfsBootRegion` 等价）**：
+  1. 分区 offset `0x54` 的 4 字节必须等于 `FA 33 C0 8E`（主判据）；
+  2. 扇区 1 起续段非全零（保留，降级为辅助条件）；
+  3. 任一不满足 → 用内置 `ntfs-boot-code.bin`（426 B @ `0x54`）+ `ntfs-boot-cont.bin`（4096 B @ 扇区 1）
+     重写，并按现有逻辑同步卷末尾备份引导扇区。
+- **日志三态**（不再出现含糊的 `kept intact` 单独成句）：
+  `boot region ok (0x54=fa33c08e)` / `boot region rewritten` / `ERROR: boot region rewrite failed (0x54=...)`。
+- **实现**：抽出纯 shell 函数 `zj_repair_boot_region <dev> <code> <cont> <total_sectors>`，
+  由 `tests/test_boot_region.sh`（17 检查）覆盖：判据命中跳过且字节不变、`0x54` 错误重写、
+  续段全零重写、缺内置 blob 时报错返回 1、给出总扇区数时末尾备份扇区同步、脚本内不得再出现 `kept intact`。
+- 写入路径的 `dd` 去掉 `2>/dev/null`（B 类不消音），探测性读取保留（A 类），
+  见 `docs/25-PIT坑位册.md` PIT-217。
+- 救援载荷按 `1.0.0.3` 重新构建（`bootfiles/initramfs-zjrestore.cpio.gz` 17,408,065 B，
+  内戳 `rescue build stamp: 1.0.0.3`），`version.json` / `rescue-build.txt` / initramfs 内戳三元一致。
+
 ## 1.0 beta.2（2026-11-07，内部 `1.0.0.2`）
 
 > 测试版（Beta）。相对 beta.1 的核心改动：**ESP 救援载荷不再备份**。

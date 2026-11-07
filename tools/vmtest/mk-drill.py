@@ -136,6 +136,7 @@ image_index=1
 esp_index=2
 ea_index=3
 repair_boot=1
+keep_old=1
 """
 
 MENU_TXT = ("timeout 3\ndefault 0\ntitle zjrestore-test\n"

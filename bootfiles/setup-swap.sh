@@ -54,12 +54,16 @@ M=/tmp/zjsetup
 plant_old() {   # plant_old <dir>
     mkdir -p "$1/Windows/System32"
     echo "OLD_KERNEL"   > "$1/Windows/System32/ntoskrnl.exe"
+    echo "OLD_WINLOAD"  > "$1/Windows/System32/winload.exe"
     echo "OLD_BOOTMGR"  > "$1/bootmgr"
     echo "old user data" > "$1/old_userfile.txt"
 }
 plant_new() {   # plant_new <dir>
     mkdir -p "$1/Windows/System32"
     echo "NEW_KERNEL"   > "$1/Windows/System32/ntoskrnl.exe"
+    # zjswap.sh H1 交换后校验 Windows\System32\winload(.exe/.efi) 至少存在一个，
+    # 缺了会 exit 5；演练新树必须带这个标记文件，否则小树永远过不了 H1。
+    echo "NEW_WINLOAD"  > "$1/Windows/System32/winload.exe"
     echo "NEW_BOOTMGR"  > "$1/bootmgr"
     echo "new user data" > "$1/new_userfile.txt"
 }
