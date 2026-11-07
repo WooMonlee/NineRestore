@@ -738,6 +738,11 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
             msg += Tr("MB。请清理 ESP 上的其它文件，或换用更小的 initramfs。\n");
             snprintf(line, sizeof(line), "%s", msg.c_str());
             log += line;
+            // 写满/只读时也要让用户看到"旧 vs 新"两个版本，而不是只有一串 MB 数字：
+            // 与 CopyOne/verify 失败分支保持同一 fail-closed 文案。
+            if (RescuePayloadMustNotBeReused(priorState))
+                log += RescuePayloadFailMessage(prior.build, SYSRECOVER_VERSION) +
+                       "\n";
             return false;
         }
     }
