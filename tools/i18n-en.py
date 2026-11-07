@@ -411,6 +411,7 @@ EN = {
     '打包日志': 'Collect logs',
     '打开日志': 'Open Logs',
     '打开所在文件夹': 'Open Containing Folder',
+    '多次失败请把日志发给我们分析：QQ 群 1128237828 / 邮箱 ms_2@qq.com': 'If it keeps failing, please send us the logs: QQ group 1128237828 / email ms_2@qq.com',
     '打开日志文件夹': 'Open Log Folder',
     '打开目标卷失败 err=': 'Failed to open the target volume, err=',
     '打开镜像失败：%ls\n': 'Failed to open the image: %ls\n',

@@ -914,6 +914,9 @@ void CMainForm::ShowRescueFailureNotice() {
     RescueNotice n = CheckLastRescueFailure();
     if (n.msg.empty())
         return;
+    // N20 ③：失败提示统一附上求助渠道（救援层首屏、docs/33 三处一致）。
+    n.msg += L"\n\n";
+    n.msg += Tr(L"多次失败请把日志发给我们分析：QQ 群 1128237828 / 邮箱 ms_2@qq.com");
     size_t nl = n.msg.find(L'\n');
     SetStatus(nl == std::wstring::npos ? n.msg : n.msg.substr(0, nl));
     int choice;

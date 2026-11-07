@@ -572,34 +572,34 @@ emit_result(){
         say "===== end (photograph this screen) ====="
     fi
 }
-# PIT-197（2026-11-01 现场死循环）：暂存用的"一次性启动项"必须**在进入救援的最早
-# 时刻**失效。原先这段逻辑放在 zjrestore-lite.sh 的 ESP 修复段（swap **之后**），
-# 一旦 swap 早退（~new 缺失等）就永远走不到 → 临时内核始终在 ESP 上 → 固件每次都
-# 把我们这条（BootOrder 置顶）启动项拉起来 → 无限重启进救援。
-# 现在改到 init 里、且在调用 lite **之前**执行；reboot_now 里再兜一次。
-# H6（1.0）：把 bootorder.bak 写回固件 BootOrder。
-# efivarfs 文件 = 4 字节属性头 + 数据；写回必须保留属性头（否则固件变量属性变空）。
-# 写完**读回比对**（cmp），只有内容一致才算成功，调用方据此决定要不要删标记。
-restore_bootorder(){
-    _rbk=$1
+# N20（2026-11-07，用户拍板 ①②③）：
+# 进救援、确认契约与日志可读之后、任何写目标盘动作之前，把启动顺序**还给用户**：
+# 以 bootorder.pre.bak（暂存前的原始顺序）为基准，写回 BootOrder，再把这次的一次性
+# 启动项**追加到末尾**。不设 BootNext、不占第一位 —— 默认启动行为回到 Windows。
+# 救援项**不删**（用户 ①=B：保留常驻救援项），ESP 上的临时内核/条目都留着，
+# 这样中途重启/失败后，用户仍能从开机菜单手选救援。
+# 写 NVRAM 失败必须让调用方**中止**，不能带着"用户可能被困"的状态继续。
+# efivarfs 文件 = 4 字节属性头 + 数据；写回保留属性头，写完读回 cmp。
+write_bootorder_payload(){
+    _wp=$1
     _rbo=/sys/firmware/efi/efivars/BootOrder-8be4df61-93ca-11d2-aa0d-00e098032b8c
-    [ -s "$_rbk" ] || return 1
+    [ -s "$_wp" ] || return 1
     _rnew=/tmp/zj_bootorder.new
     rm -f "$_rnew"
     if [ -f "$_rbo" ]; then
-        dd if="$_rbo" bs=1 count=4 of="$_rnew" 2>/dev/null || return 1
+        dd if="$_rbo" bs=1 count=4 of="$_rnew" 2>>/tmp/zj_n20.err || return 1
     else
         printf '\007\000\000\000' > "$_rnew" || return 1
     fi
-    dd if="$_rbk" of="$_rnew" bs=1 oflag=append conv=notrunc 2>/dev/null || {
+    dd if="$_wp" of="$_rnew" bs=1 oflag=append conv=notrunc 2>>/tmp/zj_n20.err || {
         rm -f "$_rnew"
         return 1
     }
-    if ! cat "$_rnew" > "$_rbo" 2>/dev/null; then
+    if ! cat "$_rnew" > "$_rbo" 2>>/tmp/zj_n20.err; then
         rm -f "$_rnew"
         return 1
     fi
-    if ! dd if="$_rbo" bs=1 skip=4 2>/dev/null | cmp -s - "$_rbk"; then
+    if ! dd if="$_rbo" bs=1 skip=4 2>>/tmp/zj_n20.err | cmp -s - "$_wp"; then
         rm -f "$_rnew"
         return 1
     fi
@@ -607,89 +607,309 @@ restore_bootorder(){
     return 0
 }
 
-disarm_staged_entry(){
-    _dn=0
-    for _dd in /dev/nvme*n*p* /dev/sd*[0-9] /dev/vd*[0-9] /dev/mmcblk*p*; do
-        [ -b "$_dd" ] || continue
-        _dt=$(timeout 20 blkid -s TYPE -o value "$_dd" 2>>/tmp/zj_disarm.err)
-        case "$_dt" in vfat|fat|fat32|msdos) ;; *) continue ;; esac
-        mkdir -p /tmp/zj_dis
-        if timeout 20 mount -t vfat -o rw "$_dd" /tmp/zj_dis 2>>/tmp/zj_disarm.err; then
-            if [ -f /tmp/zj_dis/EFI/ZJRESTORE/vmlinuz-zjtemp.efi ]; then
-                if rm -f /tmp/zj_dis/EFI/ZJRESTORE/vmlinuz-zjtemp.efi; then
-                    sync
-                    say "staged boot entry disarmed ($_dd)"
-                    _dn=$((_dn + 1))
-                else
-                    say "WARN: cannot remove temp kernel on $_dd (ESP read-only?)"
-                fi
-            fi
-            # PIT-209：内核删了、NVRAM 里的 Boot#### 还指着它 —— 固件每次开机
-            # 都先去加载一个不存在的文件（部分固件就此卡住/反复重启）。条目号
-            # 由 Windows 暂存阶段写进 temp-entry.txt；删前核对变量内容确实含
-            # zjtemp，避免编号被复用后误删别人的条目。
-            _tnfile=/tmp/zj_dis/EFI/ZJRESTORE/temp-entry.txt
-            if [ -f "$_tnfile" ]; then
-                _tn_ok=1
-                _tn=$(tr -d ' \t\r\n' < "$_tnfile")
-                case "$_tn" in
-                    Boot[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f])
-                        _tv="/sys/firmware/efi/efivars/${_tn}-8be4df61-93ca-11d2-aa0d-00e098032b8c"
-                        if [ -f "$_tv" ]; then
-                            if tr -d '\000' < "$_tv" | grep -q 'zjtemp'; then
-                                # H6：删完**复查文件确实消失**，否则不算成功（保留标记）
-                                if rm -f "$_tv" && [ ! -f "$_tv" ]; then
-                                    say "temporary firmware entry $_tn removed"
-                                else
-                                    say "WARN: cannot remove firmware entry $_tn (marker kept)"
-                                    _tn_ok=0
-                                fi
-                            else
-                                say "WARN: $_tn does not look like ours, left alone"
-                                _tn_ok=0
-                            fi
-                        else
-                            say "temporary firmware entry $_tn already absent"
-                        fi
-                        ;;
-                    *)
-                        say "WARN: bad temp-entry marker ($_tn), left alone"
-                        _tn_ok=0
-                        ;;
-                esac
-                # H6：从 bootorder.bak 恢复 BootOrder；恢复失败 → 保留标记，下次还能重试
-                _bk=/tmp/zj_dis/EFI/ZJRESTORE/bootorder.bak
-                if [ "$_tn_ok" -eq 1 ] && [ -f "$_bk" ]; then
-                    if restore_bootorder "$_bk"; then
-                        rm -f "$_bk"
-                        say "BootOrder restored from bootorder.bak"
-                    else
-                        say "WARN: restore BootOrder failed (marker kept for retry)"
-                        _tn_ok=0
-                    fi
-                fi
-                if [ "$_tn_ok" -eq 1 ]; then
-                    if rm -f "$_tnfile"; then
-                        say "staged boot entry disarmed"
-                    else
-                        say "WARN: cannot remove temp-entry marker"
-                    fi
-                else
-                    say "WARN: staged entry not fully disarmed, marker kept"
-                fi
-            fi
-            umount /tmp/zj_dis
-        else
-            say "WARN: cannot mount $_dd to disarm staged entry"
+# 兼容旧调用点：只把 bak 原样写回（不追加条目）。
+restore_bootorder(){
+    write_bootorder_payload "$1"
+}
+
+# 把一个 Boot#### 的编号（如 0031）以 2 字节小端追加到 payload 文件。
+append_boot_entry(){
+    _ae_f=$1
+    _ae_hex=$2
+    _ae_num=$((0x$_ae_hex))
+    _ae_lo=$((_ae_num & 255))
+    _ae_hi=$(((_ae_num >> 8) & 255))
+    printf "\\$(printf '%03o' "$_ae_lo")\\$(printf '%03o' "$_ae_hi")" \
+        >> "$_ae_f" || return 1
+    return 0
+}
+
+# 以原始顺序文件为基准，去掉我们这条（可能出现多次），再把救援项追加到末尾。
+# $1=基准文件（bootorder.pre.bak 或 bootorder.bak），$2=我们的条目号（十进制，可空）
+build_bootorder_payload(){
+    _bp_base=$1
+    _bp_num=$2
+    _bp_out=/tmp/zj_bootorder.hb
+    : > "$_bp_out" || return 1
+    _bp_vals=$(od -An -tu2 -v "$_bp_base" 2>>/tmp/zj_n20.err | tr -s ' \n' ' ')
+    for _bp_v in $_bp_vals; do
+        [ -n "$_bp_num" ] && [ "$_bp_v" = "$_bp_num" ] && continue
+        printf "\\$(printf '%03o' $((_bp_v & 255)))\\$(printf '%03o' $(((_bp_v >> 8) & 255)))" \
+            >> "$_bp_out" || return 1
+    done
+    if [ -n "$_bp_num" ]; then
+        append_boot_entry "$_bp_out" "$(printf '%04x' "$_bp_num")" || return 1
+    fi
+    return 0
+}
+
+# temp-entry.txt 缺失时（旧版安装）扫 efivarfs 找我们这条的描述。
+find_our_entry_hex(){
+    for _fe in /sys/firmware/efi/efivars/Boot[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]-8be4df61-93ca-11d2-aa0d-00e098032b8c; do
+        [ -f "$_fe" ] || continue
+        _fh=$(basename "$_fe")
+        _fh=${_fh#Boot}
+        _fh=${_fh%%-*}
+        if is_our_temp_entry "$_fh"; then
+            echo "$_fh"
+            return 0
         fi
     done
-    [ "$_dn" -gt 0 ] || say "staged entry disarm: nothing to do"
+    return 1
+}
+
+# N21（2026-11-07）：Secure Boot/grub 下的一次性项指向 shimx64.efi，
+# 变量内容里**没有** zjtemp 文件名 —— 旧实现 grep zjtemp 永远不匹配，
+# disarm 静默失败 → BootOrder 不还原 → 反复进救援。现改为按描述
+# "SysRecover Temporary Restore" 或路径中的 ZJRESTORE 识别。
+is_our_temp_entry(){
+    _it_hex=$1
+    case "$_it_hex" in
+        [0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]) ;;
+        *) return 1 ;;
+    esac
+    _it_v="/sys/firmware/efi/efivars/Boot${_it_hex}-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+    [ -f "$_it_v" ] || return 1
+    # 变量内容是二进制（描述按 UEFI 规范是 UTF-16LE），busybox 的 tr/sed 对 NUL
+    # 不可靠；用 od 打成无空格十六进制串再匹配（ASCII/UTF-16LE 两种都认）。
+    _it_hx=$(od -An -tx1 -v "$_it_v" 2>>/tmp/zj_n20.err | tr -d ' \n')
+    case "$_it_hx" in
+        # "SysRecover Temporary Restore"（UTF-16LE / ASCII）
+        *5300790073005200650063006f007600650072*) return 0 ;;
+        *5379735265636f766572*) return 0 ;;
+        # 路径里的 ZJRESTORE（UTF-16LE / ASCII）
+        *5a004a0052004500530054004f00520045*) return 0 ;;
+        *5a4a524553544f5245*) return 0 ;;
+    esac
+    return 1
+}
+
+# N20：busybox initramfs 不会自动挂 efivarfs（systemd 才会）。写 NVRAM 前先确保
+# /sys/firmware/efi/efivars 可用：没有 EFI 运行时（BIOS 机）→ 返回 0 表示"无 NVRAM
+# 可归还"；有 EFI 但挂不上 → 返回 1，调用方必须中止。
+ensure_efivars(){
+    [ -d /sys/firmware/efi ] || return 0
+    _ev=/sys/firmware/efi/efivars
+    mkdir -p "$_ev" 2>>/tmp/zj_n20.err
+    if [ -z "$(ls -A "$_ev" 2>>/tmp/zj_n20.err)" ]; then
+        timeout 10 modprobe efivarfs 2>>/tmp/zj_n20.err
+        timeout 10 mount -t efivarfs efivarfs "$_ev" 2>>/tmp/zj_n20.err || {
+            say "ERROR: cannot mount efivarfs (NVRAM unavailable)"
+            return 1
+        }
+        say "efivarfs mounted"
+    fi
+    [ -d "$_ev" ] || return 1
     return 0
+}
+
+hand_back_bootorder(){
+    ensure_efivars || return 1
+    _hb_any=0
+    _hb_bad=0
+    for _dd in /dev/nvme*n*p* /dev/sd*[0-9] /dev/vd*[0-9] /dev/mmcblk*p*; do
+        [ -b "$_dd" ] || continue
+        _dt=$(timeout 20 blkid -s TYPE -o value "$_dd" 2>>/tmp/zj_n20.err)
+        case "$_dt" in vfat|fat|fat32|msdos) ;; *) continue ;; esac
+        mkdir -p /tmp/zj_hb
+        if timeout 20 mount -t vfat -o rw "$_dd" /tmp/zj_hb 2>>/tmp/zj_n20.err; then
+            _ek=/tmp/zj_hb/EFI/ZJRESTORE/temp-entry.txt
+            _bk=/tmp/zj_hb/EFI/ZJRESTORE/bootorder.bak
+            _pk=/tmp/zj_hb/EFI/ZJRESTORE/bootorder.pre.bak
+            if [ ! -f "$_ek" ] && [ ! -f "$_bk" ] && [ ! -f "$_pk" ]; then
+                umount /tmp/zj_hb
+                continue
+            fi
+            _hb_any=1
+            _tn=""
+            [ -f "$_ek" ] && _tn=$(tr -d ' \t\r\n' < "$_ek")
+            if [ -n "$_tn" ] && ! is_our_temp_entry "${_tn#Boot}"; then
+                _tn=""
+            fi
+            if [ -z "$_tn" ]; then
+                _tn=$(find_our_entry_hex)
+                [ -n "$_tn" ] && _tn="Boot$_tn"
+            fi
+            # 用户②：默认必须直接进 Windows → 以 bootorder.pre.bak 原始顺序为基准，
+            # 我们这条去重后追加到末尾；pre.bak 不存在（旧版安装）退回 bootorder.bak。
+            if [ -s "$_pk" ]; then
+                _base=$_pk
+                _base_name=bootorder.pre.bak
+            elif [ -s "$_bk" ]; then
+                _base=$_bk
+                _base_name=bootorder.bak
+            else
+                say "ERROR: bootorder.pre.bak / bootorder.bak missing on $_dd; refusing to hand back"
+                _hb_bad=1
+                umount /tmp/zj_hb
+                continue
+            fi
+            _num=""
+            [ -n "$_tn" ] && _num=$((0x${_tn#Boot}))
+            if ! build_bootorder_payload "$_base" "$_num"; then
+                say "ERROR: cannot build BootOrder payload from $_base_name on $_dd"
+                _hb_bad=1
+                umount /tmp/zj_hb
+                continue
+            fi
+            _new=/tmp/zj_bootorder.hb
+            if write_bootorder_payload "$_new"; then
+                say "BootOrder handed back from $_base_name: original order, rescue entry ${_tn:-<none>} last"
+                # 启动默认已回到 Windows；救援项与 ESP 文件保留（不 disarm）
+                rm -f "$_bk"
+                # BootNext 若还指着我们这条，删掉，避免下一次又进救援
+                if [ -n "$_num" ]; then
+                    _bn=/sys/firmware/efi/efivars/BootNext-8be4df61-93ca-11d2-aa0d-00e098032b8c
+                    if [ -f "$_bn" ]; then
+                        _bnv=$(dd if="$_bn" bs=1 skip=4 2>>/tmp/zj_n20.err | od -An -tu2 | tr -d ' \n')
+                        if [ "$_bnv" = "$_num" ]; then
+                            rm -f "$_bn"
+                            say "BootNext pointing to $_tn cleared"
+                        fi
+                    fi
+                fi
+            else
+                say "ERROR: cannot write BootOrder on $_dd (NVRAM read-only/full?)"
+                _hb_bad=1
+            fi
+            rm -f "$_new"
+            umount /tmp/zj_hb
+        else
+            say "WARN: cannot mount $_dd to hand back boot order"
+        fi
+    done
+    [ "$_hb_any" -gt 0 ] || say "boot hand-back: nothing staged on ESP (already handed back)"
+    return "$_hb_bad"
+}
+
+# N20 ③：用户拍板的求助渠道（救援层首屏 + GUI 失败提示 + docs/33 三处一致）。
+show_support(){
+    say "求助：QQ 群 1128237828 / 邮箱 ms_2@qq.com（请把救援日志一起发来）"
+}
+
+# 目标盘上是否还留着旧系统备份 ~old（只有 A 引擎的交换会留下它）。
+has_old_tree(){
+    _ho=$1
+    mkdir -p /tmp/zj_old_chk
+    if timeout 30 mount -t ntfs3 "$_ho" /tmp/zj_old_chk 2>>/tmp/zj_n20.err; then
+        if [ -d /tmp/zj_old_chk/~old/Windows ]; then
+            umount /tmp/zj_old_chk
+            return 0
+        fi
+        umount /tmp/zj_old_chk
+        return 1
+    fi
+    if timeout 30 ntfs-3g -o force "$_ho" /tmp/zj_old_chk 2>>/tmp/zj_n20.err; then
+        if [ -d /tmp/zj_old_chk/~old/Windows ]; then
+            umount /tmp/zj_old_chk
+            return 0
+        fi
+        umount /tmp/zj_old_chk
+    fi
+    return 1
+}
+
+find_old_part(){
+    for _fp in /dev/nvme*n*p* /dev/sd*[0-9] /dev/vd*[0-9] /dev/mmcblk*p*; do
+        [ -b "$_fp" ] || continue
+        if has_old_tree "$_fp"; then
+            echo "$_fp"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# 回滚成功后，清掉根上的旧契约/日志，避免下一次进救援又被当成"待做任务"。
+clear_stale_task(){
+    _ct=$1
+    mkdir -p /tmp/zj_n20_clean
+    if timeout 30 mount -t ntfs3 "$_ct" /tmp/zj_n20_clean 2>>/tmp/zj_n20.err; then
+        rm -f /tmp/zj_n20_clean/restore-task.conf
+        for _cf in /tmp/zj_n20_clean/_zjresy*.log; do
+            [ -f "$_cf" ] && rm -f "$_cf"
+        done
+        umount /tmp/zj_n20_clean
+    fi
+}
+
+# N20 ③：上次任务未确认完成时的首屏三选一。$1=目标设备（可空，空则扫盘找 ~old），
+# $2=1 表示当前还有可续做的任务。返回 0 = 继续执行；回滚/重启不会返回。
+triage_previous(){
+    _tp_dev=$1
+    _tp_has=$2
+    [ -n "$_tp_dev" ] || _tp_dev=$(find_old_part)
+    [ -n "$_tp_dev" ] || return 0
+    has_old_tree "$_tp_dev" || return 0
+    while :; do
+        say "==== SysRecover：上次任务未确认完成 ===="
+        say "旧系统备份（~old）还在，说明上次还原没有走到「新系统确认成功」这一步。"
+        say "[1] 回滚到旧系统（推荐；会丢弃新系统）"
+        say "[2] 再试新系统"
+        say "[3] 仅重启"
+        show_support
+        say "choice? auto-[1] in 120s"
+        _ch=
+        read -t 120 -r _ch || _ch=
+        [ -z "$_ch" ] && _ch=1
+        case "$_ch" in
+            1)
+                say "回滚会丢弃新系统。确认请输入大写 YES（60s 内）："
+                _cf=
+                read -t 60 -r _cf || _cf=
+                case "$_cf" in
+                    YES) ;;
+                    *) say "未确认，返回菜单"; continue ;;
+                esac
+                say "开始回滚：~old -> 根，新系统树丢弃"
+                _urc=1
+                if [ -f /zjswap-undo.sh ]; then
+                    sh /zjswap-undo.sh "$_tp_dev" /tmp/zj_n20_undo
+                    _urc=$?
+                else
+                    say "ERROR: zjswap-undo.sh missing in initramfs"
+                fi
+                case "$_urc" in
+                    0)
+                        clear_stale_task "$_tp_dev"
+                        say "回滚完成：旧系统已回到根，重启后进入旧系统"
+                        sync
+                        sleep 3
+                        reboot_now
+                        ;;
+                    2) say "回滚未执行：没有可用的 ~old（旧系统备份不完整），目标盘未动" ;;
+                    3) say "回滚未执行：根上还有上次中断留下的 ~new，请重试或联系支持" ;;
+                    *) say "回滚失败（rc=$_urc），目标盘可能未完成交换；请把日志发给我们" ;;
+                esac
+                show_support
+                ;;
+            2)
+                if [ "$_tp_has" = "1" ]; then
+                    say "继续上次未完成的任务"
+                    return 0
+                fi
+                say "没有可续做的任务，按“再试新系统”重启"
+                sync
+                sleep 2
+                reboot_now
+                ;;
+            3)
+                sync
+                sleep 2
+                reboot_now
+                ;;
+            *) say "invalid choice: $_ch (1=rollback, 2=retry, 3=reboot)" ;;
+        esac
+    done
 }
 
 reboot_now(){
     say "AUTO-RECOVER: rebooting now (open SysRecover on next Windows start for the report)"
-    disarm_staged_entry   # PIT-197：退场前再兜一次（幂等）
+    # N20：启动顺序已在进救援时归还；这里再兜一次（幂等，失败不阻塞重启）
+    hand_back_bootorder || {
+        say "ERROR: BootOrder hand-back failed again; please fix boot order in BIOS"
+        show_support
+    }
     sync
     sleep 2
     reboot -f
@@ -715,6 +935,7 @@ menu_loop(){
         say "[1] Retry restore once more"
         say "[2] Reboot now"
         say "[3] Expert shell"
+        show_support
         say "choice? auto-[2] in 120s"
         _ch=
         read -t 120 -r _ch || _ch=
@@ -748,7 +969,21 @@ if [ -x /zjrestore-lite.sh ] && { [ -n "$found_log" ] || [ -f /tmp/restore-task.
 _rc=0
 _rt=0
 if [ "$_ran" = "1" ]; then
-    disarm_staged_entry   # PIT-197：先让一次性启动项失效，再干活
+    # N20：契约/日志已可读（上面已按 found_log / conf 判定），且还没写目标盘。
+    # 先把启动顺序还给 Windows；写 NVRAM 失败 → 中止，不带着"用户可能被困"继续。
+    if ! hand_back_bootorder; then
+        say "ERROR: 无法把启动顺序还给 Windows（NVRAM 只读或已满）。"
+        say "ERROR: 为避免你重启后被反复送回救援层，本次不写目标盘。"
+        show_support
+        /bin/sh /zjrestore-lite.sh zz-blackbox nvram-handback
+        sync
+        say "5 秒后关机；开机时按 F12/Esc 进启动菜单选 Windows，或进 BIOS 改启动顺序"
+        sleep 5
+        poweroff -f
+        reboot -f
+    fi
+    # N20 ③：上次任务没走完（盘上还留着 ~old）→ 首屏三选一。
+    triage_previous "$TARGET_DEV" 1
     say "run restore: target=${TARGET_DEV:-<from offset>}"
     while :; do
         /bin/sh /zjrestore-lite.sh "$TARGET_DEV"
@@ -783,8 +1018,13 @@ if [ ! -s /tmp/zj-bb.done ]; then
     [ -s /tmp/zj-bb.done ] || say "WARN: no writable surface found for logs"
 fi
 emit_result
-# 没有任务 = 不是失败：回原系统（10s 给人工断电的机会）
+# 没有任务 = 不是失败：先归还启动顺序；若盘上还留着 ~old（上次没走完），
+# 首屏给三选一（回滚/再试/重启），否则回原系统（10s 给人工断电的机会）。
 if [ "$_ran" = "0" ]; then
+    hand_back_bootorder || {
+        say "WARN: BootOrder hand-back failed (nothing to hand back or NVRAM error)"
+    }
+    triage_previous "" 0
     say "no restore task on this machine -> reboot in 10s (power off now to stay)"
     sleep 10
     reboot_now

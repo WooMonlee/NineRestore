@@ -80,7 +80,9 @@ EXCLUDE_PREFIXES = [
     'kernel/fs/ntfs/',        # 老只读 ntfs 驱动（我们走 ntfs3 / ntfs-3g）
     'kernel/fs/fuse/',        # fuse 本身内建（CONFIG_FUSE_FS=y），这里的 cuse 不需要
     # 用不到的通用 fs
-    'kernel/fs/overlayfs/', 'kernel/fs/autofs/', 'kernel/fs/efivarfs/',
+    'kernel/fs/overlayfs/', 'kernel/fs/autofs/',
+    # N20（2026-11-07）：efivarfs 不再排除 —— 救援层要写 BootOrder 归还启动顺序，
+    # 没有它 `mount -t efivarfs` 直接失败（12KB，见 EXTRA_KEEP）。
     'kernel/fs/pstore/', 'kernel/fs/binfmt_misc',
     # 虚拟化/媒体/声音/IB/测试
     'kernel/arch/x86/kvm/', 'kernel/drivers/media/', 'kernel/sound/',
@@ -127,6 +129,8 @@ EXTRA_KEEP = [
     'kernel/drivers/hid/hid.ko.xz',
     'kernel/drivers/hid/hid-generic.ko.xz',
     'kernel/drivers/hid/usbhid/usbhid.ko.xz',
+    # N20：救援层写 BootOrder 需要 efivarfs（Debian 内核里它是模块）。
+    'kernel/fs/efivarfs/efivarfs.ko.xz',
 ]
 
 

@@ -115,16 +115,6 @@ bool ReadVar(const std::wstring& name, std::vector<BYTE>& out) {
     return true;
 }
 
-bool WriteVar(const std::wstring& name, const void* data, DWORD size) {
-    return SetFirmwareEnvironmentVariableW(name.c_str(), kGlobalGuid,
-                                            const_cast<void*>(data), size) != 0;
-}
-
-bool DeleteVar(const std::wstring& name) {
-    return SetFirmwareEnvironmentVariableW(name.c_str(), kGlobalGuid, nullptr,
-                                            0) != 0;
-}
-
 std::wstring OptionDesc(const std::vector<BYTE>& b) {
     if (b.size() < 8) return {};
     WORD fpll = 0;
@@ -194,43 +184,8 @@ int FindUefiEntry(const wchar_t* desc, bool requireOurs) {
     return -1;
 }
 
-// L5：返回值改为 bool —— NVRAM 写保护/写满时 WriteVar/DeleteVar 会失败，
-// 0.9.96 忽略返回值，失败后仍打 "removed" 日志且上层当成功。
-bool RemoveUefiEntry(int num) {
-    if (num < 0) return true;
-    bool ok = true;
-    std::vector<BYTE> order;
-    if (ReadVar(L"BootOrder", order)) {
-        std::vector<WORD> keep;
-        for (size_t i = 0; i + 1 < order.size(); i += 2) {
-            WORD v = 0;
-            memcpy(&v, &order[i], 2);
-            if (v != (WORD)num) keep.push_back(v);
-        }
-        std::vector<BYTE> nb(keep.size() * 2);
-        for (size_t i = 0; i < keep.size(); ++i)
-            memcpy(&nb[i * 2], &keep[i], 2);
-        if (!WriteVar(L"BootOrder", nb.data(), (DWORD)nb.size())) {
-            ok = false;
-            Log("ERROR: write BootOrder failed (NVRAM read-only/full?)");
-        }
-    }
-    if (!DeleteVar(VarName(num))) {
-        ok = false;
-        Log("ERROR: delete Boot#### failed (NVRAM read-only/full?)");
-    }
-    WORD next = 0;
-    DWORD n = GetFirmwareEnvironmentVariableW(L"BootNext", kGlobalGuid,
-                                              &next, sizeof(next));
-    if (n == sizeof(next) && next == (WORD)num &&
-        !DeleteVar(L"BootNext")) {
-        ok = false;
-        Log("ERROR: delete BootNext failed");
-    }
-    Log(ok ? "uefi temporary entry removed"
-           : "uefi temporary entry removal FAILED");
-    return ok;
-}
+// N20 ①=B：不再删除 UEFI 救援项（原 RemoveUefiEntry 已移除）。救援项作为常驻
+// "一定进得去"的入口保留；默认启动顺序由救援层在进层时归还给 Windows。
 
 // 同步执行并抓 stdout（bcdedit 条目存在性、mountvol 不必抓）。
 bool RunCapture(const std::wstring& exe, const std::wstring& args,
@@ -557,19 +512,23 @@ int wmain(int argc, wchar_t** argv) {
 
     ApplyComputerName();  // PIT-211：B 引擎的改机器名
     bool ok = true;
-    // L5：双条件匹配（描述 + 设备路径），避免误删同名但非本项目的条目。
+    // N20（2026-11-07，用户 ①=B）：UEFI 救援项**保留**，作为"一定进得去"的钥匙；
+    // 救援层在进层时已把 BootOrder 归还为"原始顺序 + 救援项垫底"，默认仍进 Windows。
+    // 因此这里不再删除 Boot####，也不能删除 ESP 上的载荷（否则保留的条目会指向空文件）。
     const int temp = FindUefiEntry(kTempEntryDesc, true);
     const bool menuUefi = FindUefiEntry(kMenuEntryDesc, true) >= 0;
-    if (!RemoveUefiEntry(temp)) {
-        // 写入失败（NVRAM 只读/写满）→ 明确记录，不假装清理成功。
-        ok = false;
-        Log("WARN: temporary UEFI entry could not be fully removed");
-    }
+    const bool uefiRescueKept = (temp >= 0) || menuUefi;
+    Log(uefiRescueKept ? "N20: keep UEFI rescue entry + ESP payload"
+                       : "no UEFI rescue entry -> BIOS-path cleanup");
+    // BIOS/MBR：引导文件在系统分区里，交换后不一定还在新根上；1.0 仍按原逻辑清临时项，
+    // 常驻救援留待物理机验证（见 docs/34 已知边界）。
     RemoveBcdTemp();
 
     const bool menu = menuUefi || BcdMenuExists();
     if (menu) {
         Log("persistent menu present -> keep menu files/entry");
+    } else if (uefiRescueKept) {
+        Log("UEFI permanent rescue kept -> keep ESP payload");
     } else {
         RemoveEspRescue();
         wchar_t win[MAX_PATH] = {};

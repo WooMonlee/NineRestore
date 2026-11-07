@@ -309,6 +309,7 @@ wimlib 初始化失败\n=wimlib initialization failed\n
 备份镜像不可用：=Backup image is unusable: 
 备返（保留旧系统）仅支持默认 A 引擎：--engine block 会格式化目标分区并丢弃旧系统。请改用默认引擎，或取消备返。=KeepOld (preserve old system) is only supported with the default A-engine: --engine block formats the target partition and discards the old system. Use the default engine, or disable KeepOld.
 复制失败：=Copy failed: 
+多次失败请把日志发给我们分析：QQ 群 1128237828 / 邮箱 ms_2@qq.com=If it keeps failing, please send us the logs: QQ group 1128237828 / email ms_2@qq.com
 失败=FAILED
 失败：=Failed: 
 子镜像=Sub-images
