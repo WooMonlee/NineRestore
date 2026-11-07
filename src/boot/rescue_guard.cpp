@@ -151,7 +151,6 @@ bool BackupEspRescuePayload(const std::wstring& espRoot, const std::string& tag,
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
             const std::wstring src = efiDir + L"\\" + name;
             const std::wstring dst = bak + L"\\" + name;
-            SetFileAttributesW(src.c_str(), FILE_ATTRIBUTE_NORMAL);
             if (CopyFileW(src.c_str(), dst.c_str(), FALSE)) {
                 ++n;
             } else {
