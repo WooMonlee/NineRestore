@@ -22,6 +22,20 @@
 - 0.9.93 旧载荷 → 新版接管实测记录、客户"扫描后安装"失败链条，见
   `docs/34-发布门禁总表.md` C.4。
 
+### 未发布修正（2026-11-07，装菜单→重启→救援全链路实测）
+
+- **图标**：改用用户定稿的 `NineRestore_小尺寸增强.ico`（16/24 小尺寸增强帧），
+  覆盖 `resources/SysRecover.ico`，GUI/CLI/检查器/便携壳统一随构建嵌入；
+  `ProductName` 仍为「九转还原」，未改品牌文案。
+- **实测结论（写入门禁表 C.4 §7）**：`fb21851` 之后重造 0.9.93 旧载荷现场，再走
+  「安装到启动 → 扫描后安装」：日志判 stale → 重写，`backup-pre-rewrite-20261107-205701` 落盘且
+  **不再被 stale 清理**；ESP initramfs 17,407,298 B、SHA256 与 `bootfiles/` 一致。
+  同一轮重启进救援（VMware UEFI，`bootsequence` 免热键）：
+  `entry-started.txt` = `entry=menu` / `build=1.0.0-beta.1`，
+  `ZJRESTORE-status.txt` = `result=OK` / `step=done` / `entry=menu` / `build=1.0.0-beta.1`。
+- **未判定**：首启三选一（N20）的屏幕行为本轮未取证（还原后系统来自 ESD、无 VMware Tools，
+  无法截图送键），见 C.4 §8。
+
 ### 数据安全（P0）
 
 - **H1 暂存交换 fail-closed**：`zjswap.sh` 任一 `move` 失败即非零退出（退出码 4），
