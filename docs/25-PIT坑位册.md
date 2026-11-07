@@ -2275,3 +2275,29 @@
   · 门禁影响：无。`check-shell.py` 只扫 `bootfiles/*.sh` 与 `tools/vmtest/*.sh`，不扫 `.bat`；
     `tools/vmtest` 目录本来就随仓库版本化，这次把「只存在于测试台 share、改坏了没人发现」的脚本收了进来。
 
+### PIT-219
+
+- PIT-219 **拆文件顺带出的门禁盲区：check-widths 只扫 main_form.cpp、i18n-wrap 白名单写死单文件**（2026-11-08，工程项）
+  · 背景：`src/gui/main_form.cpp`（3616 行）按职责拆成 8 个单元后，`tools/check-widths.py` 仍只读
+    `src/gui/main_form.cpp`。新单元里的 `SetStatus`/`Text` 文案一旦超出宽度预算，门禁会**静默放行**
+    （不是报错，而是漏检）；`tools/i18n-wrap.py` 的 `WRAP_FILES` 同样写死，回填工具会漏掉新单元。
+  · 处置：check-widths 改为扫 `src/gui/main_form*.cpp` 全部；i18n-wrap 白名单补齐 7 个新文件；
+    Makefile 的 `GUI_SRC`/`APP_SRC` 同步。拆分本身是纯搬移：任意源文件按行号切割，
+    x64+x86 编译通过，unit **107 cases/743 checks** 与拆前完全一致。
+  · 教训：**按文件切代码时，凡是"按文件名列举"的脚本都要同步核对**，否则门禁强度会随拆分悄悄下降。
+
+### PIT-220
+
+- PIT-220 **`skipFileErrors=true` 下 Capture/Append 跳过文件后仍返回 0：不完整备份被当完全成功**（2026-11-08，错误语义）
+  · 现象（0.9.x 语义）：备份遇到权限/占用读不到的文件，wimlib 按 `will_ignore` 跳过，最终 `rc=0`；
+    脚本用 `&&` 串联、UI 只看 rc，就会把"少了文件的镜像"当成功继续（跨机还原后才发现缺东西）。
+  · 处置（1.0）：`WimEngine::Capture`/`Append` 收尾时若 `skipped` 非空 → 返回
+    `kWimPartialSkipped=1001`（非零、非 wimlib 错误码、镜像可用）。`RunBackup` 把 1001 当
+    "放行主镜像 + 部分成功"；ESP/EA 子镜像的 1001 并入同一 `skippedList`，不再把整个备份判失败。
+    对外仍是显式状态：GUI「备份不完整」弹窗列出前若干条 + 日志全量；CLI 退出码 7
+    （只有显式 `--allow-skipped` 才归 0）。
+  · 单测：`wim_partial_skipped_is_explicit_nonzero`（断言非零、=1001、不与对外退出码 1/5/7 撞车）。
+  · 回滚审查结论：`ops_preserve` 部分搬迁先回滚再失败、`ops_returnold`/`ops_staged` 有契约回滚守卫、
+    `ops_backup` 的 ESP 失败**有意**不回滚主镜像（主镜像可用，注释已注明 A 方案语义）——
+    未发现"失败仍返回成功且不留痕迹"的路径。
+

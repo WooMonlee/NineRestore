@@ -3,6 +3,50 @@
 > 版本号唯一来源是 `src/common/version.h`；发布时 `version.h` / git tag / `dist/version.json` 三处同源。
 > 命名规则见 `docs/37-版本命名规范.md`（测试版 `1.0 beta.N` / 内部 `1.0.0.N` / 文件 `九转大还原1.0-beta.N.exe`）。
 
+## 1.0 beta.5（2026-11-08，内部 `1.0.0.5`）
+
+> 测试版（Beta）。相对 beta.4 只做**代码质量三项**，产品行为不变：拆过大源文件、
+> 统一错误语义（部分成功必须显式）、自有代码告警清零。
+
+### 1. 过大源文件按职责拆分（纯搬移，行为不变）
+
+| 原文件 | 拆分后 |
+|---|---|
+| `src/gui/main_form.cpp` 3616 行 | 8 个单元：窗口/消息泵、提示与事件路由、启动菜单、工具入口、分区与镜像、还原、备份、UI 状态（273–805 行/个） |
+| `src/app/selfdiag.cpp` 1668 行 | `selfdiag.cpp`（诊断报告/采集）+ `selfdiag_cleanup.cpp`（菜单回执/散落日志清理/部署痕迹/EA 扫描） |
+| `src/app/ops_staged.cpp` 2056 行 | `ops_staged.cpp`（暂存还原阶段）+ `ops_staged_menu.cpp`（菜单绑定契约/陈旧任务清理/一键重试） |
+| `src/boot/uefi.cpp` 1638 行 | **不拆**：单一域，载荷部署集中在 `InstallUefiBootEntry` 内部，硬切只会扩大失败面（1.0 稳定优先） |
+
+- 跨 TU 共用的 4 个小工具（`FormatGb` / `TimestampName` / `TimestampDate` / `StageCn`）
+  改为 `CMainForm` 私有静态成员；其余单文件工具留在各自分段，不引入新的公共头。
+- 门禁工具同步：`check-widths.py` 改为扫全部 `main_form*.cpp`（否则拆分后覆盖检查会静默变弱），
+  `i18n-wrap.py` 白名单补 7 个新文件。
+
+### 2. 错误语义：部分成功必须是显式状态
+
+- `WimEngine::Capture` / `Append` 在 `skipFileErrors=true` 下跳过不可读文件后**不再返回 0**
+  （0.9.x 会让脚本 `&&` 与"只看 rc"的调用方把不完整备份当完全成功），改为显式
+  `kWimPartialSkipped = 1001`：镜像照常可用、非致命、不与 wimlib 错误码重叠。
+- `RunBackup` 据此放行主镜像；ESP / EA 子镜像里的文件被跳过时不再把整个备份判失败，
+  统一进 `skippedList` → GUI「备份不完整」弹窗、CLI 退出码 7（显式 `--allow-skipped` 才归 0）。
+- 失败回滚逐处核对：`ops_preserve`（部分搬迁先回滚再失败）、`ops_returnold` / `ops_staged`
+  （契约回滚守卫）、`ops_backup`（ESP 失败有意不回滚主镜像，注释已注明 A 方案语义）——
+  未发现"失败仍返回成功且不留痕迹"的路径。
+- 新增单测 `wim_partial_skipped_is_explicit_nonzero`，钉住"部分成功非零、且不与对外退出码撞车"。
+
+### 3. 告警：自有代码全部 `-Werror`
+
+- 核实所有自研编译规则（app / cli / gui / launcher / bootfiles / 单测 / 便携包 stub）均带
+  `-Wall -Wextra -Werror`；第三方 duilib 保持 `-w`，GUI 的 `-fpermissive` 只放宽 duilib 头解析，
+  已在 Makefile 注明"不抑制告警、自研代码仍告警即失败"。
+- x64 / x86 两条链编译零告警。
+
+### 门禁
+
+`make check` 全绿：unit **108 cases / 748 checks**（新增 1 case / 5 checks）、`test_version` 18、
+check-docs / i18n / widths / shell / config / layers / foreground / secrets / versioninfo、
+boot-region 17/0、zjswap A–D。
+
 ## 1.0 beta.4（2026-11-08，内部 `1.0.0.4`）
 
 > 测试版（Beta）。相对 beta.3 的改动**只在测试台脚本与文档**，产品代码零改动；
