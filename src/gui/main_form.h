@@ -241,6 +241,11 @@ private:
     bool IsUniversalChecked();
     int  BackupFmt() const;  // combo 0/1/2
     std::wstring ElapsedText() const;  // 已用 mm:ss / h:mm:ss
+    // 拆分后跨 TU 共用的小工具（定义在 main_form.cpp；纯静态、不碰窗口状态）。
+    static std::wstring FormatGb(uint64_t bytes);
+    static std::wstring TimestampName();
+    static std::wstring TimestampDate();
+    static std::wstring StageCn(const std::wstring& s);
 
     bool m_backupMode = false;
     bool m_needReboot = true;  // 还原：true=已暂存需重启；false=已就地完成（PIT-064）

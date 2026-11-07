@@ -43,6 +43,13 @@ has_cjk = exs.has_cjk
 # 回填白名单 = 账本 ui 桶的全部来源文件（契约 boot/task.cpp 等不在其内）
 WRAP_FILES = [
     "src/gui/main_form.cpp",
+    "src/gui/main_form_notice.cpp",
+    "src/gui/main_form_bootmenu.cpp",
+    "src/gui/main_form_tools.cpp",
+    "src/gui/main_form_image.cpp",
+    "src/gui/main_form_restore.cpp",
+    "src/gui/main_form_backup.cpp",
+    "src/gui/main_form_ui.cpp",
     "src/gui/main_win.cpp",
     "src/gui/confirm_dlg.cpp",
     "src/gui/initdisk_dlg.cpp",

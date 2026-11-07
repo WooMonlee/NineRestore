@@ -33,7 +33,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SKIN = ROOT / "skin" / "main.xml"
-CODE = ROOT / "src" / "gui" / "main_form.cpp"
+# 主窗体按职责拆成 main_form*.cpp 后必须扫全部文件：SetStatus / Text 覆盖
+# 可能出现在任一拆分单元里，只扫 main_form.cpp 会漏检。
+CODE_DIR = ROOT / "src" / "gui"
+CODE_GLOB = "main_form*.cpp"
+
+
+def read_code() -> str:
+    return "".join(p.read_text(encoding="utf-8") + "\n"
+                   for p in sorted(CODE_DIR.glob(CODE_GLOB)))
 
 # ── 预算覆盖（不等于盒子宽的控件）────────────────────────────────────────
 # 值的算法写在注释里；未列出的控件一律 budget = 盒子宽 (r-l)。
@@ -124,7 +132,7 @@ def load_skin() -> tuple[dict, dict]:
 
 def load_code_labels() -> dict:
     """main_form.cpp 里 `Text(_T("name"), Tr(L"zh"))` 的覆盖文字。"""
-    src = CODE.read_text(encoding="utf-8")
+    src = read_code()
     out = {}
     for m in re.finditer(r'Text\(_T\("([^"]+)"\)\s*,\s*Tr\(L"([^"]+)"\)\)', src):
         out[m.group(1)] = m.group(2)
@@ -133,7 +141,7 @@ def load_code_labels() -> dict:
 
 def load_status_keys() -> list:
     """所有 `SetStatus(...)` 语句里的 L"..." 中文键（含三元的两条）。"""
-    src = CODE.read_text(encoding="utf-8")
+    src = read_code()
     keys = []
     for m in re.finditer(r"SetStatus\((.*?)\);", src, re.S):
         for k in re.findall(r'L"([^"]+)"', m.group(1)):
