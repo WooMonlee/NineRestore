@@ -29,6 +29,8 @@ REQUIRED = [
     "bootfiles/zjlog.sh",
     "bootfiles/zj-ea-apply.exe",
     "bootfiles/zj-restore-boot.exe",
+    # 载荷自报版本（N18，2026-11-07）：与 version.json / initramfs 同源
+    "bootfiles/rescue-build.txt",
     # 自足引导资产（2026-10-27，用户反馈 2：极简 PE 无 bootsect/bcdboot/bcdedit）
     "bootfiles/mbr-boot-code.bin",
     "bootfiles/ntfs-boot-code.bin",
@@ -70,6 +72,30 @@ def sha256(p: Path) -> str:
     return h.hexdigest()
 
 
+def _cpio_member(path: Path, name: str) -> str | None:
+    """从 gzip 的 newc cpio 里取一个成员（只用于读 zjrescue-version 小文件）。"""
+    import gzip
+    data = gzip.decompress(path.read_bytes())
+    off = 0
+    while off + 110 <= len(data):
+        hdr = data[off:off + 110]
+        if hdr[:6] != b"070701":
+            break
+        def field(i: int) -> int:
+            return int(hdr[6 + 8 * i:14 + 8 * i], 16)
+        size = field(6)
+        namesize = field(11)
+        nstart = off + 110
+        fname = data[nstart:nstart + namesize].split(b"\0")[0].decode(
+            "utf-8", "replace")
+        # newc：header(110)+name 一起按 4 字节对齐；数据后再按 4 对齐
+        dstart = nstart + namesize + (-(110 + namesize)) % 4
+        if fname == name:
+            return data[dstart:dstart + size].decode("utf-8", "replace")
+        off = dstart + size + (-size % 4)
+    return None
+
+
 def main() -> int:
     dist = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "dist"
     bad = []
@@ -99,6 +125,27 @@ def main() -> int:
             bad.append("version.json parse: %s" % e)
         if want and got != want:
             bad.append("version.json=%r != version.h=%r" % (got, want))
+    # N18：三条版本标识必须同源 —— version.json / dist 载荷自报 / initramfs 内戳。
+    # 背景：0.9.92 旧载荷留在 ESP，而程序一直"自称"新版；只比 exe 版本拦不住。
+    rb = dist / "bootfiles" / "rescue-build.txt"
+    if rb.is_file():
+        got_rb = rb.read_text(encoding="utf-8", errors="replace").strip()
+        if want and got_rb != want:
+            bad.append("bootfiles/rescue-build.txt=%r != version.h=%r"
+                       % (got_rb, want))
+    else:
+        bad.append("missing bootfiles/rescue-build.txt (package 未写载荷自报版本)")
+    icp = dist / "bootfiles" / "initramfs-zjrestore.cpio.gz"
+    if want and icp.is_file():
+        try:
+            stamp = _cpio_member(icp, "zjrescue-version")
+            if stamp is None:
+                bad.append("initramfs missing zjrescue-version (旧载荷/非本次构建)")
+            elif stamp.strip() != want:
+                bad.append("initramfs zjrescue-version=%r != version.h=%r"
+                           % (stamp.strip(), want))
+        except Exception as e:
+            bad.append("initramfs zjrescue-version 读取失败: %s" % e)
     if (dist / "logs").exists():
         bad.append("runtime directory present: logs/")
     # 版本资源（用户 2026-11-06）：每个**会被分发**的 exe 都要能在资源管理器

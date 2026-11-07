@@ -339,6 +339,31 @@ crash-test: $(CRASH_PROBE)
 # 冒烟（QEMU）仍封存（tools/vmtest 在 graveyard），单独 make smoke 不可用；见 docs/20。
 # 版本资源断言（用户 2026-11-06）：用 PowerShell 真读三个 exe 的 VersionInfo，
 # 与 version.h 比对；缺资源/不一致即失败 —— 以后换构建方式也别想悄悄丢掉。
+# ---- 救援载荷（initramfs）构建链与"过期即失败"硬门禁（N18，2026-11-07）----
+# 事故背景（N15/N10）：`package` 只 copy bootfiles/initramfs，从不重建；脚本改了
+# 而包没重打，dist 装出去就是旧码。现在把 initramfs 变成**真正的 Make 产物**：
+#   · 任何源文件（脚本 / alpine/init / 引导块 / version.h）更新 → 自动重建；
+#   · 重建前无人值守拉取 Alpine 用户态包（tools/fetch-rescue-apks.py）；
+#   · 打包前再跑 C5/C6/C7（字节一致 / 新鲜度 / 版本戳），不过就拒绝打包。
+RESCUE_CPIO = bootfiles/initramfs-zjrestore.cpio.gz
+RESCUE_VMLINUZ = bootfiles/vmlinuz-zjrestore
+RESCUE_SRC = src/common/version.h $(wildcard bootfiles/alpine/*) \
+             bootfiles/zjrestore-lite.sh bootfiles/zjswap.sh \
+             bootfiles/zjswap-undo.sh bootfiles/setup-swap.sh \
+             bootfiles/zjlog.sh bootfiles/ntfs-boot-code.bin \
+             bootfiles/ntfs-boot-cont.bin bootfiles/zj-restore-boot.exe
+
+rescue-payload: $(RESCUE_CPIO)
+
+$(RESCUE_CPIO): $(RESCUE_SRC)
+	@echo === rescue payload: rebuild initramfs + vmlinuz ===
+	$(PYTHON) tools/fetch-rescue-apks.py
+	$(PYTHON) tools/build-debian-rescue.py
+
+# package / portable 的前置闸门：先确保已重建，再做载荷自检。
+payload-gate: rescue-payload
+	$(PYTHON) tools/check-shell.py --payload-only
+
 check: $(TEST_BIN) $(CLI_OUT) $(GUI_OUT) $(CHECK_OUT)
 	$(TEST_BIN)
 	$(PYTHON) tests/test_version.py
@@ -357,7 +382,7 @@ check: $(TEST_BIN) $(CLI_OUT) $(GUI_OUT) $(CHECK_OUT)
 # 递归调用 make 时**必须把 $(MAKE) 的正斜杠换成反斜杠**：mingw32-make 把 $(MAKE) 展开成
 # `D:/Prog/.../mingw32-make.exe`，而 shell 是 cmd，正斜杠路径会被判为"系统找不到指定的路径"。
 SELF = $(subst /,\,$(MAKE))
-package: ea-apply boot-cleanup launchers build/portable_stub.exe build/portable_stub_gui.exe
+package: ea-apply boot-cleanup launchers build/portable_stub.exe build/portable_stub_gui.exe payload-gate
 	@echo === [1/3] 构建 x64 -^> dist/x64 ===
 	$(SELF) -f Makefile ARCH=x64 all
 	@echo === [2/3] 构建 x86 -^> dist（根，入口）===
@@ -378,6 +403,9 @@ package: ea-apply boot-cleanup launchers build/portable_stub.exe build/portable_
 	@copy /Y bootfiles\grldr.mbr dist\bootfiles\ >nul
 	@copy /Y bootfiles\vmlinuz-zjrestore dist\bootfiles\ >nul
 	@copy /Y bootfiles\initramfs-zjrestore.cpio.gz dist\bootfiles\ >nul
+# 载荷自报版本（N18）：必须与 version.json / initramfs 里的 zjrescue-version 同源。
+# dist-check 会断言三者一致，防止"版本号换了、救援层还是旧 build"。
+	@echo $(VERSION)> dist\bootfiles\rescue-build.txt
 	@copy /Y bootfiles\zjrestore-lite.sh dist\bootfiles\ >nul
 	@copy /Y bootfiles\zjlog.sh dist\bootfiles\ >nul
 	@copy /Y bootfiles\zj-ea-apply.exe dist\bootfiles\ >nul

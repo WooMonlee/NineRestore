@@ -364,7 +364,11 @@ def main():
         if not os.path.exists(cp):
             raise RuntimeError('zjlog: consumer missing from image: %s' % consumer)
         with open(cp, encoding='utf-8') as fh:
-            if '. /zjlog.sh' not in fh.read():
+            text = fh.read()
+            # 允许两种等价写法：固定路径 `. /zjlog.sh`，或测试注入用
+            # `. "${ZJ_LOG_SH:-/zjlog.sh}"`（后者是当前脚本的实际写法）。
+            if ('. /zjlog.sh' not in text and
+                    '${ZJ_LOG_SH:-/zjlog.sh}' not in text):
                 raise RuntimeError('zjlog: %s does not source /zjlog.sh' % consumer)
 
     # 3b) "印证版"注入（不进产线）：把默认 apply 模式/驱动写进**打包副本**，

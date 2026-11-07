@@ -76,7 +76,7 @@ DENY_CMDS = [
 INIT_PATH = "bootfiles/alpine/init"
 MARKER_FILE = "EFI/ZJRESTORE/entry-started.txt"
 
-# C5：initramfs 内成员 -> 仓库内源码（逐字节一致，换行/BOM 归一后比较）
+# C5：initramfs 内成员 -> 仓库内源码（逐字节一致，文本换行/BOM 归一后比较）
 INITRAMFS_PATH = "bootfiles/initramfs-zjrestore.cpio.gz"
 INITRAMFS_MEMBERS = {
     "init": "bootfiles/alpine/init",
@@ -85,7 +85,25 @@ INITRAMFS_MEMBERS = {
     "zjswap-undo.sh": "bootfiles/zjswap-undo.sh",
     "setup-swap.sh": "bootfiles/setup-swap.sh",
     "zjlog.sh": "bootfiles/zjlog.sh",
+    # 二进制成员按原始字节比较（不做换行归一）
+    "ntfs-boot-code.bin": "bootfiles/ntfs-boot-code.bin",
+    "ntfs-boot-cont.bin": "bootfiles/ntfs-boot-cont.bin",
+    "zj-restore-boot.exe": "bootfiles/zj-restore-boot.exe",
 }
+BINARY_MEMBERS = {"ntfs-boot-code.bin", "ntfs-boot-cont.bin",
+                  "zj-restore-boot.exe"}
+
+# C6：这些源文件只要比 initramfs 新，就说明载荷已过期（必须先重建）
+# （vmlinuz 是同一构建的产物，不列入；alpine/ 下全部文件都算源）
+PAYLOAD_SOURCES = PRODUCT + [
+    "bootfiles/ntfs-boot-code.bin",
+    "bootfiles/ntfs-boot-cont.bin",
+    "bootfiles/zj-restore-boot.exe",
+]
+
+# C7：initramfs 里自带的构建版本戳必须与 version.h 同源
+VERSION_H = "src/common/version.h"
+VERSION_MEMBER = "zjrescue-version"
 
 
 def find_bash():
@@ -241,13 +259,67 @@ def initramfs_mismatches():
             out.append("missing file: %s" % rel)
             continue
         with open(os.path.join(ROOT, rel), "rb") as f:
-            src = _normalize(f.read())
-        if _normalize(members[name]) != src:
+            raw = f.read()
+        if name in BINARY_MEMBERS:
+            same = members[name] == raw
+        else:
+            same = _normalize(members[name]) == _normalize(raw)
+        if not same:
             out.append(
                 "%s: 成员 %s 与 %s 不一致（先重新打包 initramfs 再提交）"
                 % (INITRAMFS_PATH, name, rel)
             )
     return out
+
+
+def _payload_sources():
+    out = []
+    for rel in PAYLOAD_SOURCES:
+        if os.path.isfile(os.path.join(ROOT, rel)):
+            out.append(rel)
+    adir = os.path.join(ROOT, "bootfiles", "alpine")
+    for dirpath, _dirs, files in os.walk(adir):
+        for fn in files:
+            full = os.path.join(dirpath, fn)
+            out.append(os.path.relpath(full, ROOT).replace(os.sep, "/"))
+    return out
+
+
+def payload_freshness_violations():
+    """C6：源文件 mtime 晚于 initramfs = 载荷过期，报出具体文件。"""
+    cpio = os.path.join(ROOT, INITRAMFS_PATH)
+    if not os.path.isfile(cpio):
+        return []
+    built = os.path.getmtime(cpio)
+    stale = []
+    for rel in _payload_sources():
+        if os.path.getmtime(os.path.join(ROOT, rel)) > built:
+            stale.append(rel)
+    if not stale:
+        return []
+    return [
+        "%s 早于以下源文件（救援载荷过期，必须重建：make rescue-payload）: %s"
+        % (INITRAMFS_PATH, ", ".join(sorted(stale)))
+    ]
+
+
+def payload_version_violations():
+    """C7：initramfs 自带 zjrescue-version 必须等于 version.h 的版本。"""
+    cpio = os.path.join(ROOT, INITRAMFS_PATH)
+    vh = os.path.join(ROOT, VERSION_H)
+    if not os.path.isfile(cpio) or not os.path.isfile(vh):
+        return []
+    with open(vh, encoding="utf-8") as f:
+        m = re.search(r'SYSRECOVER_VERSION\s+"([^"]+)"', f.read())
+    want = m.group(1) if m else ""
+    members = _cpio_members(cpio)
+    got = members.get(VERSION_MEMBER, b"").decode("utf-8", "replace").strip()
+    if want and got != want:
+        return [
+            "%s: %s=%r != version.h=%r（重建救援载荷）"
+            % (INITRAMFS_PATH, VERSION_MEMBER, got, want)
+        ]
+    return []
 
 
 def load_baseline():
@@ -279,15 +351,21 @@ def write_baseline(counts):
 
 def main():
     update = "--update-baseline" in sys.argv
+    # --payload-only：package 前置门禁用。跳过依赖 bash 的 C1–C4，只验
+    # 载荷一致(C5)、载荷新鲜度(C6)、载荷版本戳(C7)。
+    payload_only = "--payload-only" in sys.argv
     fail = []
+    counts = {}
 
-    bash = find_bash()
-    if not bash:
-        print("check-shell: FAIL: bash not found (install Git for Windows)")
-        return 1
+    bash = None
+    if not payload_only:
+        bash = find_bash()
+        if not bash:
+            print("check-shell: FAIL: bash not found (install Git for Windows)")
+            return 1
 
     # C1 语法
-    for rel in PRODUCT + SYNTAX_ONLY:
+    for rel in ([] if payload_only else PRODUCT + SYNTAX_ONLY):
         path = os.path.join(ROOT, rel)
         if not os.path.isfile(path):
             fail.append("missing file: %s" % rel)
@@ -295,6 +373,20 @@ def main():
         r = subprocess.run([bash, "-n", path], capture_output=True, text=True)
         if r.returncode != 0:
             fail.append("bash -n %s:\n%s%s" % (rel, r.stdout, r.stderr))
+
+    if payload_only:
+        fail.extend(initramfs_mismatches())
+        fail.extend(payload_freshness_violations())
+        fail.extend(payload_version_violations())
+        if fail:
+            print("check-shell: FAIL (%d, payload-only)" % len(fail))
+            for f in fail:
+                print("  - " + f)
+            return 1
+        print("check-shell: PASS (payload-only; initramfs %d/%d; freshness ok; "
+              "version stamp ok)" % (len(INITRAMFS_MEMBERS),
+                                     len(INITRAMFS_MEMBERS)))
+        return 0
 
     # C2 棘轮
     counts = {rel: count_token(rel) for rel in PRODUCT}
@@ -329,9 +421,11 @@ def main():
                 % (rel, lineno, cmd, TOKEN)
             )
 
-    # C4 入口标记 / C5 载荷一致
+    # C4 入口标记 / C5 载荷一致 / C6 新鲜度 / C7 版本戳
     fail.extend(init_marker_violations())
     fail.extend(initramfs_mismatches())
+    fail.extend(payload_freshness_violations())
+    fail.extend(payload_version_violations())
 
     if fail:
         print("check-shell: FAIL (%d)" % len(fail))

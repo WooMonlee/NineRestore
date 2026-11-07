@@ -187,8 +187,11 @@ def pack_cpio(stage, out_path):
         buf.write(newc(name, mode, blob))
     buf.write(newc('TRAILER!!!', 0, b''))
     raw = buf.getvalue()
-    with gzip.open(out_path, 'wb', compresslevel=9) as gz:
-        gz.write(raw)
+    # mtime=0：gzip 头不写入构建时刻，同一输入产出同一字节（可复现构建，N18）。
+    with open(out_path, 'wb') as f:
+        with gzip.GzipFile(fileobj=f, mode='wb', compresslevel=9,
+                           mtime=0) as gz:
+            gz.write(raw)
     return len(entries), len(raw)
 
 
