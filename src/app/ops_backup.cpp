@@ -372,7 +372,7 @@ int RunBackup(const BackupRequest& reqIn, ProgressFn progress,
     else
         rc = engine.Capture(source, mainDest, req.compress, req.name,
                             snapshot, cfg, progress, &skippedList);
-    if (rc != 0) {
+    if (rc != 0 && rc != WimEngine::kWimPartialSkipped) {
         ReleaseOpLock();
         ProgressDone("backup", "failed");
         // L1：译文不再当 printf 格式串（译文含 % 会读错参数）。
@@ -414,6 +414,13 @@ int RunBackup(const BackupRequest& reqIn, ProgressFn progress,
             LogInfo("esp append rc=" + std::to_string(erc) + " dest=" +
                     W2U(mainDest) + " (" + blog + ")");
         }
+    }
+
+    if (erc == WimEngine::kWimPartialSkipped) {
+        // ESP 子镜像部分成功（有文件读不到被跳过）：主镜像完整可用，交给
+        // skipped 清单统一提示（GUI/CLI 已有"备份不完整"），不判整个备份失败。
+        LogWarn("esp append partial: some files skipped (see skipped list)");
+        erc = 0;
     }
 
     // ── EA 采集并入（PIT-122，2026-10-06）──
@@ -506,7 +513,7 @@ int RunBackup(const BackupRequest& reqIn, ProgressFn progress,
                     int earc = eaEng.Append(eaSrc, mainDest, req.compress,
                                             L"ZJEA", false, L"", progress,
                                             kEaImageDesc, &skippedList);
-                    if (earc != 0) {
+                    if (earc != 0 && earc != WimEngine::kWimPartialSkipped) {
                         LogWarn("EA pack append failed rc=" +
                                 std::to_string(earc) +
                                 " (main image continues without EA fix)");

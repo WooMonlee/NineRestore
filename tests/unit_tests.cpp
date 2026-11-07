@@ -39,6 +39,7 @@
 #include "common/ea.h"
 #include "disk/partscript.h"
 #include "wim/exclude.h"
+#include "wim/wim.h"
 #include "wim/wim_precheck.h"
 
 using namespace sysrecover;
@@ -2337,4 +2338,17 @@ TEST(cleanup_cmd_requires_ok_marker) {
     // 旧逻辑（只看文件存在）不得回归
     CHECK(cmd.find("if exist \"%ProgramData%\\SysRecover\\boot-cleanup.done\" "
                    "goto done") == std::string::npos);
+}
+
+TEST(wim_partial_skipped_is_explicit_nonzero) {
+    // 0.9.x 回归守卫：skipFileErrors 跳过不可读文件后 Capture/Append 仍返回 0，
+    // 脚本 `&&` 与"只看 rc"的调用方会把不完整备份当完全成功。
+    // 1.0 起镜像照常可用，但返回值是显式的部分成功码（非零、非致命）。
+    CHECK(sysrecover::WimEngine::kWimPartialSkipped != 0);
+    CHECK(sysrecover::WimEngine::kWimPartialSkipped == 1001);
+    // 不得与对外退出码（1=失败 / 5=校验失败 / 6=取消 / 7=备份不完整）撞车：
+    // 这个码只在引擎层流转，上层必须翻译成"部分成功 + 提示"，不能直接透出。
+    CHECK(sysrecover::WimEngine::kWimPartialSkipped != 1);
+    CHECK(sysrecover::WimEngine::kWimPartialSkipped != 5);
+    CHECK(sysrecover::WimEngine::kWimPartialSkipped != 7);
 }

@@ -103,6 +103,14 @@ public:
                                  std::vector<std::wstring>& badReparse,
                                  size_t* encryptedCount, size_t cap = 8);
 
+    // ── 部分成功（1.0 收紧）────────────────────────────────────────────
+    // Capture / Append 在 skipFileErrors=true 下会跳过读不到的文件（权限/占用）。
+    // 0.9.x 那时仍返回 0，脚本与 UI 拿 rc 判断就会把"不完整备份"当完全成功。
+    // 现在镜像照常可用，但返回值是下面这个显式码：**非零、非 wimlib 错误、
+    // 非致命**。调用方必须把它当"部分成功"处理（日志 + 用户提示 + 退出码），
+    // 不能与 rc==0 混同。wimlib 错误码都是正数且远小于本值，不会撞。
+    static constexpr int kWimPartialSkipped = 1001;
+
     static const wchar_t* ErrorString(int code);
 
 private:

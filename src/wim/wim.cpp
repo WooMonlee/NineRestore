@@ -323,6 +323,10 @@ int WimEngine::Capture(const std::wstring& source,
         DeleteFileW(tmp.c_str());
         return WIMLIB_ERR_RENAME;
     }
+    // 镜像已原子落盘且可用，但有文件被跳过没写进去 → 显式部分成功（见
+    // wim.h 的 kWimPartialSkipped），不再伪装成 rc=0。
+    if (skipped && !skipped->empty())
+        return kWimPartialSkipped;
     return 0;
 }
 
@@ -408,6 +412,8 @@ int WimEngine::Append(const std::wstring& source,
                         Utf8Of(tmpPath));
         }
     }
+    if (arc == 0 && skipped && !skipped->empty())
+        return kWimPartialSkipped;  // 追加成功但有文件被跳过（同 Capture）
     return arc;
 }
 

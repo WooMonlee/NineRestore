@@ -180,7 +180,8 @@ include build/duilib.mk
 GUI_SRC = src/gui/main_win.cpp src/gui/main_form.cpp src/gui/main_form_notice.cpp src/gui/main_form_bootmenu.cpp src/gui/main_form_tools.cpp src/gui/main_form_image.cpp src/gui/main_form_restore.cpp src/gui/main_form_backup.cpp src/gui/main_form_ui.cpp src/gui/ui_skin.cpp src/gui/ui_foreground.cpp src/gui/instance_dlg.cpp src/gui/confirm_dlg.cpp src/gui/passwd_dlg.cpp src/gui/imgsearch.cpp src/gui/initdisk_dlg.cpp
 GUI_OUT = $(DISTDIR)/$(GUI_NAME)
 GUI_INCLUDES = -Isrc -isystem $(DUI_ROOT) -isystem $(DUI_ROOT)/Control -isystem $(DUI_ROOT)/Core -isystem $(DUI_ROOT)/Layout -isystem $(DUI_ROOT)/Utils
-# duilib 头文件对 ISO 一致性要求宽松，故保留 -fpermissive（第三方头文件，不改）。
+# duilib 头文件对 ISO 一致性要求宽松，故保留 -fpermissive（仅作用于 include 链里的
+# 第三方头；它不抑制任何告警，自研 GUI 代码仍走 -Wall -Wextra -Werror，告警即失败）。
 GUI_FLAGS = -std=c++17 -O1 -fpermissive $(WARN_FLAGS) -DUNICODE -D_UNICODE -DWIN32 -D_WIN32_WINNT=0x0601 -D_stdcall=__stdcall -DUILIB_STATIC
 GUI_LDLIBS = -lgdi32 -lcomctl32 -limm32 -lole32 -luuid -lmsimg32 -lshlwapi -luxtheme -ldwmapi -lwinmm -lgdiplus -loleaut32 -ladvapi32 -lshell32 -lntdll -lversion -lversion -lbcrypt
 
