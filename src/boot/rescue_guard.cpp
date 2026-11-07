@@ -65,40 +65,6 @@ bool ReadFirstLine(const std::wstring& path, std::string& out) {
     return true;
 }
 
-bool CopyAndVerify(const std::wstring& src, const std::wstring& dst,
-                   std::string& log) {
-    if (!FileExists(src)) {
-        log += "source missing: " + std::string(src.begin(), src.end()) + "\n";
-        return false;
-    }
-    SetFileAttributesW(dst.c_str(), FILE_ATTRIBUTE_NORMAL);
-    if (!CopyFileW(src.c_str(), dst.c_str(), FALSE)) {
-        log += "copy failed err=" + std::to_string(GetLastError()) + "\n";
-        return false;
-    }
-    uint32_t a = 0, b = 0;
-    if (!FileCrc32(src, a) || !FileCrc32(dst, b) || a != b) {
-        log += "verify failed: " + std::string(dst.begin(), dst.end()) + "\n";
-        return false;
-    }
-    log += "rewritten " + std::string(dst.begin(), dst.end()) + "\n";
-    return true;
-}
-
-std::wstring BackupDirFor(const std::wstring& efiDir, const std::string& tag) {
-    SYSTEMTIME st = {};
-    GetLocalTime(&st);
-    char stamp[32] = {};
-    snprintf(stamp, sizeof(stamp), "%04u%02u%02u-%02u%02u%02u", st.wYear,
-             st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-    std::wstring name = L"backup-";
-    name.append(tag.begin(), tag.end());
-    name += L"-" + std::wstring(stamp, stamp + strlen(stamp));
-    std::wstring dir = efiDir + L"\\" + name;
-    CreateDirectoryW(dir.c_str(), nullptr);
-    return dir;
-}
-
 bool WriteText(const std::wstring& path, const std::string& text) {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -111,9 +77,94 @@ bool WriteText(const std::wstring& path, const std::string& text) {
     return ok;
 }
 
+// 写新载荷 + 字节数/CRC 复核。旧文件已由调用方先删（顺序契约见
+// rescue_guard.h::RescuePayloadDeploySteps）；不备份、不用临时文件、不改名。
+bool WriteAndVerify(const std::wstring& src, const std::wstring& dst,
+                    std::string& log) {
+    if (!FileExists(src)) {
+        log += "source missing: " + std::string(src.begin(), src.end()) + "\n";
+        return false;
+    }
+    SetFileAttributesW(dst.c_str(), FILE_ATTRIBUTE_NORMAL);
+    if (!CopyFileW(src.c_str(), dst.c_str(), FALSE)) {
+        log += "write failed err=" + std::to_string(GetLastError()) + "\n";
+        return false;
+    }
+    unsigned long long ssz = 0, dsz = 0;
+    uint32_t a = 0, b = 0;
+    if (!FileSizeOf(src, ssz) || !FileSizeOf(dst, dsz) || ssz != dsz ||
+        !FileCrc32(src, a) || !FileCrc32(dst, b) || a != b) {
+        log += "verify FAIL " + std::string(dst.begin(), dst.end()) + "\n";
+        return false;
+    }
+    log += "payload written: " + std::string(dst.begin(), dst.end()) + "\n";
+    return true;
+}
+
+// 删除单个旧载荷文件；不存在也算成功。日志带释放字节。
+bool RemoveOldPayload(const std::wstring& path, std::string& log,
+                      bool& removedAny) {
+    unsigned long long sz = 0;
+    if (!FileSizeOf(path, sz))
+        return true;  // 不存在
+    SetFileAttributesW(path.c_str(), FILE_ATTRIBUTE_NORMAL);
+    if (!DeleteFileW(path.c_str())) {
+        log += "remove old payload FAIL: " +
+               std::string(path.begin(), path.end()) +
+               " err=" + std::to_string(GetLastError()) + "\n";
+        return false;
+    }
+    removedAny = true;
+    char line[128];
+    snprintf(line, sizeof(line), "old payload removed: %.1f MB\n",
+             sz / 1048576.0);
+    log += line;
+    return true;
+}
+
+// 目录树字节数（只读；用于"清理释放了多少空间"的日志）。
+unsigned long long TreeBytes(const std::wstring& path) {
+    unsigned long long total = 0;
+    WIN32_FIND_DATAW fd = {};
+    HANDLE h = FindFirstFileW((path + L"\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        std::wstring n = fd.cFileName;
+        if (n == L"." || n == L"..") continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            total += TreeBytes(path + L"\\" + n);
+        else
+            total += ((unsigned long long)fd.nFileSizeHigh << 32) |
+                     (unsigned long long)fd.nFileSizeLow;
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return total;
+}
+
+bool RemoveTreeLocal(const std::wstring& path) {
+    WIN32_FIND_DATAW fd = {};
+    HANDLE h = FindFirstFileW((path + L"\\*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            std::wstring n = fd.cFileName;
+            if (n == L"." || n == L"..") continue;
+            std::wstring full = path + L"\\" + n;
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                RemoveTreeLocal(full);
+            } else {
+                SetFileAttributesW(full.c_str(), FILE_ATTRIBUTE_NORMAL);
+                DeleteFileW(full.c_str());
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    return RemoveDirectoryW(path.c_str()) != 0;
+}
+
 }  // namespace
 
-bool ReadEspRescuePayload(const std::wstring& espRoot, EspRescuePayload& out) {
+bool ReadEspRescuePayload(const std::wstring& espRoot, EspRescuePayload& out,
+                          bool deepCrc) {
     out = EspRescuePayload{};
     if (espRoot.empty()) return false;
     const std::wstring dir = espRoot + L"EFI\\ZJRESTORE";
@@ -128,67 +179,75 @@ bool ReadEspRescuePayload(const std::wstring& espRoot, EspRescuePayload& out) {
     if (FileExists(ir)) {
         out.hasInitramfs = true;
         FileSizeOf(ir, out.initramfsSize);
-        out.crcKnown = FileCrc32(ir, out.initramfsCrc);
+        // 快路径不读本体（17.4MB）；只有明确要求深查时才算 CRC。
+        if (deepCrc) out.crcKnown = FileCrc32(ir, out.initramfsCrc);
     }
     out.hasKernel = FileExists(dir + L"\\vmlinuz-zjrestore.efi") ||
                     FileExists(dir + L"\\vmlinuz-zjrestore");
     return true;
 }
 
-bool BackupEspRescuePayload(const std::wstring& espRoot, const std::string& tag,
-                            std::string& log) {
-    const std::wstring efiDir = espRoot + L"EFI\\ZJRESTORE";
-    const std::wstring bak = BackupDirFor(efiDir, tag);
-    bool ok = true;
-    unsigned n = 0;
-
+unsigned long long CleanupLegacyRescueBackups(const std::wstring& espRoot,
+                                              std::string& log) {
+    const std::wstring dir = espRoot + L"EFI\\ZJRESTORE";
+    unsigned long long freed = 0;
     WIN32_FIND_DATAW fd = {};
-    HANDLE hFind = FindFirstFileW((efiDir + L"\\*").c_str(), &fd);
-    if (hFind != INVALID_HANDLE_VALUE) {
-        do {
-            std::wstring name = fd.cFileName;
-            if (name == L"." || name == L"..") continue;
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-            const std::wstring src = efiDir + L"\\" + name;
-            const std::wstring dst = bak + L"\\" + name;
-            if (CopyFileW(src.c_str(), dst.c_str(), FALSE)) {
-                ++n;
-            } else {
-                ok = false;
-                log += "backup FAIL " + std::string(name.begin(), name.end()) +
-                       " err=" + std::to_string(GetLastError()) + "\n";
-            }
-        } while (FindNextFileW(hFind, &fd));
-        FindClose(hFind);
+    HANDLE h = FindFirstFileW((dir + L"\\backup-*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        std::wstring name = fd.cFileName;
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if (!IsRescueBackupDirName(name)) continue;
+        const std::wstring full = dir + L"\\" + name;
+        const unsigned long long bytes = TreeBytes(full);
+        std::string an(name.begin(), name.end());
+        if (RemoveTreeLocal(full)) {
+            freed += bytes;
+            char line[256];
+            snprintf(line, sizeof(line),
+                     "legacy payload backup removed: %s (%.1f MB)\n",
+                     an.c_str(), bytes / 1048576.0);
+            log += line;
+        } else {
+            log += "legacy payload backup remove FAIL: " + an + "\n";
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    if (freed) {
+        char line[128];
+        snprintf(line, sizeof(line),
+                 "legacy payload backup cleanup freed %.1f MB\n",
+                 freed / 1048576.0);
+        log += line;
     }
-    log += "backup dir: " + std::string(bak.begin(), bak.end()) + " (" +
-           std::to_string(n) + " files)\n";
+    return freed;
+}
 
-    // Boot####/BootOrder：固件启动项快照（文本，判定"写入前指向谁"）。
+void WriteFirmwareBootSnapshot(const std::wstring& espRoot, std::string& log) {
+    const std::wstring dir = espRoot + L"EFI\\ZJRESTORE";
     std::vector<std::string> lines;
     UefiBootOrderSummary(lines);
     std::string txt;
     for (const auto& ln : lines) txt += ln + "\r\n";
-    if (!WriteText(bak + L"\\firmware-boot.txt", txt))
+    if (!WriteText(dir + L"\\firmware-boot.txt", txt))
         log += "firmware boot snapshot FAIL\n";
-    return ok;
 }
 
 bool RefreshEspRescuePayload(const std::wstring& espRoot,
                              const std::wstring& assetDir, std::string& log,
                              std::string& msg) {
+    const std::wstring dir = espRoot + L"EFI\\ZJRESTORE";
     EspRescuePayload esp;
-    ReadEspRescuePayload(espRoot, esp);
+    ReadEspRescuePayload(espRoot, esp);  // 快路径：版本戳 + 大小，不读本体
 
-    const std::wstring biIr = assetDir + L"\\bootfiles\\initramfs-zjrestore.cpio.gz";
+    const std::wstring biIr =
+        assetDir + L"\\bootfiles\\initramfs-zjrestore.cpio.gz";
     unsigned long long biSize = 0;
-    uint32_t biCrc = 0;
-    const bool biOk = FileSizeOf(biIr, biSize) && FileCrc32(biIr, biCrc);
+    const bool biOk = FileSizeOf(biIr, biSize);
 
     const RescuePayloadState state = ClassifyRescuePayload(
         esp.build, SYSRECOVER_VERSION, esp.hasInitramfs || esp.hasKernel,
-        biOk && esp.crcKnown, esp.initramfsCrc, biCrc, esp.initramfsSize,
-        biSize);
+        /*espCrcKnown=*/false, 0u, 0u, esp.initramfsSize, biSize);
 
     char head[320] = {};
     snprintf(head, sizeof(head),
@@ -197,26 +256,38 @@ bool RefreshEspRescuePayload(const std::wstring& espRoot,
              esp.initramfsSize, SYSRECOVER_VERSION, biSize);
     log += head;
 
-    if (DecideRescuePayloadAction(state, true) == RescuePayloadAction::Keep) {
+    if (!RescuePayloadMustNotBeReused(state)) {
         log += "rescue payload matches builtin (keep)\n";
+        // 历史遗留的载荷备份也顺手清掉（不占空间就不留）。
+        CleanupLegacyRescueBackups(espRoot, log);
         return true;
     }
 
-    log += "ESP rescue payload stale -> rewrite\n";
-    BackupEspRescuePayload(espRoot, "pre-refresh", log);
+    if (!biOk) {
+        msg = RescuePayloadWriteFailedMessage();
+        log += Tr("内置 initramfs 缺失，无法写入\n");
+        log += msg + "\n";
+        return false;
+    }
 
-    const std::wstring dir = espRoot + L"EFI\\ZJRESTORE";
-    bool ok = true;
+    log += "ESP rescue payload stale -> remove old, then write new (no backup)\n";
+    CleanupLegacyRescueBackups(espRoot, log);
+    WriteFirmwareBootSnapshot(espRoot, log);
+
+    // 本次要刷新的文件集（不新建文件；Secure Boot 壳文件只在 ESP 上已存在时刷新）。
+    struct Target {
+        std::wstring src, dst;
+    };
+    std::vector<Target> targets;
     if (esp.hasInitramfs)
-        ok = CopyAndVerify(biIr, dir + L"\\initramfs-zjrestore.cpio.gz", log) && ok;
+        targets.push_back({biIr, dir + L"\\initramfs-zjrestore.cpio.gz"});
 
     const std::wstring biKernel = assetDir + L"\\bootfiles\\vmlinuz-zjrestore";
     if (FileExists(dir + L"\\vmlinuz-zjrestore.efi"))
-        ok = CopyAndVerify(biKernel, dir + L"\\vmlinuz-zjrestore.efi", log) && ok;
+        targets.push_back({biKernel, dir + L"\\vmlinuz-zjrestore.efi"});
     if (FileExists(dir + L"\\vmlinuz-zjrestore"))
-        ok = CopyAndVerify(biKernel, dir + L"\\vmlinuz-zjrestore", log) && ok;
+        targets.push_back({biKernel, dir + L"\\vmlinuz-zjrestore"});
 
-    // Secure Boot 链的壳文件只在 ESP 上已存在时刷新（不新建）。
     struct Chain {
         const wchar_t* dst;
         const wchar_t* src;
@@ -231,29 +302,60 @@ bool RefreshEspRescuePayload(const std::wstring& espRoot,
     for (const auto& c : chain) {
         if (!FileExists(dir + L"\\" + c.dst)) continue;
         if (!FileExists(assetDir + c.src)) continue;
-        ok = CopyAndVerify(assetDir + c.src, dir + L"\\" + c.dst, log) && ok;
+        targets.push_back({assetDir + c.src, dir + L"\\" + c.dst});
     }
     if (FileExists(dir + L"\\grubx64.efi")) {
         const wchar_t* src = (sb == SbMode::Shim)
                                  ? L"\\bootfiles\\sb\\zjrestore-uki.efi"
                                  : L"\\bootfiles\\sb\\grubx64.efi";
         if (FileExists(assetDir + src))
-            ok = CopyAndVerify(assetDir + src, dir + L"\\grubx64.efi", log) && ok;
+            targets.push_back({assetDir + src, dir + L"\\grubx64.efi"});
     }
 
-    // 最后才更新自报版本；写失败即 fail-closed（盘上仍是旧 code 的自报）。
-    const std::string vb = std::string(SYSRECOVER_VERSION) + "\n";
-    if (!WriteText(dir + L"\\rescue-build.txt", vb)) {
-        ok = false;
-        log += "write rescue-build.txt FAIL\n";
+    // 顺序契约：remove-old → write-new → verify（见 RescuePayloadDeploySteps）。
+    bool removedAny = false;
+    bool ok = true;
+    for (const auto& t : targets) {
+        if (!RemoveOldPayload(t.dst, log, removedAny)) {
+            msg = RescuePayloadWriteFailedMessage();
+            log += msg + "\n";
+            // 若已删过别的文件，ESP 上已不完整 → 摘掉指向残骸的启动项。
+            if (MustRemoveBootEntryAfterFailure(removedAny)) {
+                RemoveUefiBootEntry(log, /*temporary=*/false);
+                log += "boot entry removed (payload missing)\n";
+            }
+            return false;
+        }
     }
+    if (!removedAny) {
+        // 一个旧文件都没删 → 说明 ESP 上已无可刷新载荷；别写残骸，直接失败。
+        msg = RescuePayloadWriteFailedMessage();
+        log += "no existing rescue payload to refresh\n";
+        log += msg + "\n";
+        // 自报版本说旧、盘上却没有载荷 → 已有启动项本身就在指向空。
+        RemoveUefiBootEntry(log, /*temporary=*/false);
+        log += "boot entry removed (payload missing)\n";
+        return false;
+    }
+    for (const auto& t : targets)
+        ok = WriteAndVerify(t.src, t.dst, log) && ok;
 
     if (!ok) {
-        msg = RescuePayloadFailMessage(esp.build, SYSRECOVER_VERSION);
+        msg = RescuePayloadWriteFailedMessage();
         log += msg + "\n";
-        log += "refreshed files left in place; rescue payload NOT updated in full\n";
+        // 载荷不完整 → 不能留下指向残骸的启动项。
+        RemoveUefiBootEntry(log, /*temporary=*/false);
+        log += "boot entry removed (payload missing)\n";
+        return false;
     }
-    return ok;
+
+    // 最后才更新自报版本。写失败不摘启动项：载荷本身已写全并通过校验，
+    // 只是"自报版本"没写成 —— 下次检测会把它判成 UnreadableBuild 再重写一次，
+    // 不影响本次进救援。
+    const std::string vb = std::string(SYSRECOVER_VERSION) + "\n";
+    if (!WriteText(dir + L"\\rescue-build.txt", vb))
+        log += "write rescue-build.txt FAIL (payload verified; next install rewrites)\n";
+    return true;
 }
 
 }  // namespace sysrecover

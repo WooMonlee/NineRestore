@@ -21,7 +21,7 @@
 #include "../common/relocate.h"  // LogBaseDir()：清理前确认没有待执行的暂存任务
 #include "../common/version.h"
 #include "../common/zip.h"  // Crc32（部署后校验，A6）
-#include "rescue_guard.h"   // N17：ESP 旧载荷自证与写前备份
+#include "rescue_guard.h"   // N17：ESP 旧载荷自证与"先删后写"无备份替换
 
 // ── MOK/UKI 备选线（PIT-062）──────────────────────────────────────
 // 「固件启动项 → shimx64.efi → 我们签名的 UKI」这条路（需要一次性 MOK 注册）
@@ -313,7 +313,8 @@ bool QueryEspGpt(const std::wstring& espRoot, GUID& sig, DWORD& partNum,
 
 bool CopyOne(const std::wstring& src, const std::wstring& dst,
              std::string& log) {
-    // 目标若已存在且带只读/隐藏属性，先归零，保证能覆盖
+    // 直接写（调用方已先删旧载荷；不备份、不写临时文件、不改名 —— 用户
+    // 2026-11-07 口径）。这里只清属性，保证能创建/覆盖目标文件。
     SetFileAttributesW(dst.c_str(), FILE_ATTRIBUTE_NORMAL);
     if (CopyFileW(src.c_str(), dst.c_str(), FALSE))
         return true;
@@ -515,21 +516,20 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
     // ~28MB 载荷重写一遍（慢盘上拖出"无响应"窗）。现在改为：文件集构建后按
     // "定点清 stale + keep 未变化"处理，见下面的 cleanup / changed 逻辑。
 
-    // N17（2026-11-07）：先读 ESP 上救援环境**自报**的 build 与 initramfs
-    // 长度/CRC，与内置载荷比对。0.9.92 现场就是"程序说装好了，盘上跑的是旧码"：
-    // 旧 dist 的源载荷 CRC 与旧盘上文件相同 → keep，没人发现。这里把"到底是哪版"
-    // 变成日志里的确定事实；不一致时**先备份再重写**（绝不静默沿用）。
+    // N17（2026-11-07）：先读 ESP 上救援环境**自报**的 build 与 initramfs 大小，
+    // 与内置载荷比对。0.9.92 现场就是"程序说装好了，盘上跑的是旧码"：旧 dist 的
+    // 源载荷与旧盘上文件相同 → keep，没人发现。这里把"到底是哪版"变成日志里的
+    // 确定事实。判定走**快路径**（版本戳 + 大小），不读 17.4MB 本体算哈希；
+    // 写后才做 CRC 深查（用户 2026-11-07：检测不必每次全读）。
+    const ULONGLONG tDetect = GetTickCount64();
     EspRescuePayload prior;
-    ReadEspRescuePayload(espRoot, prior);
+    ReadEspRescuePayload(espRoot, prior);  // 快路径：deepCrc 默认 false
     const std::wstring builtinIr =
         exeDir + L"\\bootfiles\\initramfs-zjrestore.cpio.gz";
-    uint32_t builtinIrCrc = 0;
-    const bool builtinIrOk = FileCrc32(builtinIr, builtinIrCrc);
     const unsigned long long builtinIrSize = FileSize(builtinIr);
     const RescuePayloadState priorState = ClassifyRescuePayload(
         prior.build, SYSRECOVER_VERSION, prior.hasInitramfs || prior.hasKernel,
-        builtinIrOk && prior.crcKnown, prior.initramfsCrc, builtinIrCrc,
-        prior.initramfsSize, builtinIrSize);
+        /*espCrcKnown=*/false, 0u, 0u, prior.initramfsSize, builtinIrSize);
     {
         char lb[320] = {};
         snprintf(lb, sizeof(lb),
@@ -538,10 +538,15 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
                  prior.build.empty() ? "(none)" : prior.build.c_str(),
                  prior.initramfsSize, SYSRECOVER_VERSION, builtinIrSize);
         log += lb;
-        if (RescuePayloadMustNotBeReused(priorState)) {
-            log += "ESP rescue payload stale -> rewrite (backup before write)\n";
-            BackupEspRescuePayload(espRoot, "pre-rewrite", log);
-        }
+    }
+    // ESP 空间寸土寸金（用户 2026-11-07）：**不备份旧载荷**。历史遗留的
+    // `backup-*` 目录在这里清掉（日志写清单与释放字节），再写一份几 KB 的固件
+    // 启动序快照。旧载荷"删旧 → 写新"在下面文件集确定后执行（顺序契约见
+    // rescue_guard.h::RescuePayloadDeploySteps）。
+    CleanupLegacyRescueBackups(espRoot, log);
+    if (RescuePayloadMustNotBeReused(priorState)) {
+        log += "ESP rescue payload stale -> remove old, then write new (no backup)\n";
+        WriteFirmwareBootSnapshot(espRoot, log);
     }
 
     // Secure Boot 开着时，固件只加载**微软签名**的镜像 → 我们的内核不能直接当
@@ -630,26 +635,16 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
     // bootapp 的 UKI + efiloader），换走法时不清理会越装越多、把 ESP 塞满
     //（实测 "ESP space: need 49.3MB, free 31.9MB"）。原先直接 RemoveTree 全清；
     // 现在只删"不属于本次文件集"的条目 —— 上次装过的文件本次可 keep 复用。
+    // payloadRemoved：本函数是否已删过 ESP 上的救援载荷（失败时要摘启动项）。
+    bool payloadRemoved = false;
     {
         std::vector<std::wstring> keepNames;
         for (const auto& f : files)
             keepNames.push_back(f.second);
         keepNames.push_back(L"rescue-build.txt");
-        // 写前备份目录 `backup-*`：最新一份必须保留（否则"备份完立刻被清"，实测
-        // 2026-11-07）；更早的备份在这里顺手删掉，避免多份 17MB 载荷塞满 ESP。
-        std::vector<std::wstring> backupNames;
-        {
-            WIN32_FIND_DATAW bfd;
-            HANDLE bh = FindFirstFileW((dir + L"\\backup-*").c_str(), &bfd);
-            if (bh != INVALID_HANDLE_VALUE) {
-                do {
-                    if (bfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-                        backupNames.push_back(bfd.cFileName);
-                } while (FindNextFileW(bh, &bfd));
-                FindClose(bh);
-            }
-        }
-        const std::wstring newestBackup = NewestRescueBackupName(backupNames);
+        keepNames.push_back(L"firmware-boot.txt");  // NVRAM 启动序快照（KB 级）
+        // `backup-*` 已由 CleanupLegacyRescueBackups 全量清掉（不再保留载荷备份）；
+        // 这里只删"不属于本次文件集"的条目。`.pre.bak`（写前 NVRAM 原始值）保留。
         WIN32_FIND_DATAW fd;
         HANDLE hFind = FindFirstFileW((dir + L"\\*").c_str(), &fd);
         if (hFind != INVALID_HANDLE_VALUE) {
@@ -657,31 +652,36 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
                 std::wstring name = fd.cFileName;
                 if (name == L"." || name == L"..")
                     continue;
-                if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
-                    IsRescueBackupDirName(name) && name == newestBackup)
-                    continue;  // 保留最新备份
                 bool keep = false;
                 for (const auto& k : keepNames)
                     if (name == k) {
                         keep = true;
                         break;
                     }
+                if (!keep && !(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                    name.size() > 8 &&
+                    name.compare(name.size() - 8, 8, L".pre.bak") == 0)
+                    keep = true;  // Boot####.pre.bak / bootorder.pre.bak
                 if (keep)
                     continue;
                 std::wstring full = dir + L"\\" + name;
                 std::string an(name.begin(), name.end());
                 if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                    if (RemoveTree(full))
+                    if (RemoveTree(full)) {
                         log += "stale dir removed: " + an + "\n";
-                    else
+                        payloadRemoved = true;
+                    } else {
                         log += "stale dir remove FAIL: " + an + "\n";
+                    }
                 } else {
                     SetFileAttributesW(full.c_str(), FILE_ATTRIBUTE_NORMAL);
-                    if (DeleteFileW(full.c_str()))
+                    if (DeleteFileW(full.c_str())) {
                         log += "stale removed: " + an + "\n";
-                    else
+                        payloadRemoved = true;
+                    } else {
                         log += "stale remove FAIL: " + an + " (err=" +
                                std::to_string(GetLastError()) + ")\n";
+                    }
                 }
             } while (FindNextFileW(hFind, &fd));
             FindClose(hFind);
@@ -695,11 +695,14 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
     struct DeployItem {
         std::wstring src, dst;
         bool needCopy = false;
+        unsigned long long srcSize = 0;
+        unsigned long long dstSize = 0;
     };
     std::vector<DeployItem> items;
     std::vector<uint32_t> srcCrc(files.size(), 0);
     std::vector<char> srcOk(files.size(), 0);
-    unsigned long long need = 0;
+    unsigned long long needFull = 0;  // 先删后写：要写入的总量
+    unsigned long long reclaim = 0;   // 删旧文件可退回的字节数
     for (size_t i = 0; i < files.size(); ++i) {
         std::wstring src = exeDir + files[i].first;
         std::wstring dst = dir + L"\\" + files[i].second;
@@ -709,48 +712,49 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
         std::string an(files[i].second.begin(), files[i].second.end());
         if (same) {
             log += "keep " + an + " (unchanged)\n";
-            items.push_back({src, dst, false});
+            items.push_back({src, dst, false, 0, 0});
         } else {
-            // 2026-10-30：只算**净增量**（新文件 - 已有同名文件）。覆盖写是
-            // 原地替换，旧文件占的空间会退回来；按"全量"算会把"其实只多几 MB"
-            // 误报成"空间不足"（用户实测：need 29.5 / free 29.4，差 0.1MB 却
-            // 失败，真实是旧载荷 28MB 没被计入）。
             const unsigned long long ssz = FileSize(src);
             unsigned long long dsz = 0;
             WIN32_FILE_ATTRIBUTE_DATA fad = {};
             if (GetFileAttributesExW(dst.c_str(), GetFileExInfoStandard, &fad))
                 dsz = ((unsigned long long)fad.nFileSizeHigh << 32) |
                       (unsigned long long)fad.nFileSizeLow;
-            if (ssz > dsz)
-                need += ssz - dsz;
-            items.push_back({src, dst, true});
+            // 先删后写（用户 2026-11-07）：旧文件腾出的空间可立即用于新文件，
+            // 所以按"全量"算 need，同时把 reclaim（旧文件大小）计入可用空间。
+            needFull += ssz;
+            reclaim += dsz;
+            items.push_back({src, dst, true, ssz, dsz});
         }
     }
 
     // 空间检查：ESP 一般只有 100MB，Windows 自己的引导文件已占 ~40MB，而我们要塞
     // ~52MB（内核+initramfs，或签名版 UKI + shim）。装不下时**提前算清并报错**，
-    // 而不是拷到一半失败、留个半残的引导层。need = **仅本次要写入**的字节数
-    //（keep 的不计，2026-10-18 起 —— 修掉"其实只差几 MB 却按全量 49MB 误报"）。
+    // 而不是删掉旧载荷、写到一半失败。可用空间 = free + reclaim（先删后写）。
     // 余量 16MB（2026-09-29 由 1MB 提高）：`bcdboot` 刷新该分区上的
     // `EFI\Microsoft\Boot` 目录（bootmgfw 1.5MB + bootmgr.efi 1.5MB + Fonts
     // 4.5MB + Resources/MUI + BCD）实测约 8.6MB；留 16MB 才能保证"我们装完之后
     // bcdboot 还写得进"（docs/15）。
     ULARGE_INTEGER freeBytes{};
-    if (need > 0 && GetDiskFreeSpaceExW(espRoot.c_str(), &freeBytes, nullptr,
-                                        nullptr)) {
+    if (needFull > 0 && GetDiskFreeSpaceExW(espRoot.c_str(), &freeBytes, nullptr,
+                                            nullptr)) {
         const unsigned long long kMargin = 16ull << 20;  // 16MB：给 bcdboot 留位
-        char line[256];
+        const unsigned long long netNeed =
+            needFull > reclaim ? needFull - reclaim : 0;
+        char line[320];
         snprintf(line, sizeof(line),
-                 "ESP space: need(net) %.1f MB + margin %.0f MB, free %.1f MB\n",
-                 need / 1048576.0, kMargin / 1048576.0,
+                 "ESP space: need(full) %.1f MB - reclaim %.1f MB (net %.1f MB)"
+                 " + margin %.0f MB, free %.1f MB\n",
+                 needFull / 1048576.0, reclaim / 1048576.0,
+                 netNeed / 1048576.0, kMargin / 1048576.0,
                  freeBytes.QuadPart / 1048576.0);
         log += line;
-        if (freeBytes.QuadPart < need + kMargin) {
+        if (freeBytes.QuadPart + reclaim < needFull + kMargin) {
             // 文案把"净增量"和"给 bcdboot 的 16MB 余量"都写清，别再出现
             // "需要 29.5 / 可用 29.4"这种看起来只差 0.1MB 的误导。
             // L1：数值先格式化到小缓冲，再用固定文本拼接（译文不再当格式串）。
             char needM[32], marginM[32], freeM[32];
-            snprintf(needM, sizeof(needM), "%.1f", need / 1048576.0);
+            snprintf(needM, sizeof(needM), "%.1f", netNeed / 1048576.0);
             snprintf(marginM, sizeof(marginM), "%.0f", kMargin / 1048576.0);
             snprintf(freeM, sizeof(freeM), "%.1f",
                      freeBytes.QuadPart / 1048576.0);
@@ -768,19 +772,49 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
             if (RescuePayloadMustNotBeReused(priorState))
                 log += RescuePayloadFailMessage(prior.build, SYSRECOVER_VERSION) +
                        "\n";
+            // 若上面的定点清理已经删过旧载荷文件，此刻 ESP 上已不完整 →
+            // 不能留下指向残骸的启动项（用户 2026-11-07 要求）。
+            if (MustRemoveBootEntryAfterFailure(payloadRemoved))
+                RemoveUefiBootEntry(log, temporary);
+            log += RescuePayloadWriteFailedMessage() + "\n";
             return false;
         }
     }
 
+    // 顺序契约：detect（上面已做）→ remove-old → write-new → verify → install-entry。
+    // 先删旧载荷腾空间（旧载荷本身有问题，不备份、不用临时文件）；删不掉就停手，
+    // 此时旧文件仍在盘上，不算残骸。
+    for (const auto& it : items) {
+        if (!it.needCopy || it.dstSize == 0)
+            continue;
+        SetFileAttributesW(it.dst.c_str(), FILE_ATTRIBUTE_NORMAL);
+        if (!DeleteFileW(it.dst.c_str())) {
+            log += "remove old payload FAIL: " +
+                   std::string(it.dst.begin(), it.dst.end()) +
+                   " err=" + std::to_string(GetLastError()) + "\n";
+            break;  // 删不掉就停手：旧文件仍在，后续不再写
+        }
+        payloadRemoved = true;
+        char rb[96];
+        snprintf(rb, sizeof(rb), "old payload removed: %.1f MB\n",
+                 it.dstSize / 1048576.0);
+        log += rb;
+    }
     bool copied = true;
     for (const auto& it : items) {
         if (!it.needCopy)
             continue;
-        if (!CopyOne(it.src, it.dst, log))
+        if (!CopyOne(it.src, it.dst, log)) {
             copied = false;
+            break;
+        }
     }
     if (!copied) {
-        log += "copy UEFI rescue files FAIL\n";
+        log += "write UEFI rescue files FAIL\n";
+        log += RescuePayloadWriteFailedMessage() + "\n";
+        // 旧载荷已删 → 不能留下指向残骸的启动项（用户 2026-11-07 要求）。
+        if (MustRemoveBootEntryAfterFailure(payloadRemoved))
+            RemoveUefiBootEntry(log, temporary);
         if (RescuePayloadMustNotBeReused(priorState))
             log += RescuePayloadFailMessage(prior.build, SYSRECOVER_VERSION) +
                    "\n";
@@ -798,6 +832,9 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
             log += "verify FAIL " +
                    std::string(items[i].dst.begin(), items[i].dst.end()) + "\n";
             log += "verify deployed rescue FAIL\n";
+            log += RescuePayloadWriteFailedMessage() + "\n";
+            if (MustRemoveBootEntryAfterFailure(payloadRemoved))
+                RemoveUefiBootEntry(log, temporary);
             if (RescuePayloadMustNotBeReused(priorState))
                 log += RescuePayloadFailMessage(prior.build,
                                                 SYSRECOVER_VERSION) + "\n";
@@ -814,6 +851,14 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
             WriteFile(hv, vb.data(), (DWORD)vb.size(), &w, nullptr);
             CloseHandle(hv);
         }
+    }
+    if (RescuePayloadMustNotBeReused(priorState)) {
+        // 耗时不作门禁（用户 2026-11-07：不为 1-3 秒牺牲正确性），仅记录实测值备查。
+        char tb[128];
+        snprintf(tb, sizeof(tb),
+                 "rescue payload replace (detect+remove+write+verify): %llu ms\n",
+                 (unsigned long long)(GetTickCount64() - tDetect));
+        log += tb;
     }
     if (mode == SbMode::None)
         SetFileAttributesW((dir + L"\\vmlinuz-zjrestore.efi").c_str(),
@@ -898,8 +943,8 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
         log += "no free Boot#### slot\n";
         return false;
     }
-    // N17：写前备份将被覆盖的 Boot####（原始 NVRAM 字节）；与旧载荷治理配套，
-    // 保证"改启动项"可回退（文件备份见 BackupEspRescuePayload）。
+    // N17：写前备份将被覆盖的 Boot####（原始 NVRAM 字节）—— 载荷本身不备份
+    //（先删后写、直接替换），这里只给启动项留一份可回退的原始值。
     {
         char nm[32] = {};
         snprintf(nm, sizeof(nm), "Boot%04X", num);

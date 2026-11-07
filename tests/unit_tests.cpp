@@ -2270,24 +2270,62 @@ TEST(rescue_payload_fail_message_names_versions) {
                    "版本无法确认");
 }
 
-TEST(rescue_backup_dir_survives_stale_cleanup) {
-    // 2026-11-07 实测：写前备份 backup-pre-rewrite-* 刚建好就被 stale 清理删掉。
-    // 命名判定 + "只保留最新一份" 必须锁死，否则备份形同虚设。
+TEST(rescue_quick_path_uses_stamp_and_size_only) {
+    // 用户 2026-11-07：检测走快路径（版本戳 + 文件大小），不读 17.4MB 本体算哈希。
+    // 版本与大小都对上 → Match，此时 espCrcKnown=false（根本没算 CRC）也必须 keep。
+    const RescuePayloadState s = ClassifyRescuePayload(
+        "1.0.0-beta.1\r\n", "1.0.0-beta.1", /*hasPayload=*/true,
+        /*espCrcKnown=*/false, 0u, 0u, 17391321ull, 17391321ull);
+    CHECK(s == RescuePayloadState::Match);
+    CHECK(!RescuePayloadMustNotBeReused(s));
+    CHECK(DecideRescuePayloadAction(s, true) == RescuePayloadAction::Keep);
+
+    // 版本相同但大小不同（截断/旧同名文件）→ 快路径直接判 ContentMismatch。
+    const RescuePayloadState truncated = ClassifyRescuePayload(
+        "1.0.0-beta.1", "1.0.0-beta.1", true, false, 0u, 0u, 17389826ull,
+        17391321ull);
+    CHECK(truncated == RescuePayloadState::ContentMismatch);
+    CHECK(RescuePayloadMustNotBeReused(truncated));
+
+    // 深查（写后校验/显式要求）时才比 CRC：同版本同大小不同 CRC → 仍判旧。
+    const RescuePayloadState deep = ClassifyRescuePayload(
+        "1.0.0-beta.1", "1.0.0-beta.1", true, true, 111u, 222u, 100ull, 100ull);
+    CHECK(deep == RescuePayloadState::ContentMismatch);
+}
+
+TEST(rescue_payload_deploy_order_is_delete_then_write) {
+    // 顺序契约（用户 2026-11-07）：检测 → 删旧 → 写新 → 校验 → 进启动流程。
+    // 钉死，防止改回"先备份再替换"或"先跑新载荷、成功后才替换"。
+    const auto& steps = RescuePayloadDeploySteps();
+    CHECK(steps.size() == 5);
+    CHECK(steps[0] == "detect");
+    CHECK(steps[1] == "remove-old");
+    CHECK(steps[2] == "write-new");
+    CHECK(steps[3] == "verify");
+    CHECK(steps[4] == "install-entry");
+}
+
+TEST(rescue_write_failure_removes_entry_after_old_payload_deleted) {
+    // 先删后写：删完旧载荷后写失败 → ESP 上没有可用载荷，必须
+    // ① 提示"救援载荷写入失败，请重试或更换介质"
+    // ② 摘掉指向残骸的启动项（否则开机撞空）。
+    const std::string m = RescuePayloadWriteFailedMessage();
+    CHECK_CONTAINS(m, "救援载荷写入失败");
+    CHECK_CONTAINS(m, "请重试或更换介质");
+    CHECK(MustRemoveBootEntryAfterFailure(/*payloadRemoved=*/true));
+    // 一个旧文件都没删（写前就失败）→ 旧载荷仍完整，可以保留原启动项。
+    CHECK(!MustRemoveBootEntryAfterFailure(/*payloadRemoved=*/false));
+}
+
+TEST(rescue_backup_dir_name_and_legacy_cleanup_scope) {
+    // 不再写新备份（ESP 寸土寸金）；`backup-*` 只作为历史遗留目录被识别并清理。
     CHECK(IsRescueBackupDirName(L"backup-pre-rewrite-20261107-203144"));
     CHECK(IsRescueBackupDirName(L"backup-pre-refresh-20261107-203144"));
     CHECK(!IsRescueBackupDirName(L"backup-"));
     CHECK(!IsRescueBackupDirName(L"logs"));
     CHECK(!IsRescueBackupDirName(L"vmlinuz-zjrestore.efi"));
-
-    std::vector<std::wstring> names = {
-        L"backup-pre-rewrite-20261031-101010",
-        L"backup-pre-rewrite-20261107-203144",
-        L"backup-pre-rewrite-20261107-101010",
-        L"logs",
-    };
-    CHECK(NewestRescueBackupName(names) ==
-          std::wstring(L"backup-pre-rewrite-20261107-203144"));
-    CHECK(NewestRescueBackupName({L"logs", L"initramfs"}) == std::wstring());
+    CHECK(!IsRescueBackupDirName(L"bootorder.pre.bak"));
+    CHECK(!IsRescueBackupDirName(L"firmware-boot.txt"));
 }
 
 TEST(cleanup_cmd_requires_ok_marker) {

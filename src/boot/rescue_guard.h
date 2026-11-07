@@ -6,13 +6,16 @@
 // initramfs 是 11-02 的旧文件，安装器自带的源载荷就是旧码，CRC 比对"源=盘上"
 // → keep，于是旧载荷一直留着，且没有任何一处提示。
 //
-// 治理口径（用户 2026-11-07 规格）：
+// 治理口径（用户 2026-11-07 规格，最新定稿）：
 //   1) 安装菜单 / 一次性暂存 / 异机还原 / 修复引导，下发前都要读 ESP 上救援环境
-//      自报的版本（`EFI\ZJRESTORE\rescue-build.txt`）+ initramfs 长度/CRC，
-//      与程序内置载荷比对；
-//   2) 不一致时**默认重写**（写前备份旧文件与 Boot####/BootOrder）；
-//   3) 不能重写就 **fail-closed**，明确提示"ESP 上为旧版救援环境（0.9.x）"；
-//      禁止静默沿用旧载荷继续干活。
+//      自报的版本（`EFI\ZJRESTORE\rescue-build.txt`）+ initramfs 长度，与程序
+//      内置载荷比对；判定走**快路径**（版本戳 + 大小，不读 17.4MB 本体算哈希），
+//      只有版本戳与大小都对不上（确需重写）时才在写后做 CRC 深查；
+//   2) 不一致时**不备份、不写临时文件/不改名**：先删旧载荷腾出空间，再写新载荷
+//      （ESP 寸土寸金，旧载荷本身有问题，没有保留价值）；
+//   3) 顺序固定：检测 → 删旧 → 写新 → 校验 → 才进入启动/安装流程；
+//   4) 删除后写失败即 **fail-closed**：提示"救援载荷写入失败，请重试或更换介质"，
+//      并摘掉指向残骸的 Boot####（不能让人开机撞空载荷）。
 //
 // 本头文件里的分类/决策是**纯逻辑**（零依赖），单测直接构造"ESP 上是旧 build"
 // 的输入断言不会静默沿用；文件读取/备份在 rescue_guard.cpp。
@@ -50,10 +53,10 @@ inline std::string NormalizeRescueBuild(const std::string& raw) {
 }
 
 // espHasPayload = ESP 上存在 initramfs 或内核（说明确实装过救援层）。
-// espContentKnown = ESP 上 initramfs 的 size+CRC 都读到了。
+// espCrcKnown = 调用方**深查**过 ESP 上 initramfs 的 CRC（快路径请传 false）。
 inline RescuePayloadState ClassifyRescuePayload(
     const std::string& espBuild, const std::string& builtinBuild,
-    bool espHasPayload, bool espContentKnown, uint32_t espCrc,
+    bool espHasPayload, bool espCrcKnown, uint32_t espCrc,
     uint32_t builtinCrc, unsigned long long espSize,
     unsigned long long builtinSize) {
     const std::string eb = NormalizeRescueBuild(espBuild);
@@ -64,7 +67,11 @@ inline RescuePayloadState ClassifyRescuePayload(
         return RescuePayloadState::UnreadableBuild;  // 有载荷却无自报版本
     if (eb != bb)
         return RescuePayloadState::VersionMismatch;
-    if (espContentKnown && (espSize != builtinSize || espCrc != builtinCrc))
+    // 快路径：内置大小可知时先用"文件大小"判同（只读文件属性，不读本体）。
+    if (builtinSize > 0 && espSize != builtinSize)
+        return RescuePayloadState::ContentMismatch;
+    // 深查：仅当调用方明确读过 CRC（写后校验 / 需要定性）时才比。
+    if (espCrcKnown && espCrc != builtinCrc)
         return RescuePayloadState::ContentMismatch;
     return RescuePayloadState::Match;
 }
@@ -82,6 +89,24 @@ inline bool RescuePayloadMustNotBeReused(RescuePayloadState s) {
     return DecideRescuePayloadAction(s, true) != RescuePayloadAction::Keep;
 }
 
+// 部署顺序契约（用户 2026-11-07 口径）：检测 → 删旧 → 写新 → 校验 → 进启动流程。
+// 单测钉死，防止有人改回"先备份再替换"或"先跑新载荷、成功后再替换"。
+inline const std::vector<std::string>& RescuePayloadDeploySteps() {
+    static const std::vector<std::string> kSteps = {
+        "detect", "remove-old", "write-new", "verify", "install-entry"};
+    return kSteps;
+}
+
+// 旧载荷已被删/被清之后写失败 → 摘掉 Boot####（不能留下指向残骸的启动项）。
+inline bool MustRemoveBootEntryAfterFailure(bool payloadRemoved) {
+    return payloadRemoved;
+}
+
+// 删除后写失败的用户提示（用户 2026-11-07 指定文案）。
+inline std::string RescuePayloadWriteFailedMessage() {
+    return Tr("救援载荷写入失败，请重试或更换介质。");
+}
+
 inline std::string RescuePayloadFailMessage(const std::string& espBuild,
                                             const std::string& builtinBuild) {
     const std::string eb = NormalizeRescueBuild(espBuild);
@@ -92,21 +117,12 @@ inline std::string RescuePayloadFailMessage(const std::string& espBuild,
            NormalizeRescueBuild(builtinBuild) + Tr("，需更新后重试。");
 }
 
-// 写前备份目录（`EFI\ZJRESTORE\backup-<tag>-<时间戳>`）的识别与保留策略。
-// 2026-11-07 实测缺陷：备份刚建好，就被 InstallUefiBootEntry 的"定点清 stale"
-// 当成非本次文件集删掉（日志 `stale dir removed: backup-pre-rewrite-...`）。
-// 这里给出纯逻辑判定：backup-* 目录一律不参与 stale 清理，只保留最新一份，
-// 更早的备份由清理逻辑删除，避免多份 17MB 载荷把 ESP 塞满。
+// 写前备份目录（`EFI\ZJRESTORE\backup-<tag>-<时间戳>`）的识别。
+// 2026-11-07 历史：曾把旧载荷整目录备份到 `backup-*`（约 17.4MB/份），实测
+// ESP 空间吃紧。现在**不再备份载荷**（旧载荷本身有问题），改为先删后写；
+// `backup-*` 只作为老版本遗留目录被识别并清理（只删这一前缀，不碰用户文件）。
 inline bool IsRescueBackupDirName(const std::wstring& name) {
     return name.size() > 7 && name.compare(0, 7, L"backup-") == 0;
-}
-
-inline std::wstring NewestRescueBackupName(
-    const std::vector<std::wstring>& names) {
-    std::wstring best;
-    for (const auto& n : names)
-        if (IsRescueBackupDirName(n) && n > best) best = n;
-    return best;
 }
 
 // ── 运行期（Windows）──────────────────────────────────────────────
@@ -120,18 +136,24 @@ struct EspRescuePayload {
     bool crcKnown = false;
 };
 
-// 只读：ESP 上救援载荷的自报版本 + initramfs 长度/CRC。
-bool ReadEspRescuePayload(const std::wstring& espRoot, EspRescuePayload& out);
+// 只读：ESP 上救援载荷的自报版本 + initramfs 长度。deepCrc=true 时才读本体算
+// CRC（17.4MB 全读，快路径不要传 true）。
+bool ReadEspRescuePayload(const std::wstring& espRoot, EspRescuePayload& out,
+                          bool deepCrc = false);
 
-// 写入前备份：旧文件 → `EFI\ZJRESTORE\backup-<tag>\`，并把当前固件启动项
-// 汇总（BootOrder 顺序 + 每条 Boot#### 描述/设备路径）写成
-// `backup-<tag>\firmware-boot.txt`。返回 false 仅表示有备份项失败（调用方
-// 仍可继续，但必须把失败写进日志）。
-bool BackupEspRescuePayload(const std::wstring& espRoot, const std::string& tag,
-                            std::string& log);
+// 清理历史遗留的载荷备份目录：`backup-*` 逐目录删掉，日志写清单与释放字节。
+// 只匹配自己创建的前缀，不碰用户文件、不碰 Secure Boot 相关文件、不碰当前载荷。
+// 返回删掉的字节数（失败项也算 0）。
+unsigned long long CleanupLegacyRescueBackups(const std::wstring& espRoot,
+                                              std::string& log);
 
-// 修复引导等**不新建启动项**的入口：ESP 上是旧载荷 → 就地刷新已有文件 +
-// 更新 rescue-build.txt（不创建新的 Boot####）。失败返回 false，msg 给用户。
+// 写一份几 KB 的固件启动序快照（`EFI\ZJRESTORE\firmware-boot.txt`），
+// 作为"替换前 BootOrder/Boot#### 指向谁"的判据（不占载荷空间）。
+void WriteFirmwareBootSnapshot(const std::wstring& espRoot, std::string& log);
+
+// 修复引导等**不新建启动项**的入口：ESP 上是旧载荷 → 先删旧文件、再写新文件、
+// 写后校验，最后更新 rescue-build.txt（不创建新的 Boot####）。失败返回 false，
+// msg 为"救援载荷写入失败，请重试或更换介质。"。
 bool RefreshEspRescuePayload(const std::wstring& espRoot,
                              const std::wstring& assetDir, std::string& log,
                              std::string& msg);
