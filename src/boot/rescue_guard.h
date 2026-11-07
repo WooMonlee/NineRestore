@@ -18,6 +18,7 @@
 // 的输入断言不会静默沿用；文件读取/备份在 rescue_guard.cpp。
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "../common/i18n.h"
 
@@ -89,6 +90,23 @@ inline std::string RescuePayloadFailMessage(const std::string& espBuild,
                   "需更新后重试。");
     return Tr("ESP 上为旧版救援环境（") + eb + Tr("），内置为 ") +
            NormalizeRescueBuild(builtinBuild) + Tr("，需更新后重试。");
+}
+
+// 写前备份目录（`EFI\ZJRESTORE\backup-<tag>-<时间戳>`）的识别与保留策略。
+// 2026-11-07 实测缺陷：备份刚建好，就被 InstallUefiBootEntry 的"定点清 stale"
+// 当成非本次文件集删掉（日志 `stale dir removed: backup-pre-rewrite-...`）。
+// 这里给出纯逻辑判定：backup-* 目录一律不参与 stale 清理，只保留最新一份，
+// 更早的备份由清理逻辑删除，避免多份 17MB 载荷把 ESP 塞满。
+inline bool IsRescueBackupDirName(const std::wstring& name) {
+    return name.size() > 7 && name.compare(0, 7, L"backup-") == 0;
+}
+
+inline std::wstring NewestRescueBackupName(
+    const std::vector<std::wstring>& names) {
+    std::wstring best;
+    for (const auto& n : names)
+        if (IsRescueBackupDirName(n) && n > best) best = n;
+    return best;
 }
 
 // ── 运行期（Windows）──────────────────────────────────────────────

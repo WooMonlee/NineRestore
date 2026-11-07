@@ -635,6 +635,21 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
         for (const auto& f : files)
             keepNames.push_back(f.second);
         keepNames.push_back(L"rescue-build.txt");
+        // 写前备份目录 `backup-*`：最新一份必须保留（否则"备份完立刻被清"，实测
+        // 2026-11-07）；更早的备份在这里顺手删掉，避免多份 17MB 载荷塞满 ESP。
+        std::vector<std::wstring> backupNames;
+        {
+            WIN32_FIND_DATAW bfd;
+            HANDLE bh = FindFirstFileW((dir + L"\\backup-*").c_str(), &bfd);
+            if (bh != INVALID_HANDLE_VALUE) {
+                do {
+                    if (bfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                        backupNames.push_back(bfd.cFileName);
+                } while (FindNextFileW(bh, &bfd));
+                FindClose(bh);
+            }
+        }
+        const std::wstring newestBackup = NewestRescueBackupName(backupNames);
         WIN32_FIND_DATAW fd;
         HANDLE hFind = FindFirstFileW((dir + L"\\*").c_str(), &fd);
         if (hFind != INVALID_HANDLE_VALUE) {
@@ -642,6 +657,9 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
                 std::wstring name = fd.cFileName;
                 if (name == L"." || name == L"..")
                     continue;
+                if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                    IsRescueBackupDirName(name) && name == newestBackup)
+                    continue;  // 保留最新备份
                 bool keep = false;
                 for (const auto& k : keepNames)
                     if (name == k) {

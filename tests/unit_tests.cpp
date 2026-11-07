@@ -2270,6 +2270,26 @@ TEST(rescue_payload_fail_message_names_versions) {
                    "版本无法确认");
 }
 
+TEST(rescue_backup_dir_survives_stale_cleanup) {
+    // 2026-11-07 实测：写前备份 backup-pre-rewrite-* 刚建好就被 stale 清理删掉。
+    // 命名判定 + "只保留最新一份" 必须锁死，否则备份形同虚设。
+    CHECK(IsRescueBackupDirName(L"backup-pre-rewrite-20261107-203144"));
+    CHECK(IsRescueBackupDirName(L"backup-pre-refresh-20261107-203144"));
+    CHECK(!IsRescueBackupDirName(L"backup-"));
+    CHECK(!IsRescueBackupDirName(L"logs"));
+    CHECK(!IsRescueBackupDirName(L"vmlinuz-zjrestore.efi"));
+
+    std::vector<std::wstring> names = {
+        L"backup-pre-rewrite-20261031-101010",
+        L"backup-pre-rewrite-20261107-203144",
+        L"backup-pre-rewrite-20261107-101010",
+        L"logs",
+    };
+    CHECK(NewestRescueBackupName(names) ==
+          std::wstring(L"backup-pre-rewrite-20261107-203144"));
+    CHECK(NewestRescueBackupName({L"logs", L"initramfs"}) == std::wstring());
+}
+
 TEST(cleanup_cmd_requires_ok_marker) {
     const std::string cmd(kFirstBootCleanupCmd);
     CHECK_CONTAINS(cmd, "findstr /C:\"ok=1\"");

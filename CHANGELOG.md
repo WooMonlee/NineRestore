@@ -11,6 +11,17 @@
 基线：SysRecover **0.9.96**（commit `8401cdab`）。本版是「九转还原」工程化重构 + P0/P1 整改，
 不改变产品定位与磁盘格式（镜像仍是 WIM/ESD，加密镜像仍是 ZJENC1）。
 
+### 未发布修正（2026-11-07，N17 实测）
+
+- **ESP 写前备份目录被 stale 清理误删**（`src/boot/uefi.cpp` `InstallUefiBootEntry`）：
+  旧载荷重写时刚建好的 `backup-pre-rewrite-<时间戳>` 被"定点清 stale"判为非本次文件集而删除
+  （日志 `stale dir removed: backup-pre-rewrite-…`），备份形同虚设。现在 `backup-*` 不参与
+  stale 清理，且只保留**最新一份**（更早的备份仍清理，避免多份 ~17MB 载荷塞满 ESP）；
+  纯逻辑抽到 `rescue_guard.h::IsRescueBackupDirName` / `NewestRescueBackupName`，
+  单测 `rescue_backup_dir_survives_stale_cleanup` 锁定。
+- 0.9.93 旧载荷 → 新版接管实测记录、客户"扫描后安装"失败链条，见
+  `docs/34-发布门禁总表.md` C.4。
+
 ### 数据安全（P0）
 
 - **H1 暂存交换 fail-closed**：`zjswap.sh` 任一 `move` 失败即非零退出（退出码 4），
