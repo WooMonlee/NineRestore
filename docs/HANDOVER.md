@@ -131,6 +131,12 @@
   `check-foreground ok`；`test_zjswap PASS`；`check-widths` 仅 1 个既有 WARN。
 - x64 / x86 `all` 退出码 0；载荷 17,407,257 B / 726 entries /
   SHA-256 `d1ea1df0f1ce979fcd6e050b33ea160c823044085bae5967f2504c98b745c8e4`。
+- 收口轮补跑：`make package` → `make sha256` → `make dist-check` 全部退出码 0，
+  `dist\bootfiles\initramfs-zjrestore.cpio.gz` 与仓库载荷逐字节一致（同上哈希）。
+- **按新哈希重跑启动烟测**（QEMU/OVMF，夹具按安装侧写 `entry-kind.txt=menu`）：
+  `BdsDxe: starting Boot0003 "SysRecover Temporary Restore"` → `entry-started.txt`
+  末行 `entry=menu`，载荷 `17407257 d1ea1df0…`。`ZJRESTORE-status.txt` 未产生
+  （无还原任务时不走 `bb_drop`，属预期）。**旧烟测（17,393,120 B / `30C6906…`）作废。**
 
 ## 提交号
 
@@ -152,7 +158,7 @@
 - N10 发布流程项（`2ab3e87`，`package` 口径 + 三元版本断言）。
 - N8 低成本部分：`entry-kind.txt` / `zjentry=` / `entry=`（`2ab3e87`，烟测实证）。
 - docs/35 文件名（`ebff546`）。
-- N18 后续"新 cpio 启动烟测"（QEMU/OVMF，见上）。
+- **N18 后续"新 cpio 启动烟测"**（QEMU/OVMF，**2026-11-07 按新哈希重跑**，见上）。
 - **N20 批 1**（①②③）：代码 + QEMU/OVMF 固件级实测（中途杀进程→Windows、手选救援项→救援）。
 - **N20 批 2**（④=A）：救援层写标记 + GUI 读即自删；单测 + QEMU/OVMF 回滚链路实测
   （回滚 → 重启进 Windows → 挂回盘读到标记）。
@@ -163,8 +169,13 @@
 - **N20 批 2 的 Windows GUI 弹窗**：单测覆盖"读到即删、二次为假"，但**没有**在 Windows
   里实际登录看到提示（无 guest 自动化）；不写成"端到端已验证"。
 - **N7**：根治暂缓（1.0 不做）；`docs/34` §5.1 与 `docs/33` §5.4 已写已知限制。
-- **Windows 侧装菜单 → 重启进救援**：VMware 可用，但本轮**未执行**该流程
-  （无 guest 自动化凭据；QEMU/WinPE GUI 点击未自动化）。
+- **Windows 侧装菜单 → 重启进救援**：VMware VM 与固件都在，但**本线没有 guest 控制通道**：
+  `vmrun -T ws captureScreen` 实测返回 `此虚拟机不允许执行匿名客户机操作。必须先调用
+  VixVM_LoginInGuest`；仓库/文档无该 VM 的 guest 账号密码；宿主 `EnumWindows` 枚举不到
+  可见窗口（无交互窗口站）。**需要 guest 凭据或人工交互**才能跑"装菜单 → 重启 → F10/F12 →
+  SysRecover → 核对 entry"。不得用 QEMU/OVMF 的 `entry=menu` 冒充此结论。
+- **BIOS/MBR 传统引导、ESD 兼容矩阵、WinPE 离线取证**：**已划给另一条独立测试线**
+  （用户 2026-11-07 明确），本线不再安排、不重复开机器。
 - **UDF apply 全链路**：UDF 支持已证实，但缺"完整系统镜像在 UDF 上"的介质。
 - **`docs/35` 物理机项**：USB 固定盘、BIOS/MBR 仍标 **[物理机]**，不猜结论。
 - 七项实机第 1/4/5/7 项：仍"无法判定 / 部分验证"，不得写成已验证。
@@ -178,9 +189,10 @@
 - **VMware 便携版可用**（2026-11-07 核查，更正此前"未安装"的误判）：
   `D:\Software\System\_VMware\VMware17.6.1\vmrun.exe` → True；
   `...\VMdisks\初心Win10x64\Windows 10 x64.vmx` → True；
-  `vmrun list` → `Total running VMs: 0`；`listSnapshots` → 5 个
-  （含 `pre-rerun-newpayload-20261106`）。此前只查 `C:\Program Files*`，误判为未安装。
-  Windows 侧"装菜单 → 重启进救援"因此**可以复测**，只是本轮没跑。
+  `vmrun list` 本 VM 已在列；`listSnapshots` → 用户 5 个快照 + 本线自建
+  `pre-n20-batch1-20261107`。**该 VM 归本线**（测试台已被要求不要动它）。
+  **但 `vmrun` guest 操作被拒**（匿名 guest 不允许，`captureScreen` 也一样）→
+  Windows 侧安装链路需要 guest 凭据或人工交互，见"仍开放"。
 - QEMU 可用：`D:\Prog\ProgIDE\msys64\mingw64\bin\qemu-system-x86_64.exe`；
   烟测后已 `poweroff`，无残留 QEMU 进程。
 - UDF 测试用的硬链接目录 `D:\Software\System\_udf-media` 已删除（原 ISO 未动）。
@@ -189,8 +201,10 @@
 ## 下次开工从这里接
 
 1. `git status --short`（应为空）→ `make check`（应 PASS，含 C5 9/9）。
-2. **N20 批 2（④）已完成**；如需补证据，优先做 Windows GUI 的"读到标记后弹窗"端到端。
-3. VMware 可用时，补"Windows 侧装菜单 → 固件重启进救援"烟测。
-4. 批 1 门禁通过后，用 `D:\Software\System\_VMware` 的 7z 副本做 BIOS/MBR 传统引导链路。
+2. **N20 批 2（④）已完成**；如需补证据，优先做 Windows GUI 的"读到标记后弹窗"端到端
+   （同样卡在 guest 凭据）。
+3. **本线**补"Windows 侧装菜单 → 固件重启进救援"：需要 guest 凭据或人工交互，
+   装完菜单后按 F10（VMware EFI 的 Boot Manager），核对 `entry=menu`。
+4. BIOS/MBR 传统引导、ESD 兼容矩阵、WinPE 离线取证：**另一条独立测试线负责**，本线不接。
 5. 拿一枚"完整系统镜像在 UDF 上"的介质，补 apply 端到端。
-6. 物理机到位后按 `docs/35` 跑 USB 固定盘、BIOS/MBR。
+6. 物理机到位后按 `docs/35` 跑 USB 固定盘、分区/磁盘枚举（BIOS/MBR 归测试线）。
