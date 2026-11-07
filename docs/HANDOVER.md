@@ -57,7 +57,8 @@
   `entry marker written (/dev/sda1) entry=menu`、
   `ZJRESTORE-status.txt` 含 `build=1.0.0-beta.1` / `entry=menu` / `step=no-task`、
   `no restore task … reboot in 10s`（安全退出）。**PASS**。
-- **未覆盖**：Windows 侧"安装菜单 → 固件重启"这一段；本机 VMware 未安装，
+- **未覆盖**：Windows 侧"安装菜单 → 固件重启"这一段；本轮没跑该流程
+  （VMware 便携版可用，见"环境与收尾状态"），
   QEMU 烟测不经过我们的安装代码，也**不等于**固件在 Secure Boot 开启下验签 shim。
 
 ### 6. UDF 真实介质（本轮新增）
@@ -103,7 +104,7 @@
 - **N20**：设计已出（`docs/34` §5.4），未实现；需用户评审。
 - **N21**：Secure Boot 一次性项 disarm 失配；未修、未实机复现；与 N20 合并实现。
 - **N7**：根治暂缓（1.0 不做）；`docs/34` §5.1 与 `docs/33` §5.4 已写已知限制。
-- **Windows 侧装菜单 → 重启进救援**：本轮无 VMware，未复测。
+- **Windows 侧装菜单 → 重启进救援**：VMware 可用，但本轮**未执行**该流程。
 - **UDF apply 全链路**：UDF 支持已证实，但缺"完整系统镜像在 UDF 上"的介质。
 - **`docs/35` 物理机项**：USB 固定盘、BIOS/MBR 仍标 **[物理机]**，不猜结论。
 - 七项实机第 1/4/5/7 项：仍"无法判定 / 部分验证"，不得写成已验证。
@@ -115,8 +116,12 @@
 
 ## 环境与收尾状态（2026-11-07）
 
-- 本机**未安装 VMware**：`vmrun.exe` 不存在（`C:\Program Files*` 下无 VMware 目录），
-  只剩 `D:\Software\System\_VMware\VMdisks\初心Win10x64\Windows 10 x64.vmx`。
+- **VMware 便携版可用**（2026-11-07 核查，更正此前"未安装"的误判）：
+  `D:\Software\System\_VMware\VMware17.6.1\vmrun.exe` → True；
+  `...\VMdisks\初心Win10x64\Windows 10 x64.vmx` → True；
+  `vmrun list` → `Total running VMs: 0`；`listSnapshots` → 5 个
+  （含 `pre-rerun-newpayload-20261106`）。此前只查 `C:\Program Files*`，误判为未安装。
+  Windows 侧"装菜单 → 重启进救援"因此**可以复测**，只是本轮没跑。
 - QEMU 可用：`D:\Prog\ProgIDE\msys64\mingw64\bin\qemu-system-x86_64.exe`；
   烟测后已 `poweroff`，无残留 QEMU 进程。
 - UDF 测试用的硬链接目录 `D:\Software\System\_udf-media` 已删除（原 ISO 未动）。
@@ -127,6 +132,6 @@
 1. `git status --short`（应为空）→ `make check`（应 PASS，含 C5 9/9）。
 2. N20 评审通过后，先修 N21（disarm 判定改为认 `temp-entry.txt` 条目号），
    再实现"早归还 + Recovery 后备 + Windows 三态"。
-3. 有 VMware 环境时，补"Windows 侧装菜单 → 固件重启进救援"烟测。
+3. VMware 可用时，补"Windows 侧装菜单 → 固件重启进救援"烟测。
 4. 拿一枚"完整系统镜像在 UDF 上"的介质，补 apply 端到端。
 5. 物理机到位后按 `docs/35` 跑 USB 固定盘、BIOS/MBR。
