@@ -4,6 +4,8 @@
 # 用法（PowerShell）：
 #   $env:Path = "D:\Prog\ProgIDE\mingw64\bin;" + $env:Path
 #   mingw32-make -f Makefile package        # ★ 发布包：32 位通用启动器（根）+ x64/ + x86 兼容入口 + 共享资源
+#   mingw32-make -f Makefile portable       # ★ 单文件包 + 发布到 D:\九转大还原<版本>.exe
+#   mingw32-make -f Makefile release        # ★ 一步出包：递增 beta 号 → 构建 → 打包 → SHA256
 #   mingw32-make -f Makefile all            # 仅 x64 真程序 → dist/x64
 #   mingw32-make -f Makefile ARCH=x86 all   # 仅 x86 兼容程序 → dist/*_x86.exe
 #   mingw32-make -f Makefile check          # 单元测试（纯逻辑，零依赖）
@@ -505,4 +507,14 @@ drill:
 	$(PYTHON) tools/vmtest/mk-drill.py
 	powershell -ExecutionPolicy Bypass -File tools/vmtest/run-drill.ps1 -Secs 240
 
-.PHONY: all cli gui wimcheck clean package check crash-test smoke drill sha256 dist-check smoke-cli
+# ---- 一步出包（用户 2026-11-07 定稿，见 docs/37-版本命名规范.md）----
+# 递增 beta 号 → 双架构构建 → 打包 → 出 SHA256；避免手工改号忘记递增。
+# 递增写在 src/common/version.h 里（可提交），随后整条链都读同一个号。
+# 用法：mingw32-make -f Makefile release
+release:
+	$(PYTHON) tools/version.py --bump
+	$(SELF) -f Makefile package portable
+	$(PYTHON) tools/write-sha256.py dist
+	@$(PYTHON) tools/version.py --check
+
+.PHONY: all cli gui wimcheck clean package check crash-test smoke drill sha256 dist-check smoke-cli release

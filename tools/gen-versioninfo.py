@@ -49,13 +49,9 @@ def grab(pattern: str, vh: str, name: str) -> str:
     return m.group(1)
 
 
-def numeric(version: str) -> tuple[int, int, int, int]:
-    """1.0.0-beta.1 → (1,0,0,0)。预发布后缀无法放进 16 位数字段，只保留主.次.修订。"""
-    base = version.split("-", 1)[0]
-    parts = [int(x) for x in base.split(".")]
-    while len(parts) < 3:
-        parts.append(0)
-    return (parts[0], parts[1], parts[2], 0)
+def numeric(major: int, minor: int, patch: int, beta: int) -> tuple[int, int, int, int]:
+    """内部四段：beta 1.0.0.2；正式 1.0.0.0；正式之后 1.0.1.0。"""
+    return (major, minor, patch, beta)
 
 
 def main() -> int:
@@ -81,11 +77,20 @@ def main() -> int:
     internal, desc = PROFILES[profile]
 
     vh = VERSION_H.read_text(encoding="utf-8")
+    major = int(grab(r'#define\s+SYSRECOVER_MAJOR\s+(\d+)', vh, "MAJOR"))
+    minor = int(grab(r'#define\s+SYSRECOVER_MINOR\s+(\d+)', vh, "MINOR"))
+    patch = int(grab(r'#define\s+SYSRECOVER_PATCH\s+(\d+)', vh, "PATCH"))
+    beta = int(grab(r'#define\s+SYSRECOVER_BETA\s+(\d+)', vh, "BETA"))
     ver = grab(r'SYSRECOVER_VERSION\s+"([^"]+)"', vh, "SYSRECOVER_VERSION")
+    display = grab(r'SYSRECOVER_DISPLAY\s+"([^"]+)"', vh, "SYSRECOVER_DISPLAY")
     company = grab(r'SYSRECOVER_COMPANY\s+"([^"]*)"', vh, "SYSRECOVER_COMPANY")
     copyright_ = grab(r'SYSRECOVER_COPYRIGHT\s+"([^"]*)"', vh, "SYSRECOVER_COPYRIGHT")
     product = grab(r'SYSRECOVER_PRODUCT\s+"([^"]*)"', vh, "SYSRECOVER_PRODUCT")
-    n = numeric(ver)
+    n = numeric(major, minor, patch, beta)
+    # 属性页字符串用显示串（beta 带 beta 字样）；数字字段是纯四段。
+    # 文件描述带上渠道文字，方便用户一眼区分测试版/正式版。
+    if beta:
+        desc = desc + " (Beta)"
 
     def esc(s: str) -> str:
         return s.replace("\\", "\\\\").replace('"', '\\"')

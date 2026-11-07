@@ -877,7 +877,6 @@ EN = {
     '加密镜像的 ESP 子镜像暂存失败(rc=': 'Encrypted ESP sub-image staging failed (rc=',
     '备份目标空间不足：预计至少需要约 ': 'Not enough space on the backup target: at least about ',
     '目标卷是 FAT32，单个镜像文件不能超过 4GB；源卷已用约 ': 'The target volume is FAT32; a single image file cannot exceed 4GB. The source volume already uses about ',
-    '测试版': 'Beta',
     '安全模式': 'Safe Mode',
     '暂时保留': 'Keep For Now',
     '退出并重启': 'Exit and Reboot',

@@ -186,14 +186,16 @@ set SYSRECOVER_LANG=en
 
 ## 6. Version, testing and feedback
 
-- Current version: **`1.0.0-beta.1` (1.0.0 Beta)**, see [`CHANGELOG.md`](CHANGELOG.md).
+- Current version: **`1.0 beta.2` (internal `1.0.0.2`)**, see [`CHANGELOG.md`](CHANGELOG.md).
   This build is **unsigned** and has **not** completed a full backup/restore cycle on real hardware;
   try it only on a machine or VM you do not mind losing.
 - UI changes: in restore mode, **Universal** (dissimilar-hardware restore) is now a checkbox on the
   third step; **Package log** moved into the **More features >>** menu (first item).
 - Explorer → Properties → Details on any shipped exe shows ProductName `九转还原`,
-  version `1.0.0-beta.1`, company `DreamGrain`, and the MIT copyright — same for the single-file build.
-- Version strategy: dev → `v1.0.0-beta.N` → `v1.0.0-rc.N` → `v1.0.0` after the gate is green.
+  version `1.0.0.2`, company `DreamGrain`, and the MIT copyright — same for the single-file build.
+- Version strategy: betas are `1.0 beta.N` (file `NineRestore1.0-beta.N.exe`, internal `1.0.0.N`);
+  the release is `1.0.0` (internal `1.0.0.0`); post-release fixes go `1.0.1`, `1.0.2`.
+  Full rules: [`docs/37-版本命名规范.md`](docs/37-版本命名规范.md).
 - Known issues and real-machine checklist: [`docs/33-已知问题与限制（1.0）`](docs/33-已知问题与限制（1.0）.md).
 
 Tested on self-owned desktops, laptops and VMs with **Windows 7 / 10 / 11, BIOS, UEFI, x86 and x64**. Feedback from more machines and servers is welcome.

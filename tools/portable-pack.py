@@ -36,13 +36,31 @@ def main():
     print('portable-pack: %s (%.1f MB)' % (out, size / 1048576.0))
 
     if release_dir:
-        ver = '0.0.0'
+        ver = '0.0.0.0'
         vj = os.path.join(dist, 'version.json')
         if os.path.exists(vj):
             with open(vj, 'r', encoding='utf-8') as f:
                 ver = json.load(f).get('version', ver)
-        zh = '\u4e5d\u8f6c\u5927\u8fd8\u539f%s.exe' % ver
+        # 2026-11-07 命名规范：
+        #   内部 1.0.0.2（beta.2）  -> 九转大还原1.0-beta.2.exe
+        #   内部 1.0.0.0（正式）    -> 九转大还原1.0.0.exe
+        #   内部 1.0.1.0（正式之后）-> 九转大还原1.0.1.exe
+        parts = str(ver).split('.')
+        while len(parts) < 4:
+            parts.append('0')
+        major, minor, patch, beta = (int(parts[0]), int(parts[1]),
+                                     int(parts[2]), int(parts[3]))
+        if beta:
+            display = '%d.%d-beta.%d' % (major, minor, beta)
+        else:
+            display = '%d.%d.%d' % (major, minor, patch)
+        zh = '九转大还原%s.exe' % display
         dst_zh = os.path.join(release_dir, zh)
+        # 同版本号不覆盖旧包：撞名说明忘了递增 beta 号。
+        if os.path.exists(dst_zh):
+            print('portable-pack: REFUSE: %s already exists; bump the beta '
+                  'number first (tools/version.py --bump)' % dst_zh)
+            return 1
         try:
             shutil.copyfile(out_abs, dst_zh)
             print('portable-pack: released -> %s' % dst_zh)

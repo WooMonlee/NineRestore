@@ -631,7 +631,6 @@ wimlib 初始化失败\n=wimlib initialization failed\n
 没有足够的空闲盘符可分配=Not enough free drive letters
 没有选择镜像，已取消。=No image selected; cancelled.
 注意：将清除该磁盘上的全部分区与数据！=Warning: all partitions and data on this disk will be erased!
-测试版=Beta
 浏览保存位置=Save location
 浏览系统镜像=Browse Image
 清除=Remove

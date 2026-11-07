@@ -1,10 +1,43 @@
-# 交接摘要（1.0.0-beta.1，2026-11-07 收尾轮）
+# 交接摘要（1.0 beta.2 / 内部 `1.0.0.2`，2026-11-07 收尾轮）
 
 > 本文件只记录**证据撑得住**的状态。没有写"全部完成"：N20 批 1 + 批 2 均已实现并做了
 > QEMU/OVMF 固件级实测；**批 2 的 Windows GUI 弹窗本身没有 end-to-end 跑**（单测覆盖读即自删）；
-> N7 明确暂缓；Windows 侧"装菜单 → 重启进救援"这一段仍未复测。
+> N7 明确暂缓；Windows 侧"装菜单 → 重启进救援"在新载荷（先删后写）下仍需复测。
 
-## 本轮做完的（2026-11-07）
+## 本轮做完的（2026-11-07 深夜，载荷改造 + 版本对齐）
+
+### 0. ESP 载荷不再备份：先删后写（提交 `f0c7de9`）
+
+- 取消写前整目录备份（`EFI\ZJRESTORE\backup-<stamp>\`，约 17.4MB/份）；旧固件本身即待替换对象。
+- 顺序固定：**检测 → 删除旧载荷 → 写入新载荷 → 校验字节数与 CRC32 → 进入启动/安装流程**。
+  检测走快路径（`rescue-build.txt` 版本戳 + initramfs 字节数），需要对内容负责时才做 CRC 深查。
+- 写失败 fail-closed：旧载荷已删而写新失败时，提示「救援载荷写入失败，请重试或更换介质。」，
+  并摘掉 `Boot####`（`boot entry removed (payload missing)`），不留指向残骸的启动项。
+- 清理历史遗留 `backup-*`：只删本程序创建的前缀，日志写清单与释放字节；NVRAM 侧小文本
+  （`Boot<num>.pre.bak` / `bootorder.pre.bak` / `firmware-boot.txt`）保留。
+- 新单测：`rescue_quick_path_uses_stamp_and_size_only`、
+  `rescue_payload_deploy_order_is_delete_then_write`、
+  `rescue_write_failure_removes_entry_after_old_payload_deleted`、
+  `rescue_backup_dir_name_and_legacy_cleanup_scope`；原 `rescue_backup_dir_survives_stale_cleanup` 删除。
+
+### 0.1 版本命名对齐（见 `docs/37-版本命名规范.md`）
+
+- 规则：测试版 `九转大还原1.0-beta.N.exe` / 界面 `1.0 beta.N` / 内部 `1.0.0.N`；
+  正式版 `1.0.0` / 内部 `1.0.0.0`；正式版之后 `1.0.1`、`1.0.2`（beta 期间第三位固定 0）。
+- `src/common/version.h` 增加 `SYSRECOVER_PATCH` / `SYSRECOVER_BETA`，显示串由 `SYSRECOVER_DISPLAY` 派生；
+  `tools/version.py` 重写（`--bump/--release/--beta/--patch/--display/--filename/--check`）；
+  `tools/gen-versioninfo.py` 输出四段纯数字；`tools/portable-pack.py` 按渠道命名并**同名拒绝覆盖**；
+  `Makefile` 新增 `release` 目标（递增 → 双架构构建 → 打包 → SHA256 → 校验）。
+- 旧包只改名不重建：`D:\九转大还原1.0.0-beta.1.exe` → `D:\九转大还原1.0-beta.1.exe`
+  （其内部版本资源串仍是旧写法 `1.0.0-beta.1`，属性页照原样显示）。
+- 本轮产物：`D:\九转大还原1.0-beta.2.exe`，41,613,126 B，FileVersion/ProductVersion `1.0.0.2`，
+  包内 `version.json` 与 `bootfiles/rescue-build.txt` 均为 `1.0.0.2`，initramfs 与仓库逐字节一致
+  （17,407,239 B，SHA256 `10935B81…`）。
+- 门禁：x64/x86 `all` 均退出码 0；`make check` → `107 cases, 743 checks, 0 failures`；
+  `test_version.py` 18 checks 0 failures；`check-i18n` 890/890；`check-dist: PASS`。
+
+## 历史轮次（1.0 beta.1，2026-11-07 收尾轮）
+
 
 ### 1. docs/35 文件名（`ebff546`）
 
@@ -189,10 +222,9 @@
 - **VMware 便携版可用**（2026-11-07 核查，更正此前"未安装"的误判）：
   `D:\Software\System\_VMware\VMware17.6.1\vmrun.exe` → True；
   `...\VMdisks\初心Win10x64\Windows 10 x64.vmx` → True；
-  `vmrun list` 本 VM 已在列；`listSnapshots` → 用户 5 个快照 + 本线自建
-  `pre-n20-batch1-20261107`。**该 VM 归本线**（测试台已被要求不要动它）。
-  **但 `vmrun` guest 操作被拒**（匿名 guest 不允许，`captureScreen` 也一样）→
-  Windows 侧安装链路需要 guest 凭据或人工交互，见"仍开放"。
+  **guest 凭据已知**：`Administrator` / `stylish`（`vmrun -gu Administrator -gp stylish …`），
+  带凭据的 `captureScreen` 实测可用（心跳目录 `temp\hb\`）。早前"匿名 guest 操作被拒"的记录
+  只说明**不能匿名**，不代表没有通道。
 - QEMU 可用：`D:\Prog\ProgIDE\msys64\mingw64\bin\qemu-system-x86_64.exe`；
   烟测后已 `poweroff`，无残留 QEMU 进程。
 - UDF 测试用的硬链接目录 `D:\Software\System\_udf-media` 已删除（原 ISO 未动）。
@@ -202,9 +234,9 @@
 
 1. `git status --short`（应为空）→ `make check`（应 PASS，含 C5 9/9）。
 2. **N20 批 2（④）已完成**；如需补证据，优先做 Windows GUI 的"读到标记后弹窗"端到端
-   （同样卡在 guest 凭据）。
-3. **本线**补"Windows 侧装菜单 → 固件重启进救援"：需要 guest 凭据或人工交互，
-   装完菜单后按 F10（VMware EFI 的 Boot Manager），核对 `entry=menu`。
+   （`vmrun` 带凭据可进 guest 执行，但仍需截图/远程桌面确认弹窗）。
+3. **本线**补"Windows 侧装菜单 → 固件重启进救援"：可用 `vmrun -gu Administrator -gp stylish`
+   进 guest 拷文件/执行，重启与固件 Boot Manager 选择需人工交互或 VNC；核对 `entry=menu`。
 4. BIOS/MBR 传统引导、ESD 兼容矩阵、WinPE 离线取证：**另一条独立测试线负责**，本线不接。
 5. 拿一枚"完整系统镜像在 UDF 上"的介质，补 apply 端到端。
 6. 物理机到位后按 `docs/35` 跑 USB 固定盘、分区/磁盘枚举（BIOS/MBR 归测试线）。

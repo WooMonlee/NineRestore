@@ -35,11 +35,12 @@ def read(p):
     return p.read_text(encoding="utf-8", errors="replace")
 
 
-# SemVer 2.0 的核心部分 + 预发布后缀（1.0.0-beta.1 / 1.0.0-rc.2）。
-# 预发布阶段是发布流程的一部分（dev → beta → rc → 正式），门禁必须认。
-def check_semver(v):
-    if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:[.\-][0-9A-Za-z]+)*)?", v):
-        fails.append("version.h 版本号不是 SemVer: %r" % v)
+# 版本串形态（2026-11-07 定稿，见 docs/37-版本命名规范.md）：
+#   `1.0.0.N`（beta 渠道，beta 号在第四段）/ `1.0.0.0`（正式）/ `1.0.1.0`（正式之后）
+#   ⚠️ 允许第四段：EXE 的 FILEVERSION 是四段；旧式 `1.0.0-beta.1` 已废弃。
+def check_version(v):
+    if not re.fullmatch(r"\d+\.\d+\.\d+(?:\.\d+)?", v):
+        fails.append("version.h 版本号不是 三段/四段十进制: %r" % v)
 
 
 def main():
@@ -49,7 +50,7 @@ def main():
         fails.append("version.h 里找不到 SYSRECOVER_VERSION")
         return report()
     ver = m.group(1)
-    check_semver(ver)
+    check_version(ver)
 
     m = re.search(r"SYSRECOVER_CONTRACT_VERSION\s+(\d+)", vh)
     if not m:
