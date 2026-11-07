@@ -2245,3 +2245,33 @@
       写失败必须可见；最终仍以高层复核 `0x54` 作为判定依据。
   · 基线 `tools/shell-stderr-baseline.txt` 184 → 185（净增 1，全部为 A 类探测读）。
 
+### PIT-218
+
+- PIT-218 **测试台 `mc.bat` "窗口没反应"的真正原因：它本来就不打印，而且把唯一的上传吞掉了**（2026-11-08，非产品代码）
+  · 现象：guest 里跑 `mc.bat`（经 8900 下发，2229 B，HTTP 200），控制台窗口一片空白、几十秒不动，看着像卡死。
+  · 根因三件，全部实测复现：
+    ① **设计性静默**：`@echo off`，且每一行的输出都 `>> C:\mc.txt`，控制台按设计就没有一个字。
+       实测跑完整脚本，控制台字节数 = **0**。
+    ② **上传必失败且被吞**：`-InFile 'C:\mc.txt'` 读的正是 cmd 用 `>> %L%` 占着写句柄的同一个文件
+       → `The process cannot access the file ... being used by another process`，连跑 5 次 **5/5 命中**；
+       外面套的是裸 `catch{}`，错误既不进日志也不进控制台，退出码仍是 0。这就是 win11 那轮
+       `vd_win11.txt` 上传成功、`mc_win11.txt` 却根本没有的原因（RS4 那轮能上传，是因为 21:04 跑的是
+       **改动前**的脚本；`mc.bat` 的 mtime 是 21:55，改动在 RS4 之后、win11 之前）。
+    ③ **没有超时**：`Invoke-WebRequest` 不带 `-TimeoutSec`，对不可达收集端每次固定卡 **21 秒**（实测），
+       四个调用 ≈ 84 秒纯黑窗；`wmic` + `wevtutil`×4 + `diskpart`（实测 2.2 s）+ 4 次 PowerShell 冷启动
+       叠加，交互用户只看到"没反应"。
+  · 排查过的其它因素：脚本不用 `cd`（无 cd 失败路径）；路径引号/中文无影响；`%~dp0` 未使用；
+    退出码走 `copy /y` 的最后一条命令 —— 实测上传全失败时仍返回 **0**（静默成功）。
+    `setlocal` 原来没有，变量会泄漏到调用者环境（小问题，一并修）。
+  · 修复（`tools/vmtest/mc.bat`，同时回写测试台 `D:\SysRecover-bench\share\mc.bat`）：
+    - **控制台有进度**：`[mc] round=... / collecting / uploading / ok <label> / FAILED ...`；
+    - **上传先做快照**：`copy /y %L% %L%.up.txt` 再 `-InFile` 快照，从结构上避开共享冲突；
+    - **每个上传 `-TimeoutSec 10`**，`catch` 里写 `PUT-FAIL: <label> : <原因>` 并 `exit 1`；
+    - **轮次标签必填**（`%1` / `MC_ROUND` / `R`），缺了直接打印用法并 `exit /b 2`；
+    - **真实退出码**：0 全成功 / 1 有步骤失败（含 diskpart 失败）/ 2 参数错误；
+    - `setlocal EnableExtensions` + 全路径加引号 + `wmic` 缺失时降级为 WARN（Win11 24H2 已移除 wmic）；
+    - `MC_PAUSE=1` 可让窗口在结尾停住（交互排查用），默认不停。
+    - 文件保持**纯 ASCII**：实测 UTF-8 中文 `rem` 行在代码页不匹配时会被 cmd 当成命令执行。
+  · 门禁影响：无。`check-shell.py` 只扫 `bootfiles/*.sh` 与 `tools/vmtest/*.sh`，不扫 `.bat`；
+    `tools/vmtest` 目录本来就随仓库版本化，这次把「只存在于测试台 share、改坏了没人发现」的脚本收了进来。
+

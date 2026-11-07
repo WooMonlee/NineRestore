@@ -20,12 +20,12 @@
 #define SYSRECOVER_MAJOR 1
 #define SYSRECOVER_MINOR 0
 #define SYSRECOVER_PATCH 0  // 第三位：正式版之后修 bug 递增（beta 期间固定 0）
-#define SYSRECOVER_BETA 3   // 第四位：beta 号；0 = 正式版
+#define SYSRECOVER_BETA 4   // 第四位：beta 号；0 = 正式版
 
 // 内部四段串（日志 / version.json / 救援载荷构建戳）：beta 1.0.0.2，正式 1.0.0.0
-#define SYSRECOVER_VERSION "1.0.0.3"
+#define SYSRECOVER_VERSION "1.0.0.4"
 // 界面显示串（也用于文件名，文件名不带空格）：beta `1.0 beta.2`，正式 `1.0.0`
-#define SYSRECOVER_DISPLAY "1.0 beta.3"
+#define SYSRECOVER_DISPLAY "1.0 beta.4"
 
 // 宽串形态：把窄串字面量加上 L 前缀（两级宏，避免 ## 阻止展开）。
 #define SYSRECOVER_WIDEN2(x) L##x
