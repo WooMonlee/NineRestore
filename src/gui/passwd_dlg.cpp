@@ -4,6 +4,7 @@
 
 #include "common/i18n.h"
 #include "common/logger.h"
+#include "gui/ui_foreground.h"  // RestoreForeground（N19）
 #include "gui/ui_skin.h"
 
 using sysrecover::Tr;
@@ -167,7 +168,8 @@ bool CPasswordDlg::Ask(HWND owner, const std::wstring& title,
     }
     if (owner) {
         ::EnableWindow(owner, TRUE);
-        ::SetForegroundWindow(owner);
+        // N19（2026-11-07）：同上，失败要兜底并留痕（见 ui_foreground.cpp）。
+        sysrecover::RestoreForeground(owner);
     }
     const bool ok = dlg->m_result && !dlg->m_value.empty();
     if (ok) pwd = dlg->m_value;

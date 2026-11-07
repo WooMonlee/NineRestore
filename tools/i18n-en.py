@@ -410,6 +410,7 @@ EN = {
     '打包成单文件（保存到）': 'Pack into a single file (save as)',
     '打包日志': 'Collect logs',
     '打开日志': 'Open Logs',
+    '打开所在文件夹': 'Open Containing Folder',
     '打开日志文件夹': 'Open Log Folder',
     '打开目标卷失败 err=': 'Failed to open the target volume, err=',
     '打开镜像失败：%ls\n': 'Failed to open the image: %ls\n',

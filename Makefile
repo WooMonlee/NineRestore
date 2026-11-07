@@ -175,7 +175,7 @@ DUI_LIB = $(OBJDIR)/libduilib.a
 include build/duilib.mk
 
 # ---- GUI（windows，经典 Duilib） ----
-GUI_SRC = src/gui/main_win.cpp src/gui/main_form.cpp src/gui/ui_skin.cpp src/gui/instance_dlg.cpp src/gui/confirm_dlg.cpp src/gui/passwd_dlg.cpp src/gui/imgsearch.cpp src/gui/initdisk_dlg.cpp
+GUI_SRC = src/gui/main_win.cpp src/gui/main_form.cpp src/gui/ui_skin.cpp src/gui/ui_foreground.cpp src/gui/instance_dlg.cpp src/gui/confirm_dlg.cpp src/gui/passwd_dlg.cpp src/gui/imgsearch.cpp src/gui/initdisk_dlg.cpp
 GUI_OUT = $(DISTDIR)/$(GUI_NAME)
 GUI_INCLUDES = -Isrc -isystem $(DUI_ROOT) -isystem $(DUI_ROOT)/Control -isystem $(DUI_ROOT)/Core -isystem $(DUI_ROOT)/Layout -isystem $(DUI_ROOT)/Utils
 # duilib 头文件对 ISO 一致性要求宽松，故保留 -fpermissive（第三方头文件，不改）。
@@ -373,6 +373,7 @@ check: $(TEST_BIN) $(CLI_OUT) $(GUI_OUT) $(CHECK_OUT)
 	$(PYTHON) tools/check-shell.py
 	$(PYTHON) tools/check-config.py
 	$(PYTHON) tools/check-layers.py
+	$(PYTHON) tools/check-foreground.py
 	$(PYTHON) tools/check-secrets.py
 	$(PYTHON) tools/check-versioninfo.py $(DISTDIR)/$(GUI_NAME) $(DISTDIR)/$(CLI_NAME) $(DISTDIR)/$(CHECK_NAME)
 	@bash tests/test_zjswap.sh

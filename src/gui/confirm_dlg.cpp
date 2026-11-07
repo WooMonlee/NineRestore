@@ -1,6 +1,7 @@
 #include "common/i18n.h"
 #include "common/logger.h"
 #include "confirm_dlg.h"
+#include "ui_foreground.h"  // RestoreForeground（N19）
 
 using sysrecover::Tr;
 #include "ui_skin.h"
@@ -483,7 +484,9 @@ int CConfirmDlg::RunModal(HWND owner, CConfirmDlg* dlg) {
     }
     if (owner) {
         ::EnableWindow(owner, TRUE);
-        ::SetForegroundWindow(owner);
+        // N19（2026-11-07）：前台锁下 SetForegroundWindow 会失败且原来没人看返回值，
+        // 主窗就会偶尔被压在别的窗口后面。统一走带兜底与日志的实现。
+        sysrecover::RestoreForeground(owner);
     }
     int r = dlg->m_result;
     delete dlg;

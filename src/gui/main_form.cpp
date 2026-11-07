@@ -899,7 +899,8 @@ void CMainForm::OnSupportDone(sysrecover::SupportBundle* rp) {
     } else {
         // 「完成」：在资源管理器里选中刚导出的包，方便用户直接拖进聊天窗口。
         std::wstring args = L"/select,\"" + r.zipPath + L"\"";
-        ::ShellExecuteW(nullptr, L"open", L"explorer.exe", args.c_str(), nullptr,
+        // N19：以主窗为 owner（错误提示有归属）；这是用户显式选择的「完成」，抢前台是预期的。
+        ::ShellExecuteW(m_hWnd, L"open", L"explorer.exe", args.c_str(), nullptr,
                         SW_SHOWNORMAL);
     }
 }
@@ -928,14 +929,14 @@ void CMainForm::ShowRescueFailureNotice() {
                                    /*defaultIsRight=*/false);
         if (choice == 1) {
             std::wstring dir = LogBaseDir() + L"\\logs\\collected";
-            ::ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr,
+            ::ShellExecuteW(m_hWnd, L"open", dir.c_str(), nullptr, nullptr,
                             SW_SHOWNORMAL);
         }
         return;
     }
     if (choice == 1) {  // 打开日志
         std::wstring dir = LogBaseDir() + L"\\logs\\collected";
-        ::ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr,
+        ::ShellExecuteW(m_hWnd, L"open", dir.c_str(), nullptr, nullptr,
                         SW_SHOWNORMAL);
     } else if (choice == 2) {  // 一键重试
         // 二次确认（fail-safe）：重试会重新暂存 + 可能重启。
@@ -1226,7 +1227,7 @@ void CMainForm::Notify(TNotifyUI& msg) {
         } else if (name == _T("SiteLink")) {
             // 右下角「讨论」链接 → 用系统默认浏览器打开。
             // （2026-09-23 曾临时改成弹 BitLocker 演示框，用户确认文案后已改回。）
-            ::ShellExecuteW(nullptr, L"open", kSiteUrl, nullptr, nullptr,
+            ::ShellExecuteW(m_hWnd, L"open", kSiteUrl, nullptr, nullptr,
                             SW_SHOWNORMAL);
         } else if (name == _T("MinBtn")) {
             SendMessage(WM_SYSCOMMAND, SC_MINIMIZE, 0);
@@ -2114,10 +2115,16 @@ void CMainForm::ExportDriversPortableFlow() {
                 L"这个新文件已经带驱动，异机还原时会自动使用。"),
              n, outPath.c_str());
     SetStatus(Tr(L"驱动已导出并重新打包"));
-    MessageBoxW(m_hWnd, done, Tr(L"导出驱动"), MB_OK | MB_ICONINFORMATION);
-    ::ShellExecuteW(nullptr, L"open", L"explorer.exe",
-                    (L"/select,\"" + outPath + L"\"").c_str(), nullptr,
-                    SW_SHOWNORMAL);
+    // N19（2026-11-07）：原来这里自动用 /select 打开资源管理器，Explorer 会抢走前台，
+    // 用户会感觉"程序自己沉下去了"。改成用户显式点「打开所在文件夹」才打开。
+    int openDir = CConfirmDlg::Ask2(m_hWnd, Tr(L"导出驱动"), done,
+                                    Tr(L"完成"), Tr(L"打开所在文件夹"),
+                                    /*defaultIsRight=*/false);
+    if (openDir == 1) {
+        ::ShellExecuteW(m_hWnd, L"open", L"explorer.exe",
+                        (L"/select,\"" + outPath + L"\"").c_str(), nullptr,
+                        SW_SHOWNORMAL);
+    }
 }
 
 // 「镜像检查」= 完整校验（wimlib_verify_wim 全文件扫描，CLI 的 `verify` 命令同源）。

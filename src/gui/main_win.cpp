@@ -4,6 +4,7 @@
 #include "main_form.h"
 
 #include "../boot/grub.h"  // sysrecover::ExeDir()（启动器布局下的应用根目录）
+#include "ui_foreground.h"  // RestoreForeground（N19）
 #include "../common/crash.h"     // 崩溃处理（minidump + 可读日志）
 #include "../common/logger.h"    // LogInfo（启动耗时自检）
 #include "../common/process.h"   // MsSinceProcessStart
@@ -523,7 +524,9 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
             hPrev = ::FindWindowW(kWndClass, nullptr);
             if (hPrev) {
                 ActivatePrev(hPrev);
-                ::MessageBoxW(nullptr,
+                // N19（2026-11-07）：原来 owner=nullptr，提示框可能出现在别处且不跟随
+                // 旧实例窗口。以旧实例主窗为 owner，保证提示框压在该窗口之上。
+                ::MessageBoxW(hPrev,
                               Tr(L"之前的程序正在执行任务，无法关闭。\n" L"已为你切回该窗口，请等任务结束后再重新打开。"),
                               Tr(L"九转还原"), MB_OK | MB_ICONINFORMATION);
                 ::CloseHandle(hMutex);
@@ -716,10 +719,9 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     // StageReturnOldFlow 内 MessageBox）是模态自绘框，关闭后主窗 Z 序仍可能在
     // explorer 文件夹窗口之后（用户反馈：确认复制后主窗"藏到文件夹后面"）。
     // 进主消息循环前强制拉到前台 —— 此时用户刚与我们的弹框交互，拥有前台权。
-    ::SetForegroundWindow(h);
-    ::BringWindowToTop(h);
-    ::SetWindowPos(h, HWND_TOP, 0, 0, 0, 0,
-                   SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    // N19（2026-11-07）：统一走 RestoreForeground —— 返回值被检查，失败时
+    // AttachThreadInput 重试、再退到 Z 序兜底并写日志，不再静默失败。
+    sysrecover::RestoreForeground(h);
 
     // 启动耗时自检（进程创建 → 窗口显示）：排障用，设 `SYSRECOVER_STARTUP_TIMING=1` 打开。
     if (sysrecover::StartupTimingEnabled())

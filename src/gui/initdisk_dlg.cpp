@@ -3,6 +3,7 @@
 // 可用<65GB → 整盘做系统盘；Win7 60GB → 30GB 系统 + 其余数据）。
 #include "common/i18n.h"
 #include "initdisk_dlg.h"
+#include "ui_foreground.h"  // RestoreForeground（N19）
 
 #include <cstdio>
 #include <cstdlib>
@@ -380,7 +381,8 @@ InitDiskResult ShowInitDiskDialog(HWND owner, const InitDiskRequest& req) {
     }
     if (owner) {
         EnableWindow(owner, TRUE);
-        SetForegroundWindow(owner);
+        // N19（2026-11-07）：同上，失败要兜底并留痕（见 ui_foreground.cpp）。
+        sysrecover::RestoreForeground(owner);
     }
     return ctx.res;
 }
