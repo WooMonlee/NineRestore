@@ -125,6 +125,10 @@ done
 mark_entry_started(){
     [ -d /sys/firmware/efi ] || return 0
     _ml=/tmp/zj_entry_marker.log
+    # N8（2026-11-07）：记录"从哪种入口进来"（menu=常驻菜单 / temp=一次性还原）。
+    # Direct(BIOS/无 SB) 模式由内核命令行带 zjentry=；SB(grub) 模式没有逐项命令行，
+    # 由安装侧写 EFI/ZJRESTORE/entry-kind.txt。
+    _ek=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^zjentry=//p' | head -n 1)
     for _dd in /dev/nvme*n*p* /dev/sd*[0-9] /dev/vd*[0-9] /dev/mmcblk*p*; do
         [ -b "$_dd" ] || continue
         _dt=$(timeout 10 blkid -s TYPE -o value "$_dd" 2>>"$_ml")
@@ -132,12 +136,17 @@ mark_entry_started(){
         mkdir -p /tmp/zj_espmark 2>>"$_ml"
         if timeout 10 mount -t vfat -o rw "$_dd" /tmp/zj_espmark 2>>"$_ml"; then
             if [ -d /tmp/zj_espmark/EFI/ZJRESTORE ]; then
+                if [ -z "$_ek" ]; then
+                    _ek=$(head -n 1 /tmp/zj_espmark/EFI/ZJRESTORE/entry-kind.txt 2>>"$_ml" | tr -d '\r')
+                fi
+                [ -n "$_ek" ] && echo "$_ek" > /tmp/zj-entry-kind 2>>"$_ml"
                 _mf=/tmp/zj_espmark/EFI/ZJRESTORE/entry-started.txt
                 {
-                    printf '%s entry-started kernel=%s build=%s boot=%s\n' \
+                    printf '%s entry-started kernel=%s build=%s boot=%s entry=%s\n' \
                         "$(date '+%F %T')" "$(uname -r)" \
                         "$(cat /zjrescue-version 2>>"$_ml")" \
-                        "$(cat /proc/sys/kernel/random/boot_id 2>>"$_ml")"
+                        "$(cat /proc/sys/kernel/random/boot_id 2>>"$_ml")" \
+                        "${_ek:-unknown}"
                 } >> "$_mf" 2>>"$_ml"
                 # 只留最近 50 条，避免反复进救援把 ESP 塞满（ESP 空间很紧）
                 _mc=$(wc -l < "$_mf" 2>>"$_ml")
@@ -146,11 +155,15 @@ mark_entry_started(){
                         mv /tmp/zj_espmark.new "$_mf" 2>>"$_ml"
                 fi
                 sync 2>>"$_ml"
-                say "entry marker written ($_dd)"
+                say "entry marker written ($_dd) entry=${_ek:-unknown}"
             fi
             umount /tmp/zj_espmark 2>>"$_ml"
         fi
     done
+    if [ -r /tmp/zj-entry-kind ]; then
+        ZJENTRY=$(cat /tmp/zj-entry-kind)
+        [ -n "$ZJENTRY" ] && export ZJENTRY
+    fi
     return 0
 }
 mark_entry_started

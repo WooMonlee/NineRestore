@@ -557,6 +557,13 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
 
     std::wstring targetPath = kKernelPath;
     const wchar_t* cmdLine = kCmdLine;
+    // N8（2026-11-07）：命令行带上入口类型，救援层据此区分 menu / temp，diag 可读。
+    std::wstring cmdWithKind;
+    if (cmdLine) {
+        cmdWithKind = cmdLine;
+        cmdWithKind += temporary ? L" zjentry=temp" : L" zjentry=menu";
+        cmdLine = cmdWithKind.c_str();
+    }
     const wchar_t* entryDesc = EntryDesc(temporary);
     bool useFirmwareEntry = true;
 
@@ -993,6 +1000,21 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
         }
         log += "staged entry Boot" + std::to_string(num) +
                " promoted to BootOrder[0]\n";
+    }
+    // N8（2026-11-07）：把入口类型落盘。grub/shim 模式没有逐条目的 OptionalData，
+    // 救援层读不到 zjentry=，改读这个文件；两者都会写进 entry-started 与 status。
+    {
+        const std::wstring ek = espRoot + L"EFI\\ZJRESTORE\\entry-kind.txt";
+        HANDLE hk = CreateFileW(ek.c_str(), GENERIC_WRITE, 0, nullptr,
+                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hk != INVALID_HANDLE_VALUE) {
+            const char* kind = temporary ? "temp\n" : "menu\n";
+            DWORD wr = 0;
+            WriteFile(hk, kind, (DWORD)strlen(kind), &wr, nullptr);
+            CloseHandle(hk);
+            log += std::string("entry-kind.txt = ") +
+                   (temporary ? "temp" : "menu") + "\n";
+        }
     }
     char line[160];
     snprintf(line, sizeof(line),

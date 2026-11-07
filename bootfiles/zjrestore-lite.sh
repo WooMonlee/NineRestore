@@ -416,6 +416,8 @@ bb_status_text(){
     echo "build=$(cat /zjrescue-version 2>/dev/null)"
     echo "result=$RESULT"
     echo "step=$STEP"
+    # N8（2026-11-07）：menu=常驻菜单入口 / temp=一次性还原入口；空值表示旧载荷或未标记。
+    echo "entry=${ZJENTRY:-$(cat /tmp/zj-entry-kind)}"
     echo "bootfix=${BOOTFIX_OK:-}"
     echo "esp=${ESP_OK:-}"
     echo "target=${TARGET_DEV:-}"
