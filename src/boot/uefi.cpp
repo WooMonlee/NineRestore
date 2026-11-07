@@ -21,6 +21,7 @@
 #include "../common/relocate.h"  // LogBaseDir()：清理前确认没有待执行的暂存任务
 #include "../common/version.h"
 #include "../common/zip.h"  // Crc32（部署后校验，A6）
+#include "rescue_guard.h"   // N17：ESP 旧载荷自证与写前备份
 
 // ── MOK/UKI 备选线（PIT-062）──────────────────────────────────────
 // 「固件启动项 → shimx64.efi → 我们签名的 UKI」这条路（需要一次性 MOK 注册）
@@ -514,6 +515,35 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
     // ~28MB 载荷重写一遍（慢盘上拖出"无响应"窗）。现在改为：文件集构建后按
     // "定点清 stale + keep 未变化"处理，见下面的 cleanup / changed 逻辑。
 
+    // N17（2026-11-07）：先读 ESP 上救援环境**自报**的 build 与 initramfs
+    // 长度/CRC，与内置载荷比对。0.9.92 现场就是"程序说装好了，盘上跑的是旧码"：
+    // 旧 dist 的源载荷 CRC 与旧盘上文件相同 → keep，没人发现。这里把"到底是哪版"
+    // 变成日志里的确定事实；不一致时**先备份再重写**（绝不静默沿用）。
+    EspRescuePayload prior;
+    ReadEspRescuePayload(espRoot, prior);
+    const std::wstring builtinIr =
+        exeDir + L"\\bootfiles\\initramfs-zjrestore.cpio.gz";
+    uint32_t builtinIrCrc = 0;
+    const bool builtinIrOk = FileCrc32(builtinIr, builtinIrCrc);
+    const unsigned long long builtinIrSize = FileSize(builtinIr);
+    const RescuePayloadState priorState = ClassifyRescuePayload(
+        prior.build, SYSRECOVER_VERSION, prior.hasInitramfs || prior.hasKernel,
+        builtinIrOk && prior.crcKnown, prior.initramfsCrc, builtinIrCrc,
+        prior.initramfsSize, builtinIrSize);
+    {
+        char lb[320] = {};
+        snprintf(lb, sizeof(lb),
+                 "ESP rescue payload: build=%s initramfs=%llu "
+                 "(builtin=%s %llu)\n",
+                 prior.build.empty() ? "(none)" : prior.build.c_str(),
+                 prior.initramfsSize, SYSRECOVER_VERSION, builtinIrSize);
+        log += lb;
+        if (RescuePayloadMustNotBeReused(priorState)) {
+            log += "ESP rescue payload stale -> rewrite (backup before write)\n";
+            BackupEspRescuePayload(espRoot, "pre-rewrite", log);
+        }
+    }
+
     // Secure Boot 开着时，固件只加载**微软签名**的镜像 → 我们的内核不能直接当
     // 启动目标。两种走法（PIT-063 对比实验，ZJ_SB_MODE 切换）：
     //   shim    ：固件启动项 → shimx64.efi（微软签名）→ grubx64.efi(= 我们签名的
@@ -721,6 +751,9 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
     }
     if (!copied) {
         log += "copy UEFI rescue files FAIL\n";
+        if (RescuePayloadMustNotBeReused(priorState))
+            log += RescuePayloadFailMessage(prior.build, SYSRECOVER_VERSION) +
+                   "\n";
         return false;
     }
     // A6：部署后逐文件 CRC 校验（源 vs ESP 落盘），不一致即失败；并写明文构建戳。
@@ -735,6 +768,9 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
             log += "verify FAIL " +
                    std::string(items[i].dst.begin(), items[i].dst.end()) + "\n";
             log += "verify deployed rescue FAIL\n";
+            if (RescuePayloadMustNotBeReused(priorState))
+                log += RescuePayloadFailMessage(prior.build,
+                                                SYSRECOVER_VERSION) + "\n";
             return false;
         }
     }
@@ -832,6 +868,27 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
         log += "no free Boot#### slot\n";
         return false;
     }
+    // N17：写前备份将被覆盖的 Boot####（原始 NVRAM 字节）；与旧载荷治理配套，
+    // 保证"改启动项"可回退（文件备份见 BackupEspRescuePayload）。
+    {
+        char nm[32] = {};
+        snprintf(nm, sizeof(nm), "Boot%04X", num);
+        const std::wstring bootNameW(nm, nm + strlen(nm));
+        std::vector<BYTE> oldv;
+        if (ReadVar(bootNameW, oldv) && !oldv.empty()) {
+            const std::wstring bak =
+                espRoot + L"EFI\\ZJRESTORE\\" + bootNameW + L".pre.bak";
+            HANDLE hb = CreateFileW(bak.c_str(), GENERIC_WRITE, 0, nullptr,
+                                    CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
+                                    nullptr);
+            if (hb != INVALID_HANDLE_VALUE) {
+                DWORD wr = 0;
+                WriteFile(hb, oldv.data(), (DWORD)oldv.size(), &wr, nullptr);
+                CloseHandle(hb);
+                log += std::string(nm) + ".pre.bak saved\n";
+            }
+        }
+    }
     if (!BuildAndWrite(num, sig, partNum, start, size, targetPath, cmdLine,
                        entryDesc, log))
         return false;
@@ -846,6 +903,19 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
         log += "read BootOrder failed err=" + std::to_string(GetLastError()) +
                " (refuse to overwrite)\n";
         return false;
+    }
+    // N17：写前备份原始 BootOrder（不只是暂存项的 bootorder.bak）。
+    {
+        const std::wstring bak = espRoot + L"EFI\\ZJRESTORE\\bootorder.pre.bak";
+        HANDLE hb = CreateFileW(bak.c_str(), GENERIC_WRITE, 0, nullptr,
+                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hb != INVALID_HANDLE_VALUE) {
+            DWORD wr = 0;
+            WriteFile(hb, order.data(), (DWORD)order.size(), &wr, nullptr);
+            CloseHandle(hb);
+            log += "bootorder.pre.bak saved (" + std::to_string(order.size()) +
+                   "B)\n";
+        }
     }
     int n = (int)(order.size() / 2);
     std::vector<WORD> list(n);

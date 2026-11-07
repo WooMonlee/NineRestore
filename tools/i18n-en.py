@@ -887,4 +887,10 @@ EN = {
     '若按该键无反应：重启进入固件设置（Windows 设置→恢复→高级启动→立即重启→疑难解答→UEFI 固件设置），在启动项里直接选 SysRecover。\n': 'If the key does nothing: restart into firmware settings (Windows Settings > Recovery > Advanced startup > Restart now > Troubleshoot > UEFI Firmware Settings) and pick SysRecover from the boot list.\n',
     '若确认已选仍回到 Windows，请把 logs\\collected 发给技术支持；启动项丢失时重新运行本程序安装菜单。': 'If you did pick SysRecover and still landed in Windows, send logs\\collected to support; if the entry is missing, run this program again to reinstall the menu.',
     '还原菜单未执行': 'Restore Menu Not Executed',
+    'ESP 上为旧版救援环境（': 'Stale rescue environment on ESP (',
+    '），内置为 ': '), built-in is ',
+    '，需更新后重试。': '; please update and retry.',
+    'ESP 上救援环境版本无法确认（缺少 rescue-build.txt），需更新后重试。':
+        'The rescue environment version on ESP cannot be confirmed '
+        '(rescue-build.txt is missing); please update and retry.',
 }

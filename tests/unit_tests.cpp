@@ -21,6 +21,7 @@
 #include "boot/bootpath.h"
 #include "boot/bootself.h"
 #include "boot/cleanup_marker.h"
+#include "boot/rescue_guard.h"
 #include "boot/task.h"
 #include "boot/uefi.h"
 #include "common/crypt.h"
@@ -2174,6 +2175,61 @@ TEST(cleanup_marker_text_carries_result) {
     CHECK(!CleanupMarkerSaysOk(""));
     CHECK(!CleanupMarkerSaysOk("done\r\n"));  // 旧标记（无结果）按未完成处理
     CHECK(CleanupMarkerSaysOk("ok=1"));       // 无 CRLF 也认
+}
+
+// ───────────────── ESP 旧载荷治理（N17） ─────────────────
+// 现场：ESP 自报 0.9.92，程序却说"安装成功"。这里断言"旧 build"输入
+// **绝不会**得到 Keep（= 静默沿用）；能重写则重写，不能则 fail-closed。
+
+TEST(rescue_payload_old_build_must_not_be_kept) {
+    const RescuePayloadState s = ClassifyRescuePayload(
+        "0.9.92", "1.0.0-beta.1", /*hasPayload=*/true, /*known=*/true,
+        123u, 456u, 17389826ull, 17391321ull);
+    CHECK(s == RescuePayloadState::VersionMismatch);
+    CHECK(RescuePayloadMustNotBeReused(s));  // 不允许静默沿用
+    CHECK(DecideRescuePayloadAction(s, /*canRewrite=*/true) ==
+          RescuePayloadAction::Rewrite);
+    CHECK(DecideRescuePayloadAction(s, /*canRewrite=*/false) ==
+          RescuePayloadAction::FailClosed);
+}
+
+TEST(rescue_payload_same_version_different_crc_rewrites) {
+    const RescuePayloadState s = ClassifyRescuePayload(
+        "1.0.0-beta.1\r\n", "1.0.0-beta.1", true, true, 111u, 222u, 10ull,
+        20ull);
+    CHECK(s == RescuePayloadState::ContentMismatch);
+    CHECK(RescuePayloadMustNotBeReused(s));
+}
+
+TEST(rescue_payload_match_is_kept) {
+    const RescuePayloadState s = ClassifyRescuePayload(
+        " 1.0.0-beta.1 \n", "1.0.0-beta.1", true, true, 42u, 42u, 100ull,
+        100ull);
+    CHECK(s == RescuePayloadState::Match);
+    CHECK(!RescuePayloadMustNotBeReused(s));
+    CHECK(DecideRescuePayloadAction(s, true) == RescuePayloadAction::Keep);
+}
+
+TEST(rescue_payload_first_install_and_missing_build) {
+    // 完全没有载荷 = 首次安装（保持旧行为，照常写）
+    const RescuePayloadState none = ClassifyRescuePayload(
+        "", "1.0.0-beta.1", false, false, 0u, 0u, 0ull, 0ull);
+    CHECK(none == RescuePayloadState::NoPayload);
+    CHECK(!RescuePayloadMustNotBeReused(none));
+    // 有载荷但没有自报版本 = 不可信（必须重写，不能按"没有版本"放行）
+    const RescuePayloadState unknown = ClassifyRescuePayload(
+        "", "1.0.0-beta.1", true, true, 123u, 456u, 1ull, 2ull);
+    CHECK(unknown == RescuePayloadState::UnreadableBuild);
+    CHECK(RescuePayloadMustNotBeReused(unknown));
+}
+
+TEST(rescue_payload_fail_message_names_versions) {
+    const std::string m = RescuePayloadFailMessage("0.9.92", "1.0.0-beta.1");
+    CHECK_CONTAINS(m, "0.9.92");
+    CHECK_CONTAINS(m, "1.0.0-beta.1");
+    CHECK_CONTAINS(m, "旧版救援环境");
+    CHECK_CONTAINS(RescuePayloadFailMessage("", "1.0.0-beta.1"),
+                   "版本无法确认");
 }
 
 TEST(cleanup_cmd_requires_ok_marker) {

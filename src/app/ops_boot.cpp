@@ -22,6 +22,7 @@
 #include "../boot/bootself.h"
 #include "../boot/grub.h"
 #include "../boot/task.h"
+#include "../boot/rescue_guard.h"
 #include "../boot/uefi.h"
 #include "../common/ea.h"
 #include "../common/crypt.h"
@@ -563,6 +564,21 @@ int RepairBoot(int disk, int part, std::string& msg) {
     }
     if (!guidMatched)
         LogWarn("repair-boot: ESP partition type is not EFI System; used fallback");
+    // N17（2026-11-07）：修复引导也是"下发前"入口 —— ESP 上是旧版救援环境
+    // （0.9.x）时必须就地刷新已有载荷并更新自报 build；刷不了就明确失败，
+    // 不允许带着旧载荷继续修（修完用户下次进救援还是旧码）。
+    {
+        std::string rlog, rmsg;
+        const bool rok = RefreshEspRescuePayload(espRoot, BootAssetDir(), rlog,
+                                                 rmsg);
+        LogInfo("repair-boot rescue payload: " + rlog);
+        if (!rok) {
+            UnmountEsp(espRoot, blog);
+            msg = rmsg;
+            LogError(msg);
+            return 1;
+        }
+    }
     // PIT-209：清掉"指向已删内核"的临时启动项 —— 固件每次开机都会先去试它，
     // 有的固件就此卡住/反复重启（客户机 2026-11-02 的嫌疑之一）。
     // 有暂存任务时函数内部会自己跳过。
