@@ -1607,6 +1607,19 @@ TEST(swapleft_decision_table) {
     CHECK(!v.reason.empty());
 }
 
+// P3（beta.6，测试台实测）：删除失败计数必须与磁盘实际结果一致 ——
+// rmdir err=145 记了 fail=1、补删 .zj-keepold 后目录已消失，界面报成功，
+// 落盘却还是 fail=1。归一函数只认"目录是否还在"这一个事实。
+TEST(swapleft_fail_counter_matches_disk) {
+    using sysrecover::NormalizeDeleteFail;
+
+    CHECK_EQ(NormalizeDeleteFail(0, false), 0L);   // 全清
+    CHECK_EQ(NormalizeDeleteFail(1, false), 0L);   // 已解决的中间失败 → 清零
+    CHECK_EQ(NormalizeDeleteFail(7, false), 0L);   // 大计数也清零（目录已消失）
+    CHECK_EQ(NormalizeDeleteFail(0, true), 1L);    // 目录仍在：不能虚报 0
+    CHECK_EQ(NormalizeDeleteFail(3, true), 3L);    // 真失败保持原计数
+}
+
 // ────────────────── partscript（新硬盘分区：分步 diskpart 脚本）──────────────────
 // 用户 2026-10-27 规格：分区向导每一步都要在状态栏显示正在做什么。实现把一条
 // 大脚本拆成**多次独立 diskpart 调用**（每步之前报一次阶段名）。单测守三条

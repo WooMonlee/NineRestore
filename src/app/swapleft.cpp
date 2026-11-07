@@ -396,6 +396,16 @@ void BusyUnmark(wchar_t drive) {
 
 }  // namespace
 
+// 删除收尾记账归一（beta.6，P3）：测试台实测 rmdir err=145 计入 fail=1、界面却
+// 报成功（实际目录已消失）。根因是"中间那次 rmdir 失败（.zj-keepold 还在）→
+// 补删标记后 rmdir 又成功"，计数没有跟着实际结果回落。判据只有磁盘事实：
+//   · 目录已消失 = 子树确实删净 → 失败计数清零；
+//   · 目录仍在   = 至少一项没删掉 → fail 至少 1（不能虚报 0）。
+long NormalizeDeleteFail(long fail, bool dirStillThere) {
+    if (!dirStillThere) return 0;
+    return fail > 0 ? fail : 1;
+}
+
 SwapLeftVerdict DecideSwapLeftover(const SwapLeftInfo& i, long staleHours) {
     SwapLeftVerdict v;
     if (i.isNew) {
@@ -632,7 +642,7 @@ void DeleteSwapLeftover(const SwapLeftInfo& i, DeleteProgressFn progress) {
         const bool allowBatch = (st.fail <= 3000);
         // 只差 .zj-keepold（删除成功的常见收尾）→ 清标记 + rmdir，别走夺权
         {
-            const std::wstring mk = ExtPath(dir) + L"\\\\.zj-keepold";
+            const std::wstring mk = ExtPath(dir) + L"\\.zj-keepold";
             if (GetFileAttributesW(mk.c_str()) != INVALID_FILE_ATTRIBUTES) {
                 DeleteFileW(mk.c_str());
                 RemoveDirectoryW(ExtPath(dir).c_str());
@@ -666,7 +676,18 @@ void DeleteSwapLeftover(const SwapLeftInfo& i, DeleteProgressFn progress) {
                       .count();
         // 删完复核：~old 仍在 = 没删干净（用户实测「点了删除没反应」就是
         // 这里静默失败）——必须留账，否则下次启动又弹框、还原还被门禁拦。
-        if (IsDir(dir)) {
+        // beta.6（P3）：计数按"磁盘实际结果"归一 —— 中间 rmdir 失败、随后
+        // 补删标记又成功时，不能把已解决的失败继续记成 fail（界面会报成功）。
+        const bool stillThere = IsDir(dir);
+        const long failNorm = NormalizeDeleteFail(st.fail, stillThere);
+        if (failNorm != st.fail) {
+            LogWarn("swap leftover fail counter normalized: " +
+                    std::to_string(st.fail) + " -> " +
+                    std::to_string(failNorm) +
+                    (stillThere ? " (dir still present)" : " (resolved)"));
+            st.fail = failNorm;
+        }
+        if (stillThere) {
             LogWarn("swap leftover delete incomplete: " + DriveStr(i.drive) +
                     (i.isNew ? " ~new" : " ~old") +
                     " ok=" + std::to_string(st.ok) +

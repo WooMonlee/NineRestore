@@ -2301,3 +2301,49 @@
     `ops_backup` 的 ESP 失败**有意**不回滚主镜像（主镜像可用，注释已注明 A 方案语义）——
     未发现"失败仍返回成功且不留痕迹"的路径。
 
+### PIT-221
+
+- PIT-221 **「返回旧系统」无人值守死循环：超时自动 [1] → 等 YES → 超时 → 重印菜单**（2026-11-08，P1）
+  · 实测（测试台）：05:42 / 05:45 / 05:47 各一轮；必须人工选 `[2] 再试新系统` 才会执行暂存的
+    `action=returnold`。
+  · 根因：`triage_previous` 的 `read -t 120` 超时把选项置成 `1`（回滚）；回滚分支还要 `read -t 60`
+    输入大写 `YES`，无人值守第二次必超时 → "未确认，返回菜单" → `while :` 重印菜单 → 又自动 [1]。
+    已暂存的 `action=returnold` 没参与判断，反而被守卫挡在菜单外。
+  · 处置：① 读到 `/tmp/restore-task.conf` 的 `action=returnold` 时直接放行；② 无人值守自动选择
+    改为"有可续任务 [2] / 无任务 [3]"，**绝不自动 [1]**；③ 人工 `YES` 连续两次未确认 → 明确放弃
+    （继续暂存任务或重启），不再循环；④ `reboot_now` 两次 `reboot -f` 仍返回 → 关机/停机并打印结论，
+    不返回菜单。
+  · 回归：`tests/test_rescue_triage.sh`（4 条；从 init 抽取函数本体 + stub 磁盘，不碰虚拟机）。
+
+### PIT-222
+
+- PIT-222 **救援控制台无 CJK 字库：首屏只剩 `[1][2][3]`**（2026-11-08，P2）
+  · 现象（测试台）：救援首屏中文全部不可读，只剩数字和方框。
+  · 处置：**不增加 initramfs 字库**（ESP 空间敏感、控制台字体链路只在部分固件可靠），
+    `say` 屏幕消息全部改纯 ASCII；中文保留在 `.sh` 注释与落盘日志。新增 `check-shell.py` C8：
+    救援脚本 `say "..."` 出现 CJK 直接失败。
+  · 口径：与 PIT-061 的"屏幕 ASCII"一致，救援界面不显示中文。
+
+### PIT-223
+
+- PIT-223 **状态落盘 ≠ 实际结果：成功被 init 二次扫盘覆盖；rmdir 145 的 fail 计数不回落**（2026-11-08，P3）
+  · 3a：`returnold` 成功后 `ZJRESTORE-status.txt` 仍写 `result=FAILED/step=interrupted`。脚本 EXIT
+    trap 已写 `OK/done`，但 `/tmp/zj-bb.done` 为空 → init 又跑一次 `zz-blackbox interrupted` 全盘扫，
+    把状态覆盖。处置：脚本收尾写 `/tmp/zj-bb-final`（`RESULT != UNKNOWN` 才写），init 见标记不兜底；
+    每轮开跑前 `rm -f` 标记，避免上一轮残留。
+  · 3b：`~old` 只剩 `.zj-keepold` 时 rmdir 必然 `err=145`；查标记的扩展路径写成
+    `ExtPath(dir) + L"\\\\.zj-keepold"`（源码里是两个反斜杠）→ 标记删不掉 → `fail=1` 留在账上；
+    随后补删标记、目录消失，计数没回落（界面成功、落盘 fail=1）。处置：路径改单反斜杠；新增
+    纯函数 `NormalizeDeleteFail(fail, dirStillThere)` —— 目录消失 `fail=0`，目录仍在 `fail>=1`。
+  · 单测：`swapleft_fail_counter_matches_disk`（5 条断言）。
+
+### PIT-224
+
+- PIT-224 **打包原地重写打断硬链接：共享端 `1.0.0.3` 原件被一起改掉**（2026-11-08，打包/记账）
+  · 根因：测试台把 `share\b3.exe` 做成指向 `dist\SysRecover-Portable.exe` 的硬链接；
+    `pack-self` 直接在原输出路径上截断写入 → 同一 inode 的共享副本跟着变成新版，旧版本丢失。
+  · 处置：`tools/portable-pack.py` 打包到 `*.build-<pid>.exe` 再 `os.replace`；发布复制也走
+    临时名 + 原子替换；同版本号撞名仍拒绝。共享/归档一律复制，不要 `mklink /H`。
+  · 修复现场：先删 `share\b3.exe` 这条链接，再用 `D:\九转大还原1.0-beta.3.exe` 复制还原。
+
+

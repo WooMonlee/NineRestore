@@ -381,6 +381,7 @@ check: $(TEST_BIN) $(CLI_OUT) $(GUI_OUT) $(CHECK_OUT)
 	$(PYTHON) tools/check-versioninfo.py $(DISTDIR)/$(GUI_NAME) $(DISTDIR)/$(CLI_NAME) $(DISTDIR)/$(CHECK_NAME)
 	@bash tests/test_zjswap.sh
 	@bash tests/test_boot_region.sh
+	@bash tests/test_rescue_triage.sh
 
 # ---- ★ 发布包：根目录 = x64 总入口 + x86 兼容入口；x64/ = x64 真程序；共享资源放根目录 ----
 # 需要**两套工具链**：x64 走 PATH 上的 g++（请先把 mingw64\bin 加到 PATH），x86 走绝对路径。

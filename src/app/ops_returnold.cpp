@@ -142,8 +142,15 @@ int StageReturnOld(const PartitionInfo& target, std::string& err,
                 exeDir = ContractDir();  // settle 后 ContractDir 返回新家
                 LogInfo("return-old: settled to " + W2U(sr.newHome));
             } else {
-                err = Tr("本程序当前运行在目标分区上 —— 返回旧系统会把该分区整树挪走，"
-                         "请先把程序复制到**别的分区**（如 D:\\）再执行。");
+                // P4（beta.6 复核结论）：这是**合理的安全约束**，不是多余的拦路。
+                // 返回旧系统会把目标分区整棵树（含本程序所在目录）改名到 ~new 并
+                // 丢弃 —— 运行中的程序会随之消失，用户下次没有任何入口再操作。
+                // SettleHome 已先尝试把程序整包复制到别的分区；这里失败说明没有
+                // 可用的安全分区/复制失败，继续就等于悄悄删掉用户的工具。
+                // 保留拒绝，但把"为什么"和"自动复制为什么失败"写清楚。
+                err = std::string(Tr("本程序当前运行在目标分区上 —— 「返回旧系统」会把该分区整棵新系统树（含本程序）移入 ~new 后丢弃，运行中的程序也会随之消失。")) + "\n" +
+                      Tr("已先尝试自动把程序复制到其他分区，但未成功") + " (" + sr.detail + ").\n" +
+                      Tr("请先把本程序复制到别的分区（如 D:\\）并从那里运行；或从 U 盘 / PE 中运行本程序再操作。");
                 LogError("return-old rejected: software dir is on the target partition, "
                          "settle failed: " + sr.detail);
                 return 4;

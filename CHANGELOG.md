@@ -3,6 +3,70 @@
 > 版本号唯一来源是 `src/common/version.h`；发布时 `version.h` / git tag / `dist/version.json` 三处同源。
 > 命名规则见 `docs/37-版本命名规范.md`（测试版 `1.0 beta.N` / 内部 `1.0.0.N` / 文件 `九转大还原1.0-beta.N.exe`）。
 
+## 1.0 beta.6（2026-11-08，内部 `1.0.0.6`）
+
+> 测试版（Beta）。修测试台实测的 4 个缺陷（P1 无人值守死循环优先），并把打包/共享
+> 改成"复制 + 原子替换"，保证历史版本不可变。
+
+### 1. P1（高）「返回旧系统」无人值守死循环
+
+- 根因：救援首屏「上次任务未确认完成」三选一在 `read` 超时后**自动选 [1]**（回滚）；
+  回滚分支还要人工输大写 `YES` → 无人值守再次超时 → "未确认，返回菜单" → 重印菜单
+  → 又自动 [1]，无限循环。已暂存的 `action=returnold` 反而被这个守卫挡在菜单外。
+- 修复：
+  - 读到 `restore-task.conf` 的 `action=returnold` 时 triage **直接放行**，沿既定动作继续；
+  - 无人值守绝不自动选 [1]：有可续任务 → [2]，无任务 → [3]；
+  - 人工选 [1] 但 `YES` 连续两次未确认 → 明确放弃（继续暂存任务或重启），不再循环；
+  - `reboot_now` 两次 `reboot -f` 仍未生效 → 关机/停机并留结论，不返回菜单。
+- 新增 `tests/test_rescue_triage.sh`（4 条，已进 `make check`）：抽取 `triage_previous()`
+  本体 + stub 磁盘，钉住"returnold 放行 / 自动不选 [1] / 只重启一次 / YES 超时收场"。
+- 行为变化：无人值守从"死循环"变为"沿暂存动作继续或重启一次"；有人值守路径不变。
+
+### 2. P2（中）救援控制台中文不显示
+
+- 根因：initramfs 没有 CJK 控制台字库，`say` 里的中文只剩方块/问号；首屏实测只剩
+  `[1][2][3]`。
+- 处置：**不塞字库**（ESP 寸土寸金，控制台字体链路也只在部分固件可靠），改为
+  **屏幕消息纯 ASCII**（中文只留在 `.sh` 注释与落盘日志）。首屏、回滚确认、重启兜底、
+  求助渠道全部改成可读英文。
+- 新门禁 `check-shell.py` C8：救援脚本 `say "..."` 里出现 CJK 直接失败。
+
+### 3. P3（中）状态文件与实际结果不一致
+
+- 3a `returnold` 成功后 `ZJRESTORE-status.txt` 仍写 `result=FAILED/step=interrupted`：
+  救援脚本 EXIT trap 已写好 `OK/done`，init 又因 `/tmp/zj-bb.done` 为空做了一次
+  `zz-blackbox interrupted` 全盘扫，把状态覆盖。修复：脚本收尾写 `/tmp/zj-bb-final`
+  （`RESULT != UNKNOWN` 才写），init 只在该标记不存在时兜底；每轮开跑前清标记。
+- 3b `rmdir err=145` 记 `fail=1` 但界面报成功：`~old` 里只剩 `.zj-keepold` 时 rmdir
+  必然 145；检查标记用的扩展路径多了一个反斜杠（`\\.zj-keepold`），标记删不掉 →
+  计数留下；随后补删成功、目录消失，计数没有回落。修复路径并新增纯函数
+  `NormalizeDeleteFail(fail, dirStillThere)`：目录消失 → `fail=0`，目录仍在 → `fail>=1`；
+  单测 `swapleft_fail_counter_matches_disk`（5 条断言）。
+
+### 4. P4（低，复核为合理约束）程序在目标分区上被拒
+
+- 结论：**保留拒绝**。返回旧系统会把目标分区整棵新系统树（含程序所在目录）改名到
+  `~new` 后丢弃；继续执行会把用户唯一的入口悄悄删掉。程序已先自动尝试 `SettleHome`
+  复制到其他分区，失败才拒绝。
+- 改动只在提示：写清"为什么会被拒 + 自动复制失败原因（`sr.detail`）"，并给出两条
+  可行路径（复制到别的分区 / 从 U 盘或 PE 运行）。
+
+### 5. 打包/共享：复制而非硬链接，历史版本不可变
+
+- 根因：测试台把 `share\b3.exe` 做成指向 `dist\SysRecover-Portable.exe` 的硬链接；
+  打包 `pack-self` 直接原地写同一输出文件 → 同一 inode 被截断重写，共享端旧版本
+  （`1.0.0.3`）一起被改掉。
+- 修复：`tools/portable-pack.py` 改为"打包到临时名 → `os.replace` 原子替换"，发布
+  复制也走临时名 + 原子替换；绝不在已存在的输出上原地重写。同版本号撞名仍拒绝。
+- 已把 `share\b3.exe` 用 `D:\九转大还原1.0-beta.3.exe` 重新复制还原（先断链再复制）。
+
+### 门禁
+
+`make check` 全绿：unit **109 cases / 753 checks**（新增 1 case / 5 checks）、
+`test_version` 18、check-docs / i18n / widths / shell（含 C8）/ config / layers /
+foreground / secrets / versioninfo、boot-region 17/0、zjswap A–D、
+**test_rescue_triage 4 条**。x64 / x86 编译零告警。
+
 ## 1.0 beta.5（2026-11-08，内部 `1.0.0.5`）
 
 > 测试版（Beta）。相对 beta.4 只做**代码质量三项**，产品行为不变：拆过大源文件、

@@ -160,6 +160,28 @@ def deny_violations(rel):
     return out
 
 
+# C8（beta.6，P2 测试台实测）：救援控制台没有 CJK 字库 —— say 里的中文会变成
+# 方块/问号，首屏只剩 [1][2][3]。控制台消息必须是纯 ASCII（文件日志可写中文，
+# 但这里只查屏幕输出 say）。注释里的中文不受影响。
+CJK_RE = re.compile('[\u4e00-\u9fff]')
+SAY_RE = re.compile(r'\bsay\s+"([^"]*)"')
+
+
+def console_ascii_violations():
+    out = []
+    for rel in PRODUCT:
+        for i, line in enumerate(read_lines(rel), 1):
+            if is_comment(line):
+                continue
+            m = SAY_RE.search(line)
+            if m and CJK_RE.search(m.group(1)):
+                out.append(
+                    "%s:%d: console say() contains CJK (no CJK font in rescue, "
+                    "use ASCII): %s" % (rel, i, m.group(1)[:60])
+                )
+    return out
+
+
 def _first_line(lines, pred):
     for i, line in enumerate(lines, 1):
         if pred(line):
@@ -378,6 +400,7 @@ def main():
         fail.extend(initramfs_mismatches())
         fail.extend(payload_freshness_violations())
         fail.extend(payload_version_violations())
+        fail.extend(console_ascii_violations())
         if fail:
             print("check-shell: FAIL (%d, payload-only)" % len(fail))
             for f in fail:
@@ -421,11 +444,12 @@ def main():
                 % (rel, lineno, cmd, TOKEN)
             )
 
-    # C4 入口标记 / C5 载荷一致 / C6 新鲜度 / C7 版本戳
+    # C4 入口标记 / C5 载荷一致 / C6 新鲜度 / C7 版本戳 / C8 控制台 ASCII
     fail.extend(init_marker_violations())
     fail.extend(initramfs_mismatches())
     fail.extend(payload_freshness_violations())
     fail.extend(payload_version_violations())
+    fail.extend(console_ascii_violations())
 
     if fail:
         print("check-shell: FAIL (%d)" % len(fail))

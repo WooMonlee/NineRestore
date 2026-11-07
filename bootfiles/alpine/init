@@ -784,7 +784,7 @@ hand_back_bootorder(){
 
 # N20 ③：用户拍板的求助渠道（救援层首屏 + GUI 失败提示 + docs/33 三处一致）。
 show_support(){
-    say "求助：QQ 群 1128237828 / 邮箱 ms_2@qq.com（请把救援日志一起发来）"
+    say "Support: QQ group 1128237828 / email ms_2@qq.com (please attach the rescue log)"
 }
 
 # 目标盘上是否还留着旧系统备份 ~old（只有 A 引擎的交换会留下它）。
@@ -864,34 +864,61 @@ mark_pending_task(){
 }
 
 # N20 ③：上次任务未确认完成时的首屏三选一。$1=目标设备（可空，空则扫盘找 ~old），
-# $2=1 表示当前还有可续做的任务。返回 0 = 继续执行；回滚/重启不会返回。
+# $2=1 表示当前还有可续做的任务，$3=已暂存动作（restore / returnold / 空）。
+# 返回 0 = 继续执行；回滚/重启不会返回。
+# ── P1（beta.6，测试台 05:42/05:45/05:47 实测）──────────────────────────
+# 已暂存明确动作（returnold）时**不得再被本守卫拦回菜单**：用户点「返回旧系统」
+# 后重启，契约里的动作就是用户刚刚下的决定，救援层应直接沿既定动作继续。
+# 无人值守（read 超时/EOF）绝不自动选 [1]（回滚要人工输 YES，自动重试必然超时，
+# 旧实现因此 "自动[1] → 超时 → 重印菜单" 无限循环）：有任务走 [2]，无任务走 [3]；
+# 每条 reboot 路径只走一次（reboot_now 失败时由其末尾的终止兜底接管，不返回菜单）。
 triage_previous(){
     _tp_dev=$1
     _tp_has=$2
+    _tp_act=${3:-}
+    case "$_tp_act" in
+        returnold)
+            say "staged action=returnold -> skip 'unconfirmed task' guard, continue staged action"
+            return 0
+            ;;
+    esac
     [ -n "$_tp_dev" ] || _tp_dev=$(find_old_part)
     [ -n "$_tp_dev" ] || return 0
     has_old_tree "$_tp_dev" || return 0
+    _tp_denied=0
     while :; do
-        say "==== SysRecover：上次任务未确认完成 ===="
-        say "旧系统备份（~old）还在，说明上次还原没有走到「新系统确认成功」这一步。"
-        say "[1] 回滚到旧系统（推荐；会丢弃新系统）"
-        say "[2] 再试新系统"
-        say "[3] 仅重启"
+        say "==== SysRecover: previous task NOT confirmed ===="
+        say "old system backup (~old) still exists: last restore never reached 'new system OK'"
+        say "[1] roll back to old system (recommended; discards the new system)"
+        say "[2] retry the new system"
+        say "[3] reboot only"
         show_support
-        say "choice? auto-[1] in 120s"
+        if [ "$_tp_has" = "1" ]; then
+            say "choice? auto-[2] in 120s (unattended: never auto-rollback)"
+        else
+            say "choice? auto-[3] in 120s (unattended: never auto-rollback)"
+        fi
         _ch=
         read -t 120 -r _ch || _ch=
-        [ -z "$_ch" ] && _ch=1
+        if [ -z "$_ch" ]; then
+            if [ "$_tp_has" = "1" ]; then _ch=2; else _ch=3; fi
+            say "AUTO: no input in 120s -> choice $_ch (rollback requires manual YES)"
+        fi
         case "$_ch" in
             1)
-                say "回滚会丢弃新系统。确认请输入大写 YES（60s 内）："
+                say "Rollback discards the new system. Type uppercase YES within 60s:"
                 _cf=
                 read -t 60 -r _cf || _cf=
-                case "$_cf" in
-                    YES) ;;
-                    *) say "未确认，返回菜单"; continue ;;
-                esac
-                say "开始回滚：~old -> 根，新系统树丢弃"
+                if [ "$_cf" != "YES" ]; then
+                    _tp_denied=$((_tp_denied + 1))
+                    say "ERROR: rollback NOT confirmed ($_tp_denied/2), target untouched"
+                    if [ "$_tp_denied" -ge 2 ]; then
+                        say "ERROR: giving up rollback after 2 failed confirmations; no menu loop"
+                        return 0
+                    fi
+                    continue
+                fi
+                say "starting rollback: ~old -> root; the new system tree is discarded"
                 _urc=1
                 if [ -f /zjswap-undo.sh ]; then
                     sh /zjswap-undo.sh "$_tp_dev" /tmp/zj_n20_undo
@@ -903,35 +930,39 @@ triage_previous(){
                     0)
                         clear_stale_task "$_tp_dev"
                         mark_pending_task "$_tp_dev"
-                        say "回滚完成：旧系统已回到根，重启后进入旧系统"
+                        say "rollback OK: old system is back at the root; rebooting"
                         sync
                         sleep 3
                         reboot_now
+                        break
                         ;;
-                    2) say "回滚未执行：没有可用的 ~old（旧系统备份不完整），目标盘未动" ;;
-                    3) say "回滚未执行：根上还有上次中断留下的 ~new，请重试或联系支持" ;;
-                    *) say "回滚失败（rc=$_urc），目标盘可能未完成交换；请把日志发给我们" ;;
+                    2) say "rollback NOT run: no usable ~old (backup incomplete); target untouched" ;;
+                    3) say "rollback NOT run: root still has ~new from an interrupted run; retry or contact support" ;;
+                    *) say "rollback FAILED (rc=$_urc); target swap may be incomplete; please send us the log" ;;
                 esac
                 show_support
                 ;;
             2)
                 if [ "$_tp_has" = "1" ]; then
-                    say "继续上次未完成的任务"
+                    say "continuing the previous unfinished task"
                     return 0
                 fi
-                say "没有可续做的任务，按“再试新系统”重启"
+                say "no resumable task; rebooting as 'retry new system'"
                 sync
                 sleep 2
                 reboot_now
+                break
                 ;;
             3)
                 sync
                 sleep 2
                 reboot_now
+                break
                 ;;
             *) say "invalid choice: $_ch (1=rollback, 2=retry, 3=reboot)" ;;
         esac
     done
+    return 0
 }
 
 reboot_now(){
@@ -946,6 +977,15 @@ reboot_now(){
     reboot -f
     sleep 8
     reboot -f
+    # P1（beta.6）：reboot -f 两次仍返回 = 重启没生效。这里必须**终止**，
+    # 否则调用方的菜单循环会再次自动选择、再次重启，形成无人值守死循环。
+    say "ERROR: reboot did not take effect; stopping here to avoid a loop"
+    sync
+    sleep 5
+    poweroff -f
+    sleep 5
+    halt -f
+    while :; do sleep 300; done
 }
 menu_loop(){
     # P3（PIT-148）+ W4（2026-10-19，1019 案）失败引导菜单：
@@ -980,7 +1020,7 @@ menu_loop(){
                     reboot_now
                 fi
                 ;;
-            2) reboot_now ;;
+            2) reboot_now; break ;;
             3) break ;;
             *) say "invalid choice: $_ch (1=retry, 2=reboot, 3=shell)" ;;
         esac
@@ -1003,20 +1043,30 @@ if [ "$_ran" = "1" ]; then
     # N20：契约/日志已可读（上面已按 found_log / conf 判定），且还没写目标盘。
     # 先把启动顺序还给 Windows；写 NVRAM 失败 → 中止，不带着"用户可能被困"继续。
     if ! hand_back_bootorder; then
-        say "ERROR: 无法把启动顺序还给 Windows（NVRAM 只读或已满）。"
-        say "ERROR: 为避免你重启后被反复送回救援层，本次不写目标盘。"
+        say "ERROR: cannot hand the boot order back to Windows (NVRAM read-only or full)."
+        say "ERROR: nothing will be written to the target, so you are not trapped in rescue."
         show_support
         /bin/sh /zjrestore-lite.sh zz-blackbox nvram-handback
         sync
-        say "5 秒后关机；开机时按 F12/Esc 进启动菜单选 Windows，或进 BIOS 改启动顺序"
+        say "Powering off in 5s; press F12/Esc for the boot menu (or change boot order in BIOS)."
         sleep 5
         poweroff -f
         reboot -f
     fi
     # N20 ③：上次任务没走完（盘上还留着 ~old）→ 首屏三选一。
-    triage_previous "$TARGET_DEV" 1
+    # P1（beta.6）：已暂存 returnold 时 triage_previous 直接放行，不再拦回菜单。
+    _staged_act=""
+    if [ -f /tmp/restore-task.conf ]; then
+        while IFS='=' read -r _sk _sv || [ -n "$_sk" ]; do
+            [ "$_sk" = "action" ] && _staged_act=$(printf '%s' "$_sv" | tr -d ' \r')
+        done < /tmp/restore-task.conf
+    fi
+    triage_previous "$TARGET_DEV" 1 "$_staged_act"
     say "run restore: target=${TARGET_DEV:-<from offset>}"
     while :; do
+        # 每轮开跑前清掉上一轮的收尾标记：若本轮脚本异常死掉（没走到 EXIT trap），
+        # init 的兜底才能正确把它记成 interrupted（P3 beta.6）。
+        rm -f /tmp/zj-bb-final
         /bin/sh /zjrestore-lite.sh "$TARGET_DEV"
         _rc=$?
         say "restore script returned (rc=$_rc)"
@@ -1042,7 +1092,10 @@ fi
 # 黑匣子兜底：脚本没跑（找不到任务）、或跑挂了没来得及写盘 → 调脚本的
 # zz-blackbox 模式把日志+探测表+状态写到所有可写面（逻辑单源，不重复实现）。
 # /tmp/zj-bb.done 非空 = 脚本自己已经扫过（失败路径的 EXIT trap），不重复扫。
-if [ ! -s /tmp/zj-bb.done ]; then
+# /tmp/zj-bb-final = 脚本的 EXIT trap 已把 result/step 落盘（P3 beta.6）：成功时
+# 尤其不能再用 reason=interrupted 覆盖成 FAILED（测试台实测 returnold 成功后
+# ZJRESTORE-status.txt 仍写 FAILED/interrupted，就是这里二次扫盘造成的）。
+if [ ! -s /tmp/zj-bb.done ] && [ ! -f /tmp/zj-bb-final ]; then
     if [ "$_ran" = "1" ]; then _why=interrupted; else _why=no-task; fi
     say "blackbox: sweep by init (reason=$_why)"
     /bin/sh /zjrestore-lite.sh zz-blackbox "$_why"

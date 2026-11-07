@@ -1,16 +1,41 @@
-﻿r"""鎶?dist/ 鎵撳寘鎴愬崟鏂囦欢锛圥IT-201 / PIT-213锛夈€?
-**浠?0.9.92 璧凤紝鐪熸鐨勬墦鍖呯敱 exe 鑷繁鍋?*锛坄SysRecover.exe pack-self`锛夛細
-瀹瑰櫒杞借嵎鐢?ntdll 鐨?XPRESS-Huffman 鍘嬬缉锛堢害 50MB 鈫?38MB锛夛紝Python 渚т笉鍐嶉噸澶?瀹炵幇涓€浠藉帇缂╁櫒 鈥斺€?涓ゅ瀹炵幇蹇呯劧婕傜Щ銆?
-鐢ㄦ硶锛圡akefile 涓嶅彉锛夛細
+r"""把 dist/ 打包成单文件（PIT-201 / PIT-213）。
+
+**从 0.9.92 起，真正的打包由 exe 自己做**（`SysRecover.exe pack-self`）：
+容器载荷用 ntdll 的 XPRESS-Huffman 压缩（约 50MB → 38MB），Python 侧不再重复
+实现一份压缩器 —— 两套实现必然漂移。
+
+用法（Makefile 不变）：
   python tools/portable-pack.py <stub.exe> <out.exe> <distDir> [releaseDir]
 
-  stub.exe  : 浠呬负鍏煎鏃у懡浠よ淇濈暀锛堝疄闄呯敤 <distDir>\bootfiles\portable-stub.exe锛?  out.exe   : 杈撳嚭璺緞
-  distDir   : 瑕佹墦鍖呯殑鐩綍锛? 绋嬪簭鐨?AppDir锛?  releaseDir: 鍙€夌殑鍙戝竷鐩綍锛堟寜鐗堟湰鍙峰鍒朵竴浠斤紝濡?D:\涔濊浆澶ц繕鍘?.9.92.exe锛?"""
+  stub.exe  : 仅为兼容旧命令行保留（实际用 <distDir>\bootfiles\portable-stub.exe）
+  out.exe   : 输出路径
+  distDir   : 要打包的目录（程序的 AppDir）
+  releaseDir: 可选的发布目录（按版本号复制一份，如 D:\九转大还原1.0-beta.6.exe）
+
+历史版本不可变（beta.6，测试台记账）：
+  打包/发布一律**先写临时文件、再原子改名**，绝不在已存在的输出文件上原地重写。
+  否则输出若被外部做成硬链接（例如 share\b3.exe → dist\SysRecover-Portable.exe），
+  一次重建就会把共享端的历史原件一起改掉（1.0.0.3 已因此丢失）。
+"""
 import json
 import os
 import shutil
 import subprocess
 import sys
+
+
+def _atomic_copy(src, dst):
+    """复制到同目录临时名再原子改名：目标已存在时也不会原地截断旧 inode。"""
+    tmp = dst + '.tmp-%d' % os.getpid()
+    try:
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, dst)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 def main():
@@ -22,16 +47,28 @@ def main():
 
     exe = os.path.join(dist, 'x64', 'SysRecover.exe')
     if not os.path.exists(exe):
-        exe = os.path.join(dist, 'SysRecover.exe')  # 32 浣嶅叆鍙ｏ紙鏃?x64 瀛愮洰褰曟椂锛?    if not os.path.exists(exe):
+        exe = os.path.join(dist, 'SysRecover.exe')  # 32 位入口（无 x64 子目录时）
+    if not os.path.exists(exe):
         print('portable-pack: SysRecover.exe not found under %s' % dist)
         return 1
 
     out_abs = os.path.abspath(out)
-    r = subprocess.run([exe, 'pack-self', '--out', out_abs, '--stub',
-                        os.path.abspath(stub)])
-    if r.returncode != 0 or not os.path.exists(out_abs):
-        print('portable-pack: pack-self failed (rc=%d)' % r.returncode)
-        return 1
+    # 先写临时文件：输出路径若与外部文件是硬链接，原子改名只会替换本条目录项，
+    # 另一个链接仍指向旧 inode（历史版本字节不变）。
+    tmp_out = out_abs + '.build-%d.exe' % os.getpid()
+    try:
+        r = subprocess.run([exe, 'pack-self', '--out', tmp_out, '--stub',
+                            os.path.abspath(stub)])
+        if r.returncode != 0 or not os.path.exists(tmp_out):
+            print('portable-pack: pack-self failed (rc=%d)' % r.returncode)
+            return 1
+        os.replace(tmp_out, out_abs)
+    finally:
+        if os.path.exists(tmp_out):
+            try:
+                os.remove(tmp_out)
+            except OSError:
+                pass
     size = os.path.getsize(out_abs)
     print('portable-pack: %s (%.1f MB)' % (out, size / 1048576.0))
 
@@ -62,7 +99,7 @@ def main():
                   'number first (tools/version.py --bump)' % dst_zh)
             return 1
         try:
-            shutil.copyfile(out_abs, dst_zh)
+            _atomic_copy(out_abs, dst_zh)
             print('portable-pack: released -> %s' % dst_zh)
         except OSError as e:
             print('portable-pack: release copy FAILED: %s' % e)

@@ -132,7 +132,7 @@ _CV=$(get_task contract_version)
 if [ "$ZZ_BLACKBOX" != "1" ] && [ "$_CV" != "$ZJ_CONTRACT" ]; then
     RESULT=FAILED; STEP=contract-mismatch
     say "ERROR: contract_version mismatch: task=$_CV rescue=$ZJ_CONTRACT"
-    say "ERROR: 程序与救援层版本不匹配（契约 v$_CV vs v$ZJ_CONTRACT），请用同一版本重新暂存"
+    say "ERROR: program and rescue layer versions do not match; re-stage with the same build"
     exit 1
 fi
 say "contract_version=$_CV (ok)"
@@ -599,6 +599,13 @@ bb_final(){
                 echo menu > /tmp/zj-recover-decision
                 ;;
         esac
+    fi
+    # P3（beta.6）：告诉 init "脚本已自行收尾并把 result/step 落盘"。init 只在
+    # 没有这个文件时才用 reason=interrupted 二次扫盘 —— 否则会把刚写好的
+    # result=OK 覆盖成 FAILED/interrupted（测试台 returnold 成功后的实测）。
+    # RESULT 仍是 UNKNOWN = 异常退出（没走到任何结论）→ 不写标记，让 init 兜底。
+    if [ "$RESULT" != "UNKNOWN" ]; then
+        printf 'result=%s\nstep=%s\n' "$RESULT" "$STEP" > /tmp/zj-bb-final || :
     fi
 }
 trap 'bb_final' EXIT

@@ -42,6 +42,11 @@ constexpr long kSwapLeftStaleHours = 24;
 SwapLeftVerdict DecideSwapLeftover(const SwapLeftInfo& i,
                                    long staleHours = kSwapLeftStaleHours);
 
+// 删除收尾记账归一（beta.6，P3）：目录已消失 = 子树实际删净 → 失败计数清零
+// （中间 rmdir 失败、补删标记后又成功，不能留着旧 fail）；目录仍在 = 至少一项
+// 没删掉 → fail 至少 1。保证"界面结果 == 落盘计数"，不忽略也不虚报。
+long NormalizeDeleteFail(long fail, bool dirStillThere);
+
 // 扫描全部固定盘的 ~new / ~old（属性级检查，毫秒级）
 std::vector<SwapLeftInfo> ScanSwapLeftovers();
 
