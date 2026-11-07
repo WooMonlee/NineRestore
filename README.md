@@ -1,4 +1,4 @@
-# 九转还原（SysRecover）
+# 九转还原（NineRestore）
 
 > Windows 系统一键备份 / 还原工具  
 > **中文** | [English](README.en.md)

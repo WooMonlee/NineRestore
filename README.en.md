@@ -1,4 +1,4 @@
-# SysRecover (Nine-turn Restore)
+# NineRestore (九转还原)
 
 > One-click Windows system backup and restore  
 > **English** | [中文](README.md)

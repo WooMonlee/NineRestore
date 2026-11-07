@@ -29,16 +29,16 @@ VERSION_H = ROOT / "src" / "common" / "version.h"
 
 # profile -> (InternalName, FileDescription)
 PROFILES = {
-    "gui":            ("SysRecoverUI",           "九转还原"),
-    "cli":            ("SysRecover",             "九转还原 命令行"),
-    "check":          ("SysRecoverCheck",        "九转还原 镜像检查"),
-    "launcher-ui":    ("SysRecoverLauncherUI",   "九转还原 启动器"),
-    "launcher-cli":   ("SysRecoverLauncherCLI",  "九转还原 命令行启动器"),
-    "launcher-check": ("SysRecoverLauncherCheck", "九转还原 检查入口"),
-    "ea":             ("zj-ea-apply",            "九转还原 EA 补写器"),
-    "boot":           ("zj-restore-boot",        "九转还原 启动项清理"),
-    "pstub":          ("portable-stub",          "九转还原 单文件版（命令行）"),
-    "pstub-gui":      ("portable-stub-gui",      "九转还原 单文件版"),
+    "gui":            ("SysRecoverUI",           "NineRestore"),
+    "cli":            ("SysRecover",             "NineRestore CLI"),
+    "check":          ("SysRecoverCheck",        "NineRestore Image Check"),
+    "launcher-ui":    ("SysRecoverLauncherUI",   "NineRestore Launcher"),
+    "launcher-cli":   ("SysRecoverLauncherCLI",  "NineRestore CLI Launcher"),
+    "launcher-check": ("SysRecoverLauncherCheck", "NineRestore Check Entry"),
+    "ea":             ("zj-ea-apply",            "NineRestore EA Writer"),
+    "boot":           ("zj-restore-boot",        "NineRestore Boot Entry Cleanup"),
+    "pstub":          ("portable-stub",          "NineRestore Portable (CLI)"),
+    "pstub-gui":      ("portable-stub-gui",      "NineRestore Portable"),
 }
 
 
