@@ -17,6 +17,7 @@
 #include "app/safety.h"
 #include "app/selfdiag.h"
 #include "app/swapleft.h"
+#include "app/pending_task.h"
 #include "boot/bcd.h"
 #include "boot/grub.h"
 #include "boot/uefi.h"
@@ -282,6 +283,7 @@ LRESULT CMainForm::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         ShowRescueFailureNotice();
         ShowMenuRescueNotice();
         ShowSafeBootExitNotice();
+        ShowPendingTaskNotice();
     }
     if (msg == WM_STARTUP_LAZY) {
         // 起后台线程做启动后置工作（diag/收集/清理/枚举 —— 可能被慢速 USB2
@@ -952,6 +954,30 @@ void CMainForm::ShowRescueFailureNotice() {
         if (r == 1)
             StartRetryStagedRestore();
     }
+}
+
+// N20 批2（④）：救援层回滚成功后，在旧系统 ProgramData\SysRecover 写下一行
+// "上次任务未完成"标记。这里**读到即删**（先删再提示，避免二次打扰），提示里给
+// 求助渠道；只碰这一个文件，不写注册表/启动项/服务。
+void CMainForm::ShowPendingTaskNotice() {
+    wchar_t pd[MAX_PATH] = {};
+    if (!::GetEnvironmentVariableW(L"ProgramData", pd, MAX_PATH) || !pd[0]) return;
+    std::wstring content;
+    if (!sysrecover::TakePendingTaskMarker(pd, content)) return;
+    LogInfo("pending-task marker consumed (self-deleted)");
+    std::wstring msg = Tr(L"上次还原任务未完成：系统已回滚到原来的系统。");
+    // 标记里的 when= 行帮用户对上时间；没有就不显示这一行。
+    size_t wp = content.find(L"when=");
+    if (wp != std::wstring::npos) {
+        size_t e = content.find(L'\n', wp);
+        std::wstring when = content.substr(
+            wp + 5, (e == std::wstring::npos ? content.size() : e) - wp - 5);
+        if (!when.empty()) msg += std::wstring(L"\n") + Tr(L"记录时间：") + when;
+    }
+    msg += L"\n\n";
+    msg += Tr(L"请确认系统是否正常；如需要分析，请把日志发给我们：QQ 群 1128237828 / 邮箱 ms_2@qq.com");
+    SetStatus(Tr(L"上次还原任务未完成"));
+    MessageBoxW(m_hWnd, msg.c_str(), Tr(L"还原结果"), MB_OK | MB_ICONWARNING);
 }
 
 // 菜单模式自证（2026-11-06）：装了常驻菜单 ≠ 救援层跑过。判据 = 本次开机晚于

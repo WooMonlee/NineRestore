@@ -13,6 +13,7 @@
 #include "tiny_test.h"
 
 #include "app/advice.h"
+#include "app/pending_task.h"
 #include "app/request_precheck.h"
 #include "app/swapleft.h"
 #include "boot/bcd.h"
@@ -527,6 +528,43 @@ TEST(pathutil_boot_asset_dir_portable) {
     CHECK(!IsPortableRuntime());
     RemoveDirectoryW(bf.c_str());
     RemoveDirectoryW(origin.c_str());
+}
+
+// ── pending_task：N20 批2（④）旧系统"上次任务未完成"标记（读到即自删）──
+// 救援层回滚成功后写 `<根>\ProgramData\SysRecover\last-task-unfinished.txt`；
+// GUI 启动读到就删，保证只打扰一次。这里验证「读到内容 + 文件消失 + 二次为假」。
+TEST(pending_task_marker_read_then_self_delete) {
+    wchar_t tmp[MAX_PATH] = {};
+    GetTempPathW(MAX_PATH, tmp);
+    std::wstring base = std::wstring(tmp) + L"sr-pending-test";
+    std::wstring dir = base + L"\\SysRecover";
+    RemoveDirectoryW(dir.c_str());
+    RemoveDirectoryW(base.c_str());
+    CHECK(MakeDirTree(dir));
+    const std::wstring marker = PendingTaskMarkerPath(base);
+    CHECK_EQ(marker, dir + L"\\last-task-unfinished.txt");
+    std::wstring content;
+    CHECK(!TakePendingTaskMarker(base, content));  // 没有标记 → false
+    CHECK(content.empty());
+
+    const char* body =
+        "status=unfinished\nwhen=2026-11-07 12:00:00\naction=rollback\n";
+    HANDLE h = CreateFileW(marker.c_str(), GENERIC_WRITE, 0, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    CHECK(h != INVALID_HANDLE_VALUE);
+    DWORD wrote = 0;
+    CHECK(WriteFile(h, body, (DWORD)strlen(body), &wrote, nullptr));
+    CloseHandle(h);
+
+    CHECK(TakePendingTaskMarker(base, content));  // 读到
+    CHECK(content.find(L"status=unfinished") != std::wstring::npos);
+    CHECK(content.find(L"when=2026-11-07 12:00:00") != std::wstring::npos);
+    // 读即自删：提示之前文件已经不在，第二次不会再打扰
+    CHECK(GetFileAttributesW(marker.c_str()) == INVALID_FILE_ATTRIBUTES);
+    CHECK(!TakePendingTaskMarker(base, content));
+
+    RemoveDirectoryW(dir.c_str());
+    RemoveDirectoryW(base.c_str());
 }
 
 // ── task：restore-task.conf 读取（GUI 判断"菜单项绑定了哪个镜像"）──────

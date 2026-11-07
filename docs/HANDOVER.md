@@ -1,8 +1,8 @@
 # 交接摘要（1.0.0-beta.1，2026-11-07 收尾轮）
 
-> 本文件只记录**证据撑得住**的状态。没有写"全部完成"：N20 批 1 已实现并在 QEMU/OVMF
-> 固件级实测，**批 2（④ Windows 侧"上次任务未完成"标记）未做**；N7 明确暂缓；
-> Windows 侧"装菜单 → 重启进救援"这一段仍未复测。
+> 本文件只记录**证据撑得住**的状态。没有写"全部完成"：N20 批 1 + 批 2 均已实现并做了
+> QEMU/OVMF 固件级实测；**批 2 的 Windows GUI 弹窗本身没有 end-to-end 跑**（单测覆盖读即自删）；
+> N7 明确暂缓；Windows 侧"装菜单 → 重启进救援"这一段仍未复测。
 
 ## 本轮做完的（2026-11-07）
 
@@ -47,13 +47,14 @@
   `ZJRESTORE-status.txt`。
 - N10 关闭：发布口径固定 `make package`，`payload-gate` 保证源变更自动重建、
   C5/C6/C7 不过即拒绝打包。
-- 为不抬高 `2>/dev/null` 基线（lite=184 / init=70），新增语句没有加消音后缀。
+- 为不抬高 `2>/dev/null` 基线（lite=184 / init=66），新增语句没有加消音后缀。
 
 ### 5. 启动烟测（本轮新增，QEMU/OVMF）
 
-- 当前载荷（N20 批 1 重建后）：`initramfs-zjrestore.cpio.gz` 17,406,775 B，726 entries，
-  内部戳 `1.0.0-beta.1`，SHA-256 `81a2b9e715e8cf4687b6d5879fbaaf82b7826507fc1221347cce8a0562abdabe`。相对上一版新增 efivarfs 模块
-  （`kernel/fs/efivarfs/efivarfs.ko.xz`）——没有它救援层没法写 BootOrder。
+- 当前载荷（N20 批 2 重建后）：`initramfs-zjrestore.cpio.gz` 17,407,257 B，726 entries，
+  内部戳 `1.0.0-beta.1`，SHA-256 `d1ea1df0f1ce979fcd6e050b33ea160c823044085bae5967f2504c98b745c8e4`。
+  相对上一版新增 efivarfs 模块（`kernel/fs/efivarfs/efivarfs.ko.xz`）与批 2 的
+  `mark_pending_task`。
 - QEMU/OVMF 下走 shim → Debian GRUB → Debian 内核 → 我们的 initramfs：
   `Linux version 6.12.107`、`SR: modules loaded`、
   `entry marker written (/dev/sda1) entry=menu`、
@@ -73,7 +74,7 @@
 - **未跑** apply 全链路：该介质是安装源（`install.wim`），预检按设计拒绝；
   需要一枚装着完整系统镜像的 UDF 光盘才能跑端到端。
 
-### 7. N20 批 1（2026-11-07，已实现 + QEMU/OVMF 实测）
+### 7. N20 批 1 + 批 2（2026-11-07，已实现 + QEMU/OVMF 实测）
 
 用户拍板：①=B（保留常驻救援项）、②=恢复原始 BootOrder 语义（默认直接进 Windows）、
 ③=B（救援首屏三选一 + 求助渠道）、⑤=分两批（批 2 才做 ④）。
@@ -106,12 +107,30 @@
   - **未覆盖**：Windows GUI 的"装菜单 → 重启 → F10/F12 选 SysRecover"链路本轮仍未跑
     （无 guest 自动化凭据；QEMU/WinPE GUI 点击也未自动化）。
 
-### 8. 收尾链（上一轮，N20 批 1 后已复跑门禁）
+**批 2（④=A，范围锁死，2026-11-07）**
 
-- `make check`（批 1 后复跑）→ `102 cases, 709 checks, 0 failures`；
-  `check-i18n 885/885`；`check-shell PASS (init=66, lite=184, initramfs 9/9)`；
+- **`bootfiles/alpine/init`**：`triage_previous` 回滚分支（`zjswap-undo.sh` 返回 0）新增
+  `mark_pending_task`，只写 `<旧系统根>\ProgramData\SysRecover\last-task-unfinished.txt`
+  三行（`status=unfinished` / `when=YYYY-MM-DD HH:MM:SS` / `action=rollback`）；
+  挂载/写入失败只 WARN，不阻塞回滚。**不写注册表、不新增/修改启动项、服务。**
+- **`src/app/pending_task.{h,cpp}`**：`TakePendingTaskMarker` 读 UTF-8 后**立即 `DeleteFileW`**
+  （先删再提示）；`src/gui/main_form.cpp::ShowPendingTaskNotice` 在每次正常启动的
+  `WM_CHECK_RESCUE` 里调用，提示"上次还原任务未完成：系统已回滚到原来的系统。"、
+  `记录时间：`、QQ 群 1128237828 / 邮箱 ms_2@qq.com。
+- **单测**：`pending_task_marker_read_then_self_delete`（读到内容 → 文件消失 → 二次为假）。
+- **QEMU/OVMF 实测**（自建 512MB NTFS VHD 目标盘，盘上预置 `~old\Windows`；
+  测试 initramfs 用追加 cpio 覆盖 `zjswap-undo.sh` 为 `exit 0`，不改仓库文件）：
+  救援首屏选 `1` + 大写 `YES` → `回滚完成` → `AUTO-RECOVER: rebooting now` →
+  重启直接进 Windows（`WINDOWS-DUMMY-BOOTED`）；挂回 VHD 读到标记三行且内容正确。
+- **未覆盖**：Windows GUI 实际弹窗（无 guest 自动化），只到单测 + 代码路径/门禁。
+
+### 8. 收尾链（2026-11-07，N20 批 2 后已复跑门禁）
+
+- `make check`（批 2 后复跑）→ `103 cases, 720 checks, 0 failures`；
+  `check-i18n 889/889`；`check-shell PASS (init=66, lite=184, initramfs 9/9)`；
   `check-foreground ok`；`test_zjswap PASS`；`check-widths` 仅 1 个既有 WARN。
-- x64 / x86 `all` 退出码 0。
+- x64 / x86 `all` 退出码 0；载荷 17,407,257 B / 726 entries /
+  SHA-256 `d1ea1df0f1ce979fcd6e050b33ea160c823044085bae5967f2504c98b745c8e4`。
 
 ## 提交号
 
@@ -123,6 +142,7 @@
 | `2ab3e87` | N8 入口类型取证 + N10 收口 |
 | 紧随其后的文档提交 | 本交接页 + docs/33 §5.6 + docs/34 收尾轮证据 |
 | `7f68896` | N20 批 1：早归还 BootOrder（pre.bak 基准 + 救援项垫底）+ N21 判定修复 + efivarfs 模块 + 三选一/求助渠道 |
+| （本条提交） | N20 批 2：回滚后写"上次任务未完成"标记（读即自删）+ 单测 + 文档 |
 
 ## 已修 / 待验证 / 待决定
 
@@ -134,12 +154,14 @@
 - docs/35 文件名（`ebff546`）。
 - N18 后续"新 cpio 启动烟测"（QEMU/OVMF，见上）。
 - **N20 批 1**（①②③）：代码 + QEMU/OVMF 固件级实测（中途杀进程→Windows、手选救援项→救援）。
+- **N20 批 2**（④=A）：救援层写标记 + GUI 读即自删；单测 + QEMU/OVMF 回滚链路实测
+  （回滚 → 重启进 Windows → 挂回盘读到标记）。
 - **N21**：与 N20 批 1 同一处修复，随批 1 关闭。
 
 **待验证 / 仍开放**
 
-- **N20 批 2（④）**：Windows 侧"上次任务未完成"标记，仅写该标记、读即自删；
-  不得新增/修改其它注册表项、启动项、服务。本轮**未开始**。
+- **N20 批 2 的 Windows GUI 弹窗**：单测覆盖"读到即删、二次为假"，但**没有**在 Windows
+  里实际登录看到提示（无 guest 自动化）；不写成"端到端已验证"。
 - **N7**：根治暂缓（1.0 不做）；`docs/34` §5.1 与 `docs/33` §5.4 已写已知限制。
 - **Windows 侧装菜单 → 重启进救援**：VMware 可用，但本轮**未执行**该流程
   （无 guest 自动化凭据；QEMU/WinPE GUI 点击未自动化）。
@@ -149,7 +171,7 @@
 
 **待用户决定**
 
-- N20 批 2 是否按 ④=A（范围锁死）继续。
+- 暂无：N20 批 1/批 2 均已按用户 2026-11-07 的决策实现。
 
 ## 环境与收尾状态（2026-11-07）
 
@@ -167,8 +189,8 @@
 ## 下次开工从这里接
 
 1. `git status --short`（应为空）→ `make check`（应 PASS，含 C5 9/9）。
-2. 做 **N20 批 2（④）**：旧系统写"上次任务未完成"标记、被读即自删；只写该标记，
-   不新增/修改其它注册表项、启动项、服务；VM 实测"回旧系统后提示未完成、标记自删"。
+2. **N20 批 2（④）已完成**；如需补证据，优先做 Windows GUI 的"读到标记后弹窗"端到端。
 3. VMware 可用时，补"Windows 侧装菜单 → 固件重启进救援"烟测。
-4. 拿一枚"完整系统镜像在 UDF 上"的介质，补 apply 端到端。
-5. 物理机到位后按 `docs/35` 跑 USB 固定盘、BIOS/MBR。
+4. 批 1 门禁通过后，用 `D:\Software\System\_VMware` 的 7z 副本做 BIOS/MBR 传统引导链路。
+5. 拿一枚"完整系统镜像在 UDF 上"的介质，补 apply 端到端。
+6. 物理机到位后按 `docs/35` 跑 USB 固定盘、BIOS/MBR。

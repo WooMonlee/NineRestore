@@ -833,6 +833,36 @@ clear_stale_task(){
     fi
 }
 
+# N20 批2（④，A 但范围锁死）：回滚成功后，在旧系统根写"上次任务未完成"标记。
+# **只写这一个文件**：<根>\ProgramData\SysRecover\last-task-unfinished.txt
+# （三行 status/when/action）；GUI 读到即删（src/app/pending_task.cpp）。
+# 不写注册表、不新增/修改启动项或服务。挂载/写入失败只 WARN，不阻塞回滚。
+mark_pending_task(){
+    _mk=$1
+    mkdir -p /tmp/zj_pend
+    if timeout 60 mount -t ntfs3 "$_mk" /tmp/zj_pend 2>>/tmp/zj_n20.err; then
+        :
+    elif timeout 60 ntfs-3g -o force "$_mk" /tmp/zj_pend 2>>/tmp/zj_n20.err; then
+        :
+    else
+        say "WARN: cannot mount $_mk to write pending-task marker"
+        return 1
+    fi
+    _md=/tmp/zj_pend/ProgramData/SysRecover
+    if mkdir -p "$_md" 2>>/tmp/zj_n20.err; then
+        {
+            echo "status=unfinished"
+            echo "when=$(date '+%Y-%m-%d %H:%M:%S')"
+            echo "action=rollback"
+        } > "$_md/last-task-unfinished.txt" 2>>/tmp/zj_n20.err || \
+            say "WARN: cannot write pending-task marker on $_mk"
+    else
+        say "WARN: cannot create ProgramData/SysRecover on $_mk"
+    fi
+    sync
+    umount /tmp/zj_pend
+}
+
 # N20 ③：上次任务未确认完成时的首屏三选一。$1=目标设备（可空，空则扫盘找 ~old），
 # $2=1 表示当前还有可续做的任务。返回 0 = 继续执行；回滚/重启不会返回。
 triage_previous(){
@@ -872,6 +902,7 @@ triage_previous(){
                 case "$_urc" in
                     0)
                         clear_stale_task "$_tp_dev"
+                        mark_pending_task "$_tp_dev"
                         say "回滚完成：旧系统已回到根，重启后进入旧系统"
                         sync
                         sleep 3
