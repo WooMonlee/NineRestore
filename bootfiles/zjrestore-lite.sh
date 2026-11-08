@@ -439,6 +439,21 @@ bb_drop(){
     sync 2>/dev/null
     return 0
 }
+# 成功回执（P3a beta.7）：apply 成功与 returnold 成功共用，保证两条成功路径的回执
+# 完全一致。写"软件目录\logs"与兜底窝；两处都失败才算没落盘，明确 WARN（PIT-147）。
+# **不写目标盘**（还原后的系统盘不留我们的文件）；ESP 由 bb_esp_drop 常驻写。
+write_success_receipt(){
+    _rcpt=0
+    if [ -n "$SOFT_MNT" ] && [ -d "$SOFT_MNT/$SD_REL" ]; then
+        mkdir -p "$SOFT_MNT/$SD_REL/logs" 2>/dev/null
+        bb_status_text > "$SOFT_MNT/$SD_REL/logs/ZJRESTORE-status.txt" 2>/dev/null && _rcpt=1
+    fi
+    if [ -n "$BB_HOME" ]; then
+        bb_status_text > "$BB_HOME/ZJRESTORE-status.txt" 2>/dev/null && _rcpt=1
+    fi
+    [ "$_rcpt" = 1 ] || say "WARN: status receipt NOT written (soft-dir & bb-home both failed)"
+    return 0
+}
 # 黑匣子专用挂载：短超时、少回退（失败路径上别被坏盘拖死）
 bb_mount(){
     mkdir -p /tmp/zj_bb
@@ -916,6 +931,14 @@ if [ $UNDO_MARK -eq 1 ]; then
     RESULT=OK
     STEP="done"
     persist_log
+    # P3a（beta.7）：回退成功也必须落"成功回执"——原先只 persist_log 就 exit，
+    # EXIT trap 的 OK 分支只写软件目录 + ESP；BIOS 机器没有 ESP、软件目录又常因
+    # 挂载点变化写不到，外部（Windows 侧）根本读不到 result=OK/step=done，会把
+    # 待执行标记误报成"任务未执行"（测试台实测 C:/D:/F: 根均无 status）。
+    # 与 apply 成功路径共用同一 helper，口径完全一致。
+    write_success_receipt
+    bb_esp_drop
+    sync
     exit 0
 fi
 
@@ -2278,17 +2301,8 @@ fi
 persist_log          # 把完整日志落到 <软件目录>\logs\（cleanup 会保留该子目录）
 # 成功回执也必须落**软件目录**（BIOS 机器没有 ESP；UEFI 的 ESP 写入也可能失败）：
 # 否则 Windows 侧看不到"已成功"，会把待执行标记误报成"任务未执行"（0.6.29 规则）。
-_rcpt=0
-if [ -n "$SOFT_MNT" ] && [ -d "$SOFT_MNT/$SD_REL" ]; then
-    mkdir -p "$SOFT_MNT/$SD_REL/logs" 2>/dev/null
-    bb_status_text > "$SOFT_MNT/$SD_REL/logs/ZJRESTORE-status.txt" 2>/dev/null && _rcpt=1
-fi
-if [ -n "$BB_HOME" ]; then
-    bb_status_text > "$BB_HOME/ZJRESTORE-status.txt" 2>/dev/null && _rcpt=1
-fi
-# 两个直写点全失败 = 哪都没有"成功回执"（若连 ESP 也没落上，下次 Windows 启动
-# 会把 pending 标记误报成"任务未执行"）—— 响亮记一笔，别静默（PIT-147）
-[ "$_rcpt" = 1 ] || say "WARN: status receipt NOT written (soft-dir & bb-home both failed)"
+# P3a beta.7：与 returnold 成功路径共用 write_success_receipt（两处直写点 + 失败 WARN）。
+write_success_receipt
 bb_esp_drop
 sync
 stop_log_mirror      # 停掉后台日志镜像循环

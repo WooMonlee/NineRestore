@@ -2346,4 +2346,36 @@
     临时名 + 原子替换；同版本号撞名仍拒绝。共享/归档一律复制，不要 `mklink /H`。
   · 修复现场：先删 `share\b3.exe` 这条链接，再用 `D:\九转大还原1.0-beta.3.exe` 复制还原。
 
+### PIT-225
+
+- PIT-225 **`find ... | head -1` 把陈旧契约副本当成"有任务"**（2026-11-08，beta.7，测试台实测）
+  · 现场：留 `~old`、无暂存任务、无人值守 120s，救援层自动选了 `[2]` 而不是 `[3]`。
+  · 根因：`init` 兜底搜索 `find "$ZJ_M" -maxdepth 4 -name restore-task.conf | head -1`
+    只看第一个命中、不看来历：先抓到 `~old\restore-task.conf`，后抓到
+    `Program Files\SysRecover\logs\restore-task.conf`；根目录确认无 conf 仍被抓，
+    `_ran=1` 就判成"还有活要干"。
+  · 处置：新增 `conf_is_credible()`，候选**逐个**过可信度，只认写者会写的位置——
+    目录含 `SysRecover.exe`/`SysRecoverUI.exe` 或目录名 `ZJRESTORE`；`action` 仅
+    `restore|returnold`；必须有 `target_offset` 或 `target_guid`；显式排除 `~old`/`~new`
+    与 `logs`；有主契约 `_zjresy*.log` 时核对 offset/guid 一致。全部不可信要留
+    `ignored N conf candidate(s)`，不许静默。
+  · 回归：`tests/test_conf_credible.sh` 12 条（含"禁止退回 head -1"静态断言）。
+  · 同类排查：`scan_for_log` 只匹配分区根 `_zjresy*.log`（不递归）；`~new` 与
+    `zjswap*.sh` 都把契约排除在交换外 —— 无同型漏洞。
+
+### PIT-226
+
+- PIT-226 **returnold 成功只活"内存里的 OK"：不落成功回执**（2026-11-08，beta.7，测试台实测）
+  · 现场：returnold 成功后 C:/D:/F: 根都没有 `ZJRESTORE-status.txt`。
+  · 根因：`zjrestore-lite.sh` 置 `OK/done` 后只 `persist_log` 就 `exit 0`，没走
+    `bb_status_text`；EXIT trap 的 OK 分支只写软件目录 + ESP（BIOS 无 ESP）；`init`
+    又因 `/tmp/zj-bb-final` 存在跳过兜底 → 状态只活在内存里。
+  · 处置：新增 `write_success_receipt()`（软件目录 `logs\` + 兜底窝
+    `ZJRESTORE-logs\`，两处都失败才 `WARN`）；**apply 成功与 returnold 成功共用**，
+    口径一致。returnold 成功后：`persist_log` → `write_success_receipt` →
+    `bb_esp_drop` → `sync` → `exit 0`。
+  · 回归：`tests/test_success_receipt.sh` 5 条（两处直写点 / 仅兜底窝 / 全失败 WARN /
+    两条成功路径共用 helper）。
+
+
 

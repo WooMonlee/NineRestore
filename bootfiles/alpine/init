@@ -391,6 +391,42 @@ scan_for_log(){
 }
 scan_for_log
 
+# ── 1c) 契约可信度（P1-b beta.7，测试台实测）─────────────────────────
+# 只在"写者会写的位置"认 conf：程序目录（conf 就在 SysRecover.exe 旁边），或本产品
+# 自己的 ZJRESTORE 目录（exeDir 不可写时的备用写点）。明确排除交换残留（~old/~new）
+# 与日志归档（logs）—— 否则 `~old\ZJRESTORE\restore-task.conf` 这类陈旧副本会被当成
+# "还有活要干"，无人值守就会错误地选 [2] 继续一份不存在的任务（实测 120s 后选 [2]）。
+# 有主契约日志时再核对目标身份（offset/guid），防止别的盘上的旧软件目录把任务指错。
+conf_is_credible(){
+    _cfp=$1
+    case "$_cfp" in
+        */~old/*|*/~new/*) return 1 ;;
+        */logs/*|*/Logs/*|*/LOGS/*) return 1 ;;
+    esac
+    _cfd=$(dirname "$_cfp")
+    _ok_src=0
+    if [ -f "$_cfd/SysRecover.exe" ] || [ -f "$_cfd/SysRecoverUI.exe" ]; then
+        _ok_src=1
+    fi
+    [ "$(basename "$_cfd")" = "ZJRESTORE" ] && _ok_src=1
+    [ "$_ok_src" = "1" ] || return 1
+    _cact=$(grep -m1 '^action=' "$_cfp" | cut -d= -f2- | tr -d '\r ')
+    case "$_cact" in restore|returnold) ;; *) return 1 ;; esac
+    grep -q '^target_offset=' "$_cfp" || grep -q '^target_guid=' "$_cfp" || return 1
+    if [ -n "$found_log" ]; then
+        _lk="/tmp/$(basename "$found_log")"
+        if [ -f "$_lk" ]; then
+            _lo=$(grep -m1 '^target_part_offset=' "$_lk" | cut -d= -f2- | tr -d '\r ')
+            _lg=$(grep -m1 '^target_guid=' "$_lk" | cut -d= -f2- | tr -d '\r ')
+            _co=$(grep -m1 '^target_offset=' "$_cfp" | cut -d= -f2- | tr -d '\r ')
+            _cg=$(grep -m1 '^target_guid=' "$_cfp" | cut -d= -f2- | tr -d '\r ')
+            [ -n "$_lo" ] && [ -n "$_co" ] && [ "$_lo" != "$_co" ] && return 1
+            [ -n "$_lg" ] && [ -n "$_cg" ] && [ "$_lg" != "$_cg" ] && return 1
+        fi
+    fi
+    return 0
+}
+
 # ── 2) conf 未找到 → 各分区搜索（软件目录可能在子目录）──
 if [ ! -f /tmp/restore-task.conf ]; then
     for _d in $(list_parts); do
@@ -398,16 +434,24 @@ if [ ! -f /tmp/restore-task.conf ]; then
         case "$_d" in *fd*|*floppy*) continue ;; esac
         mkdir -p "$ZJ_M"
         if mnt_dev "$_d" "$ZJ_M"; then
-            _c=$(find "$ZJ_M" -maxdepth 4 -name restore-task.conf 2>/dev/null | head -1)
-            if [ -n "$_c" ]; then
+            # 收集候选后逐个过可信度：不能拿 find 的第一个（陈旧副本常排在前面）
+            find "$ZJ_M" -maxdepth 4 -name restore-task.conf > /tmp/zj-conf-cands
+            while IFS= read -r _c; do
+                [ -f "$_c" ] || continue
+                conf_is_credible "$_c" || continue
                 # 只有 cp 真成功才说 found（否则"found conf"会骗人：/tmp 里其实
                 # 没有、下游还要白找一轮）—— cp 失败必须留下 WARN（PIT-147）
-                if cp "$_c" /tmp/restore-task.conf 2>/dev/null; then
+                if cp "$_c" /tmp/restore-task.conf; then
                     say "found conf: $_c"
+                    break
                 else
                     say "WARN: conf copy failed: $_c (fall back to task log)"
                 fi
-            fi
+            done < /tmp/zj-conf-cands
+            _nc=$(wc -l < /tmp/zj-conf-cands)
+            [ "$_nc" -gt 0 ] && [ ! -f /tmp/restore-task.conf ] && \
+                say "ignored $_nc conf candidate(s): none anchored to software dir (stale copy?)"
+            rm -f /tmp/zj-conf-cands
             umount "$ZJ_M" 2>/dev/null
             [ -f /tmp/restore-task.conf ] && break
         fi

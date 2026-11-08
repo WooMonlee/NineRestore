@@ -3,6 +3,45 @@
 > 版本号唯一来源是 `src/common/version.h`；发布时 `version.h` / git tag / `dist/version.json` 三处同源。
 > 命名规则见 `docs/37-版本命名规范.md`（测试版 `1.0 beta.N` / 内部 `1.0.0.N` / 文件 `九转大还原1.0-beta.N.exe`）。
 
+## 1.0 beta.7（2026-11-08，内部 `1.0.0.7`）
+
+> 测试版（Beta）。修 beta.6 复验未过的 2 项（P1-b 陈旧契约 / P3a returnold 回执），
+> 其余 5 项保持通过。
+
+### 1. P1-b（高）陈旧契约被当成"有任务"
+
+- 根因：救援层兜底搜索 `find "$ZJ_M" -maxdepth 4 -name restore-task.conf | head -1`
+  只看**第一个命中**，不看来历。测试台留 `~old`（无暂存任务）时，先抓到
+  `~old\restore-task.conf`、后抓到 `Program Files\SysRecover\logs\restore-task.conf`，
+  根目录确认无 conf 仍被抓 → `_ran=1` → 无人值守 120s 自动选 `[2]`（应为 `[3]`）。
+- 修复：新增 `conf_is_credible()`，候选逐个过可信度，只认"写者会写的位置"：
+  - 目录里有 `SysRecover.exe` / `SysRecoverUI.exe`（程序目录），或目录名就是
+    `ZJRESTORE`（exeDir 不可写时的备用写点）；
+  - `action` 必须是 `restore` / `returnold`，且带 `target_offset` 或 `target_guid`；
+  - 明确排除 `~old` / `~new` 交换残留与 `logs` 日志归档子目录；
+  - 有主契约 `_zjresy*.log` 时，再核对 `target_offset`/`target_guid` 一致。
+  搜索循环改为"收集候选 → 逐个过滤 → 第一个可信才 `cp`"；全部不可信时明确
+  `ignored N conf candidate(s)`，不再静默拿陈旧副本当任务。
+- 其它分支核查：`scan_for_log` 只在分区根匹配 `_zjresy*.log`（不递归），主契约 conf
+  就在同一日志分区根；`~new` / `zjswap.sh` / `zjswap-undo.sh` 均把契约文件排除在
+  交换外。无同类漏洞。
+- 新增 `tests/test_conf_credible.sh`（12 条，已进 `make check`）：`~old`/`~new`/`logs`
+  拒绝、程序目录/`ZJRESTORE` 接受、无锚点/非法 action/缺目标身份/身份不一致拒绝、
+  以及"禁止退回 `head -1`"的静态断言。
+
+### 2. P3a（中）returnold 成功无回执
+
+- 根因：`zjrestore-lite.sh` 置 `RESULT=OK; STEP=done` 后只 `persist_log` 就 `exit 0`；
+  EXIT trap 的 OK 分支只写软件目录 + ESP。BIOS 机器没有 ESP、软件目录又可能因挂载点
+  变化写不到 → 状态只活在内存里；`init` 又因 `/tmp/zj-bb-final` 存在跳过兜底 →
+  C:/D:/F: 根都没有 `ZJRESTORE-status.txt`。
+- 修复：新增 `write_success_receipt()`（软件目录 `logs\` + 兜底窝 `ZJRESTORE-logs\`，
+  两处都失败才 `WARN`），apply 成功与 returnold 成功共用同一 helper；returnold 成功后
+  依次 `persist_log` → `write_success_receipt` → `bb_esp_drop` → `sync` → `exit 0`。
+  `result=OK` / `step=done` 可被外部读到。
+- 新增 `tests/test_success_receipt.sh`（5 条，已进 `make check`）：两处直写点、仅兜底窝、
+  全失败 `WARN`、静态断言 returnold 成功块调用 helper、apply/returnold 共用同一实现。
+
 ## 1.0 beta.6（2026-11-08，内部 `1.0.0.6`）
 
 > 测试版（Beta）。修测试台实测的 4 个缺陷（P1 无人值守死循环优先），并把打包/共享
