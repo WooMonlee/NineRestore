@@ -3,36 +3,36 @@
 > 目的：为「九转还原 1.0」的重构提供可对照的基线证据。后续阶段每次改动都应能与本报告的数值/结果对比。
 >
 > 记录时间：2026-11-05（Asia/Shanghai）
-> 记录环境：本机（Windows，非 CI），工作目录 `D:\Prog\_Project\9SinoRecover`
+> 记录环境：本机（Windows，非 CI），工作目录为仓库根目录（下文记作 `<仓库根>`）
 > 代码基线：SysRecover 0.9.96（原仓库提交 `8401cdab2de08ba5d12871a9c59edf0b1cfbdf58`），导入提交 `40a12e6`
 
 ## 1. 工具链
 
 | 组件 | 版本 / 路径 |
 |---|---|
-| x64 编译器 | `x86_64-w64-mingw32-g++` 14.2.0（x86_64-posix-seh-rev0，MinGW-Builds），`D:\Prog\ProgIDE\mingw64\bin` |
-| x86 编译器 | `i686-w64-mingw32-g++` 14.2.0（i686-ucrt-posix-dwarf，Brecht Sanders r3），`D:\Prog\ProgIDE\mingw32\bin` |
+| x64 编译器 | `x86_64-w64-mingw32-g++` 14.2.0（x86_64-posix-seh-rev0，MinGW-Builds），由构建 PATH 提供 |
+| x86 编译器 | `i686-w64-mingw32-g++` 14.2.0（i686-ucrt-posix-dwarf，Brecht Sanders r3），由构建 PATH 提供 |
 | make | `mingw32-make`（随 mingw64 提供） |
-| Python | 3.13.7（仅构建脚本/门禁使用），`C:\Users\Administrator\AppData\Local\Programs\Python313\python.exe` |
-| bash | MSYS2 `D:\Prog\ProgIDE\msys64\usr\bin\bash.exe`（仅供 `make check` 的 shell 门禁） |
+| Python | 3.13.7（仅构建脚本/门禁使用），由构建 PATH 提供 |
+| bash | MSYS2（仅供 `make check` 的 shell 门禁），由构建 PATH 提供 |
 | git | 2.56.0.windows.4（MinGit 便携版） |
 
-## 2. 可复现命令（PowerShell，`cwd = D:\Prog\_Project\9SinoRecover`）
+## 2. 可复现命令（PowerShell，`cwd = <仓库根>`）
 
 > 关键环境约束：**构建用的 PATH 不能包含 bash**，否则 GNU Make 会改用 `sh` 执行 cmd 语法的配方而失败；`make check` 反而需要 bash 在 PATH 上。因此分两条 PATH 组合执行。
 
 ```powershell
 # 构建/打包用（无 bash）
-$env:PATH = "D:\Prog\ProgIDE\mingw64\bin;D:\Prog\ProgIDE\mingw32\bin;C:\Users\Administrator\AppData\Local\Programs\Python313;" + $env:PATH
-mingw32-make -f Makefile PYTHON='C:/Users/Administrator/AppData/Local/Programs/Python313/python.exe' ARCH=x64 all
-mingw32-make -f Makefile PYTHON='C:/Users/Administrator/AppData/Local/Programs/Python313/python.exe' ARCH=x86 all
-mingw32-make -f Makefile PYTHON='C:/Users/Administrator/AppData/Local/Programs/Python313/python.exe' package
+$env:PATH = "<mingw64>\bin;<mingw32>\bin;<python>;" + $env:PATH
+mingw32-make -f Makefile PYTHON='<python>' ARCH=x64 all
+mingw32-make -f Makefile PYTHON='<python>' ARCH=x86 all
+mingw32-make -f Makefile PYTHON='<python>' package
 
 # 门禁/冒烟用（含 bash）
-$env:PATH = "D:\Prog\ProgIDE\msys64\usr\bin;" + $env:PATH
-mingw32-make -f Makefile PYTHON='C:/Users/Administrator/AppData/Local/Programs/Python313/python.exe' check
-mingw32-make -f Makefile PYTHON='C:/Users/Administrator/AppData/Local/Programs/Python313/python.exe' ARCH=x64 smoke-cli
-mingw32-make -f Makefile PYTHON='C:/Users/Administrator/AppData/Local/Programs/Python313/python.exe' dist-check
+$env:PATH = "<msys2>\usr\bin;" + $env:PATH
+mingw32-make -f Makefile PYTHON='<python>' check
+mingw32-make -f Makefile PYTHON='<python>' ARCH=x64 smoke-cli
+mingw32-make -f Makefile PYTHON='<python>' dist-check
 ```
 
 ## 3. 实测结果（阶段 1 收尾时）

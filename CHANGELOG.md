@@ -1,7 +1,337 @@
 # 更新日志
 
 > 版本号唯一来源是 `src/common/version.h`；发布时 `version.h` / git tag / `dist/version.json` 三处同源。
-> 命名规则见 `docs/37-版本命名规范.md`（测试版 `1.0 beta.N` / 内部 `1.0.0.N` / 文件 `九转大还原1.0-beta.N.exe`）。
+> 命名规则见 `docs/37-版本命名规范.md`（测试版 `1.0 beta.N` / RC `1.0 RCN` / 内部四段继续递增）。
+
+## 1.0 RC2（2026-11-08，内部 `1.0.0.16` ↔ 对外 `1.0 RC2`）
+
+> 本版只修 RC1 真机（GPT + MBR 各一轮）报告的 4 项缺陷，不加功能、不改已通过的流程。
+> 文件名 `九转大还原1.0-rc.2.exe`；界面 `1.0 RC2`；内部四段 `1.0.0.16`
+> （version.json / rescue-build.txt / initramfs 内戳 / exe 资源四处一致）。
+> 每项都写**根因代码位置**，不是"改了就好"。
+
+### 1. GPT 上分区列表顺序错 + 推荐系统盘选中数据盘（P0，PIT-245）
+
+- 真机：GPT 盘（DiskGenius 删 C 后重建）里 C 显示「硬盘的分区 0/4」、PE 的 D 显示「0/1」
+  并被默认推荐；同一盘改回 MBR 后恢复「C 在前、推荐 C」。
+- 根因一：`EnumerateDisks` 把 `IOCTL_DISK_GET_DRIVE_LAYOUT_EX` 的 `PartitionList` **原样入列、
+  不排序**，而那是**分区表槽位顺序**（GPT 的 `PartitionNumber` 即槽位号），不是物理顺序；
+  UI 又直接显示 `partNumber`。重建分区只占空槽——老 D 保持槽位 1，新 ESP/MSR/C 落 2/3/4
+  → D 显示 `0/1`、C 显示 `0/4`。
+- 根因二：`PopulatePartitions` 按 `isSystem` 选默认行、没有就退回第 0 行；PE 里
+  `%SystemRoot%=X:` → 所有分区 `isSystem` 恒假 → 推荐第 0 行 = D。
+- 修法：枚举后按 `StartingOffset` 升序 `stable_sort` 并赋物理 `ordinal`（1-based，含 ESP/MSR），
+  UI 只显示它；`partNumber` 保留给暂存契约/引导定位。推荐改为**内容评分**：
+  isSystem 1000 > `winload.exe/.efi` 900 > `config\SYSTEM` 800 > `ntoskrnl` 700 >
+  `\Boot\BCD` 600 > `\Windows` 500，卷标 +5；同分比 `config\SYSTEM` LastWriteTime，
+  再退 ordinal；全不像退第 0 行。判据与分区号无关，GPT/MBR 都得「C 在前、C 被推荐」。
+- 共用性：枚举只有 `disk.cpp` 一份、界面只有 `main_form_image.cpp` 一套，BIOS/UEFI/PE/Windows
+  全走同一段，**只改一处**。无需用户再跑真机取证（结论由代码 + 报告的槽位号互证）。
+
+### 2. BIOS 路径中文仍是白底问号（UEFI 正常，PIT-247）
+
+- 机制（为什么 UEFI 好、BIOS 坏）：UEFI 有 efifb/simpledrm → fbcon，接受 PSF1 mode 0x03
+  （512 字形 + Unicode 表），PUA 码点映射到槽 256+，内核按表找字形；BIOS 是 **vgacon**
+  （VGA 文本模式、8bit 字符格、无 framebuffer），`setfont` 返回 0 只证明字体文件被接受，
+  **不证明 PUA 可寻址** → 内核逐字画白底 `?`。RC1 只看覆盖表，没区分控制台后端。
+- 修法：新增 `zj_fbcon()`（`/sys/class/graphics/fb0` 存在才为真，`ZJ_FBCON` 可覆盖供测试）；
+  vgacon → `ZJ_FONT_RC=7`、不启用中文；`zj_console_cjk` 追加 `zj_fbcon || return 1`
+  （双保险）；`say/say2` 无中文能力时只出英文/ASCII，**不再出现问号**。
+  `FONT:` 状态行仍上屏并进日志（`state=skip rc=7 reason=vgacon…`），不静默。
+- 门禁：`check-shell.py` 新增 **C9**：PRODUCT 脚本非注释行含非 ASCII 且直接 `echo/printf/cat`
+  或写 `/dev/tty*` 即失败（必须走 say），并静态钉住 `zj_fbcon`/`rc=7` 分支；
+  `test_say_wrap.sh` 第 ⑫ 例（`ZJ_FBCON=0` → 不启用中文、只出英文）。
+
+### 3. 还原完成后再进救援：没有任务却弹中文 1/2/3（PIT-248）
+
+- 根因：`init` 把"存在上次任务契约（`restore-task.conf` / `~old`）"一律当成"上次任务未确认
+  完成"进 triage；成功还原后契约已消费（`_ran=0`），常驻菜单却在 → 三选一。语义被扩大。
+- 事实：一次成功还原后**不会留下可直接重放的任务**；UEFI↔MBR 互转还会换掉菜单环境。
+  "没有任务"是正确状态，错的是收场方式。
+- 修法：`_ran=0` 改为 `hand_back_bootorder` → `say2 "没有还原任务,正在重启"` →
+  `sleep 5` → 重启，用户无感回 Windows；`_ran=1`（上次任务真未确认）**保留** triage。
+  有任务路径（Windows 侧刚指定完）不变。
+
+### 4. 启动项命名统一为 `NineRestore`（PIT-246）
+
+- 溯源：`NineRestore` 由 **beta.14（PIT-239）** 起生成，三条路径同源 `bootnames.h`
+  （UEFI `Boot####` desc / BIOS BCD desc / GRUB `menu.lst` title）；`SysRecover` 是 beta.13
+  及更早的旧名。RC1 的 BCD 描述还是 `NineRestore Recovery Environment`，被 bootmgr 截成
+  "NineRestore Recover Ev.."。
+- 并存根因：UEFI `FindOurEntry` **只按当前描述名**匹配 → 升级后旧名条目找不到 → 新建一条，
+  清理也只删一条；新旧条目指向**同一份** `\EFI\ZJRESTORE\` 载荷（同一内容）。
+- 修法：`EntryKindOf` 认当前名 + 历史名，`IsOurs` 再要求路径含 `ZJRESTORE`；安装时复用并
+  删同 kind 重复项（`removed duplicate Boot%04X`），卸载循环删净；
+  `CleanupStaleUefiEntries` 不再要求 `desc == 当前名`；一次项统一 `NineRestore Temporary Restore`，
+  `init` 同时识别新旧名（UTF-16LE / ASCII 两种 hex），升级后能 disarm。
+- 门禁：新增 `tools/check-brand.py`（B1–B4，已进 `make check`）：三处同名、GRUB 必须引用
+  常量、src/bootfiles/lang/README 不得出现旧可见名（历史名只允许 `bootnames.h` LEGACY 列表与
+  带 LEGACY 注释的识别代码）、init 新/旧临时项判据齐备。
+- **保留的 `SysRecover` 实体（说明）**：exe 文件名、`%LOCALAPPDATA%\SysRecover`、
+  `ProgramData\SysRecover`、`SYSRECOVER_NAME` 程序内名 —— 是代码/资源实体，不是引导项显示名。
+
+### 5. 还原后菜单消失是否符合设计（回答真机第 7、8 条）
+
+- MBR/BIOS 菜单文件（`grldr`、`grldr.mbr`、`menu.lst`、`ZJRESTORE\`）位于系统盘根目录，
+  整盘替换 C: 必然被镜像覆盖 → 菜单消失；UEFI 菜单在 ESP，还原不动 ESP → 菜单保留。
+  这解释了两种形态的差异，**不是"设计上撤掉菜单"**。
+- 补偿沿用 PIT-243：擦盘前 RAM 暂存 → 还原后写回新系统根 + `menu-redeploy.txt`（`bcd=pending`）
+  → **本程序下次启动时** `EnsureMenuAfterRestore()` 重装。因此消失只发生在"还原后到下次
+  启动本程序"之间；若用户不再运行本程序，需手动点一次「安装到启动」
+  （完成页/README 已写明，属已知限制）。
+
+### 6. 验证状态
+
+- **已验**：`make check` 全绿（含新增 `check-brand`、`check-shell` C9、`test_say_wrap` 12 例、
+  `gen-rescue-font --check`）；`payload-gate`；x64/x86 编译通过；版本四处一致；
+  `check-dist`。
+- **待真机确认**（清单 `docs/35` §O）：GPT 下 C 在前且默认推荐（PE 与 Windows 各一次）；
+  BIOS 下 `FONT: rc=7` 且不再出现白底问号；二次进菜单一句话自动回 Windows；固件菜单只剩一条
+  `NineRestore`。
+
+## 1.0 RC1（2026-11-08，内部 `1.0.0.15` ↔ 对外 `1.0 RC1`）
+
+> 首个 RC。本版只修**真机实测缺陷**，不加功能、不改已通过的渲染路径与安装流程。
+> 文件名 `九转大还原1.0-rc.1.exe`；界面 `1.0 RC1`；内部四段 `1.0.0.15`
+> （version.json / rescue-build.txt / initramfs 内戳 / exe 资源四处一致）。
+> 内部号自此**只增不减**（下一包 1.0.0.16 ↔ 对外 RC2）。
+
+### 1. 汉字白底方块：根因是**字模覆盖范围**，不是字体没装上（PIT-238，P0）
+
+- 真机决定性证据（ThinkPad）：镜像名「不忘初心」里「不」在部分位置正常，
+  「忘」「初」「心」始终白底方块 —— 若是 `setfont` 失败，四个字会一起坏。
+- 根因：字模只收**自有提示**用到的 151 个汉字（「不」在库内）；用户数据
+  （镜像名/卷标/路径/机型/分区根文件名）里的任意汉字没有字形。
+  虚拟机只验自有文案，撞不到这个坑。
+- 主修法：**救援屏不渲染用户中文**。镜像屏只给类型/大小/盘符设备，完整文件名只落
+  日志；失败屏（`image not found`）、分区根列表、wimlib 输出、`~new` 残留列表
+  一律走占位符，原文进日志。
+- 兜底：`say()` 映射后逐字符判覆盖（`zj_has_unmapped`，PUA 之外的非 ASCII 前导
+  字节即"无字形"）→ 整行压 ASCII，连续库外串换成一个 **`.`**（绝不是问号/豆腐块）；
+  日志记 `screen: omitted N unmapped char(s); raw: …`。
+- 可校验：`gen-rescue-font.py --check` 增加 `check_dynamic_samples`（真机样例
+  `C:\images\不忘初心\win10.wim`），并静态要求 `zjlog.sh` 占位符为 `.`；
+  `SAY_RE` 扩到 `say2`。回归 `tests/test_say_wrap.sh` 11 例全绿。
+- `FONT: loaded … / FAILED rc=N reason=…` 仍打屏并进日志（降为防御性可观测）。
+
+### 2. 启动菜单名与提示文案统一（PIT-239）
+
+- 旧 `SysRecovery Environment` / 「SysRecover」全部改为 **`NineRestore`**（标题、BCD 描述、
+  提示、状态栏、Tooltip、`en.lang`）；旧条目按同 GUID 刷新，不并存两份。
+- BIOS 提示补上进入方式：**开机时连续按 ↑/↓ 进入选单**（原来只说"在启动菜单选"）。
+- 救援层自身文案（首行标题、`AUTO-RECOVER`、恢复菜单、上次任务未确认）里的
+  「SysRecover」一并改为 **NineRestore**；`boot hand-back` 提示不再写死 ESP（MBR 机器也适用）。
+- 升级自愈：`RefreshBootLayerNames()` 在启动时只重写小文本（menu.lst 标题/内核参数 +
+  BCD 描述），没装过则完全不写盘。
+
+### 3. 不再改写用户启动等待时间（PIT-240）
+
+- 删除 `ops_staged.cpp` 里把 `{bootmgr} timeout` 补成 1 秒的整段逻辑；0 或缺失都保持原样。
+
+### 4. 清除启动菜单时清理 `~new`（PIT-241）
+
+- 新增 `CleanupMenuStaging()`：只删带 `.zj-done` / `.zj-undo-phase` /
+  `.zj-universal-failed` 标记的 `~new`；无标记保留并弹窗告知；`~old` 永不触碰。
+- 接在"清除菜单"和"删除旧系统自删"两条路径上。
+
+### 5. 压掉进救援前的内核噪声（PIT-242）
+
+- BIOS `menu.lst` / UEFI `grub.cfg` 内核行加 `quiet loglevel=3`（保留 `nvme_core.io_timeout=1`）；
+  `say_dmesg` 改为只进日志。用户第一眼看到的是我们的 `SR:` 行，不是内核行。
+
+### 6. 还原后自动重建启动载荷与菜单（PIT-243）
+
+- 现象：还原替换 C: 后 `ZJRESTORE\`、`grldr`、`grldr.mbr` 与 BCD 条目全被镜像覆盖，
+  连续两次开机**静默回落 Windows**，用户进不了救援且无提示。
+- 这是整盘替换的必然结果（设计如此），因此做三层处置：
+  1. **擦盘/交换前**把载荷收进 RAM（含 RAM 余量检查，空间不足则明确告警）；
+  2. 还原成功、boot 文件补齐后**写回新系统根**（`ZJRESTORE` + `grldr/mbr/menu.lst`）；
+  3. BCD 条目 Linux 改不了 → 落 `<系统盘>\ZJRESTORE\menu-redeploy.txt`
+     （`bcd=pending`）；Windows 侧启动时 `EnsureMenuAfterRestore()` 重装，
+     成功改 `bcd=done`、失败保留 pending 并写日志（下次启动重试）。
+- 完成页新增 `MENU:` 行（payload-ok / no-payload / WARN 三态），不再静默。
+- **已知限制**：若新系统里没有九转还原（或不在数据盘），BCD 条目需用户打开程序点
+  「安装到启动」一次；完成页 WARN 行已写明。
+
+### 7. 图标替换
+
+- `resources/SysRecover.ico`（120,230 B，SHA256 `5335ffc8…44d8`）替换为重新绘制版：
+  16/24/32/48/64/128/256 七帧齐全，小尺寸下"9"轮廓更清晰；`icon-source.ico` 同步。
+
+### 8. 真机已确认通过（不动）
+
+- MBR/BIOS 双盘：U 盘勾选后出现、取消后消失；分区列表完整；扫描后安装与解压后安装均正常。
+- GPT 转换后 UEFI 装菜单、检查后安装、解压后安装均成功；ThinkPad 热键 `F12 / Fn+F12` 正确。
+
+## 1.0 beta.13（2026-11-08，内部 `1.0.0.13`）
+
+> 测试版（Beta）。beta.12 的清点屏**渲染已通过**（每行 72–76 列、续行全带 `SR: `），
+> 本版只修测试台顺带看到的**两处内容错误**：设备路径拼前缀、空值占位。
+> **渲染层（`zjlog.sh` / `say` / 折行 / 进度）一行未动**，避免把已通过的项打回去。
+> 不提交 git、不做 GitHub 推送准备。
+
+### 1. 设备路径统一归一化，杜绝 `/dev/dev/sdb1`（PIT-237）
+
+- 现象（beta.12 清点屏）：`PROBE` 行出现 `/dev/dev/sdb1` —— 设备名已带 `/dev/` 前缀，
+  某处又拼了一次。
+- 排查结论（如实记录）：**beta.12 源码与包内 initramfs 对 `/dev/dev` 均为 0 命中**，
+  现有 `list_parts` 都是 `basename` 后拼 `/dev/`，当前形态下无法复现该字面量。
+  但它属于典型的"上游已传完整路径、下游又加前缀"的错误，只要允许两种形态混用就会复发。
+- 处置：新增单点归一化 `zj_dev()` / `zj_devname()`（`bootfiles/alpine/init` 与
+  `bootfiles/zjrestore-lite.sh` 各一份，规则相同）：
+  - **对外一律用完整路径 `/dev/<name>`**；拼 `/sys/class/block/*` 一律用裸名。
+  - 裸名、`/dev/sda1`、误拼的 `/dev/dev/sda1` 三种输入都归一到 `/dev/sda1`。
+  - 所有原先手拼 `"/dev/$x"` 的位置改为走归一化：init 的 `list_parts`（3 处）、
+    `mnt_dev` 入口、`dev_offset_sectors`、sysfs `size`；lite 的 `list_parts`（3 处）、
+    `mnt_dev` 入口、`dev_size`、`bb_part_removable`、`dev_offset`（含 `_disk`）、
+    `TARGET_DEV` 读入。`/proc/partitions` 兜底仍在 awk 里拼（第 4 列必为裸名）。
+  - 回归：`tests/test_dev_path.sh` 断言两个脚本不再手拼、且三种输入归一正确。
+
+### 2. 清点屏空值显式化，不留 `?` 与空白
+
+- `off=?` 根因（已复现）：`blkid -s PART_ENTRY_OFFSET -o value` 在部分 **vfat/MBR
+  分区上返回空**（beta.12 演练日志 `PROBE … off=?` 可复现）。不是变量名拼错。
+  - 改法：**sysfs `start`×512 为主来源**（GPT/MBR/EBR 逻辑盘全准），blkid 仅作后备
+    并换算成字节（与契约 `target_part_offset` 同单位）。
+  - 都拿不到时输出 `off=n/a(no-sysfs-start,no-blkid-offset)`。
+- `root=` 空白：挂载点为空目录时输出 `root=n/a(empty-dir)`，有内容仍输出 `root=[…]`。
+- 同类空值一并显式化：
+  - `size=n/a(no-sysfs-size)`、`fs=n/a(no-signature)`、`err=n/a(no-stderr)`。
+  - `dmi:` 任一字段读不到 → `n/a(no-sysfs-value)`（不再出现 `dmi:  |  |  | bios` 空白）。
+  - `cmdline:`、`nvme dmesg: n/a(no-nvme-pcie-lines)`、`block devs: n/a(no-block-devices)`、
+    `partitions: n/a(no-partitions)`、控制器 `n/a(no-storage-usb-controllers)` /
+    PCI ID `n/a(no-pci-ids)`。
+  - 两个救援脚本里所有 `${x:-?}` / `unknown` 占位替换为 `n/a(原因)`：
+    `found log` 的 size、身份不符的 serial/guid、`target_by_offset` 的 size/want、
+    `bb_mount` 的 fs、reparse 的 size/rc/entries、`TARGET_FS`、apply fs、
+    `RESULT` 的 rc/STEP。
+
+### 3. 门禁与实测
+
+- **渲染层未改动**：`bootfiles/zjlog.sh`、`say`、`zj_fold`、进度渲染在本版零 diff。
+- 新增 `tests/test_dev_path.sh`（**4 例**，进 `make check`）：归一化函数静态存在性、
+  `list_parts` 已归一、无 `${x:-?}`、无字面 `dev=/dev/`、三形态归一实测、空值文案完整。
+- `make check` 全绿（含 shell C8、`test_say_wrap` 7 例、`test_dev_path` 4 例）。
+- QEMU（beta.13 initramfs，重建演练盘）：
+  - swap 完整还原 **PASS**（13 项）；日志 `rescue build 1.0.0.13`。
+  - 清点屏 `PROBE` 全为完整路径：`dev=/dev/sda1`、`/dev/sda2`、`/dev/sda3`、`/dev/sr0`；
+    **0 处 `/dev/dev`**。
+  - `off=` 实测 `1048576` / `105906176` / `822706176`；`sr0`（整盘/无分区）输出
+    `off=n/a(no-sysfs-start,no-blkid-offset)`、`fs=n/a(no-signature)`、`err=no-filesystem`。
+  - `root=[…]` 全部有内容；`dmi:` 的 QEMU 空 board_name 显示 `n/a(no-sysfs-value)`。
+  - SR 前缀行最大 **76 列、0 行超 76**，续行仍带 `SR: `（渲染未回退）。
+- 四点版本一致 `1.0.0.13`；包 **41,855,809 B** /
+  `58A4C416A4FBE839E018185E12E666E84CF60A171DD7DFE3ADA31953E13B9245`；
+  initramfs **17,424,728 B** /
+  `6AB92D79D13692C06317168B3C096A8FE5C273995E55B35B703B8909A94166C5`；
+  包内 `zjfont.psf` 10,014 B / `93A51D67…DFA8E1424` 未变；载荷 74 项；`check-dist: PASS`。
+- 历史包 beta.1–beta.12 未改动。测试台将用 beta.13 复验第 6/7/8 项。
+
+## 1.0 beta.12（2026-11-08，内部 `1.0.0.12`）
+
+> 测试版（Beta）。本版 = beta.11 的两件（**进度单行原地刷新**、**求助邮箱
+> `ms_w@qq.com`**）+ 测试台批次 1 报的**长行硬折行**修复。不提交 git、不做
+> GitHub 推送准备，直接真机验证。
+
+### 1. 屏幕行宽统一 ≤76 列，续行带前缀（PIT-236）
+
+- 现象（beta.10 清点屏）：`partitions:` / `block devs:` 正常，但 `dmi:`、
+  `PROBE … root=[...]` 等长行在 80 列终端硬折成 2–3 行，**续行没有 `SR: ` 前缀、
+  从第 0 列起排**，左边缘错乱。
+- 根因：与 PIT-234 同类——行宽超过终端列数，靠终端自动折行；续行不会继承前缀。
+- 改法（单点收口，不只治一屏）：`say` 输出前统一压到 **76 列**（与进度条同口径）。
+  - 纯 ASCII 行超宽时按词/字段边界折行（空格、`,`、`|`、`/`、`;`、`=`），
+    **每条续行重复 `<PREFIX>: `**；找不到分隔符才硬切。
+  - 覆盖 `partitions:`、`block devs:`、`dmi:`、`PROBE`、分区/卷标列表、
+    镜像路径、日志路径等所有走 `say` 的拼接行。
+  - 静态行不额外加 `\n`：只把一条超宽行拆成多条带前缀的行，不刷屏。
+- 日志完整：`say` 仍把**原始整行**写入 `$LOG` / probe 文件，屏幕压缩不丢原文；
+  折行只发生在控制台分支。
+- 中文：中文行不参与 ASCII 折行（构建期 C8 门禁保证字面量 ≤78 列，实测最宽 63）。
+  **如实说明残留边界**：运行期"中文 + 超长 ASCII 字段"混拼的行，busybox 无法按
+  显示列宽稳定切分，仍可能超宽；清点屏等实际长行均为 ASCII，已被覆盖。
+- 回归门禁：新增 `tests/test_say_wrap.sh`（**7 例**，已进 `make check`）——
+  PROBE 长行、block devs 多盘多分区、无分隔符长 token、短行不变、日志原文保留、
+  中文行不拆、口径 76 静态断言；断言每行 ≤76 且每条续行有前缀。
+  运行期拼串本身无法静态扫描，这一点用测试断言渲染函数来兜。
+
+### 2. beta.11 两件（随本版一起发）
+
+- 进度单行原地刷新（PIT-234）：屏幕一行 `ZJ: [####…] NN% apply`、76 列内 `\r`
+  覆写；原始行与每级进日志；串口/非 tty/重定向降级每 10% 一行。
+- 求助邮箱 `ms_2@qq.com` → `ms_w@qq.com`；`grep ms_2@qq.com` 0 命中；字模未变
+  （10,014 B / `93A51D67…DFA8E1424`，`--check` 36 条 / 151 汉字 / 397-512 / 最宽 63 列）。
+
+### 3. 门禁与包
+
+- `make check` 全绿（含新 `test_say_wrap`，摘要见 `docs/34` §20）。
+- 实测（QEMU，beta.12 initramfs）：
+  - swap 完整还原 **PASS**（13 项）；两段串口日志里 ASCII 前缀行共 **121 + 53 行**，
+    **最大 76 列、0 行超 76**；`PROBE … root=[EFI,…]` 折行后每行都带 `SR: `。
+  - 块引擎清点屏日志 **369 行** ASCII 前缀行，**最大 76 列、0 行超 76**；
+    `dmi:` 60 列、`partitions:` 55 列、`block devs:` 39 列（VM 单盘；多盘多分区
+    形态由 `test_say_wrap` ② 覆盖）。
+- 四点版本一致 `1.0.0.12`；包 **41,852,918 B** /
+  `1FE021FE1EEC34033B579E4835B0C533A39C74026A0555C191F5ABDD558105CA`；
+  initramfs **17,422,143 B** /
+  `D98CA26D3E137E7DD3EC41361454944D31AADB240E6DCD9D0094A2085B3E56C2`；
+  包内 `zjfont.psf` 10,014 B / `93A51D67…DFA8E1424` 与仓库逐字节一致；载荷 74 项。
+- 历史包 beta.1–beta.11 未改动。
+
+## 1.0 beta.11（2026-11-08，内部 `1.0.0.11`）
+
+> 测试版（Beta）。本批两件事：**救援层进度改单行原地刷新**（PIT-234）、
+> **求助邮箱更正 `ms_2@qq.com` → `ms_w@qq.com`**。进度行/诊断行仍为英文（用户确认不做
+> 第二批中文化）。按用户要求**本版不提交 git、不做 GitHub 推送准备**，直接出包真机验证。
+
+### 1. 进度改为单行原地刷新（PIT-234）
+
+- 根因（真机 VM 复现）：旧 `wim_progress` 把 wimlib 原始行（如
+  `Extracting file data: 12.3 MiB of 129.4 MiB (9%) done`）整段拼在 `ZJ: [####----] 9%`
+  后面，实测样例 **83 列** > 80 → 控制台折行；`\r` 只能回到折行后的最后一行行首，
+  于是每个百分比各占一行往下滚。行尾不清空 → 还会留残影。
+- 改法：屏幕只渲染**一行** `ZJ: [####…] NN% <stage>`，补空格到 **76 列**后 `\r` 覆写；
+  百分比、进度条、阶段名都在这一行内更新。原始 wimlib 行进 `/tmp/apply.out`，
+  每个百分比进 `/tmp/apply.progress.log` 与 `$LOG`（日志不被覆写吃掉）；结束时补一个
+  换行，**留一行最终结果**，无半行/残影。
+- 降级（注释已写明条件）：仅当 stderr 是 tty **且** `/sys/class/tty/console/active`
+  为本地 VT（`tty0`…）才原地刷新；串口（`ttyS*`/`ttyUSB*`）、非 tty、active 为空
+  → **每 10% 一行**稀疏打印，不刷屏。QEMU `-nographic` 走的就是这条降级路径。
+- 验证（2026-11-08）：
+  - 真实 awk 实测（直接抽脚本里的 awk 程序）：101 级输入 → 原地模式 **101 个 `\r`、
+    3 个换行（2 个头行 + 1 个结尾行，中间无新增）**、最大行宽 **76**；降级模式
+    **10 行**（10%…100%）。
+  - 日志完整性：101 个百分比 **101 行、0..100 无缺级**。
+  - QEMU swap 完整还原（`run-swap-drill.ps1`）：**13 项检查全部 PASS**（含 `-u` 无 rc=2
+    中断），无残留半行。
+  - QEMU 块引擎大镜像（120 MiB）：wimlib 原始进度 **129 行** → 进度日志 **129 行**
+    （1:1，101 个不同百分比，无丢级）；串口屏 **10 行**（降级符合预期）。
+- 顺带修（演练暴露，非产品行为变更）：兜底日志窝选盘（`pick_bb_home_devs`）用到的
+  `dev_size` 定义晚于 `zz-blackbox` 分支 → `dev_size: not found`，函数移到前面
+  （PIT-235）；`mk-drill.py` 的契约改放 `ZJRESTORE/restore-task.conf`（真机落点），
+  否则 init 的可信度规则会把它当 stale copy 拒掉、swap 演练退化成 no-task。
+
+### 2. 求助邮箱更正
+
+- `ms_2@qq.com` → **`ms_w@qq.com`**（下划线后是字母 `w`），QQ 群 `1128237828` 不变。
+- 覆盖：救援层 `bootfiles/alpine/init`（1）、`lang/en.lang` 中英键值（4）、
+  `tools/i18n-en.py`（4）、GUI `src/gui/main_form_notice.cpp`（2）、
+  `README.md` / `README.en.md`（各 1）、`docs/33`（3）、`docs/34` / `docs/35` /
+  `docs/HANDOVER.md`（1/1/2）、`temp` 内旧快照（12）；`dist/lang/en.lang` 重建后 4。
+- 自查：`grep -rn "ms_2@qq.com"` **0 命中**；`ms_w@qq.com` 仓库 **32 处** + dist **4 处**。
+- 字模：`w` 是 ASCII（0x77），`gen-rescue-font.py --check` 复跑仍
+  **36 条中文提示 / 151 汉字 / 397-512 字形 / 最宽 63 列**，`zjfont.psf` 哈希未变。
+
+### 3. 门禁与包
+
+- `make check` 全绿（摘要见 `docs/34` §19）。
+- 四点版本一致 `1.0.0.11`：`dist/bootfiles/rescue-build.txt` / `dist/version.json` /
+  initramfs 内 `zjrescue-version` / exe 资源；文件名 `九转大还原1.0-beta.11.exe`。
+- 包 **41,850,929 B** / `0ECE0EE396D3AA3252719B0909484905AE1CC908CA14B2DA40F6D1A6F791527C`；
+  initramfs **17,420,963 B** / `A4A0CF8A50A7B34BCFEC2385B33C1DA48CD62948FF9FB7658708B5D9C7A586E3`；
+  initramfs 内 `zjfont.psf` 10,014 B / `93A51D67…DFA8E1424` 与仓库逐字节一致；
+  载荷 74 项；历史包 beta.1–beta.10 未改动。
+- VM 逐项复验清单见 `docs/35` §L。
 
 ## 1.0 beta.10（2026-11-08，内部 `1.0.0.10`）
 

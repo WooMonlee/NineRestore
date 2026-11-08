@@ -294,7 +294,10 @@ $(LAUNCHER_CHECK): src/launcher/launcher.cpp $(VI_X86_DIR)/launcher_check.o
 
 clean:
 	-del /Q $(subst /,\,$(CLI_OUT)) $(subst /,\,$(GUI_OUT)) $(subst /,\,$(CHECK_OUT)) 2>nul
-	-del /S /Q $(subst /,\,$(OBJDIR)) 2>nul
+# 2026-11-08 事故：原先 `del /S /Q build` 递归删目录，把**已入库**且被本文件
+# include 的 build/duilib.mk 一起删了，下一轮构建报 `No rule to make target`。
+# clean 只清产物：目录根下的 *.mk（入库清单）必须保留，所以交给脚本按规则删。
+	-$(PYTHON) tools/clean-build.py $(OBJDIR) build-x86
 
 # ---- 首启 EA 补写器（PIT-122/123）----
 # 独立极小 exe（不链 wimlib/i18n）：救援层把它投放到目标系统后，由本地组策略
@@ -375,6 +378,8 @@ check: $(TEST_BIN) $(CLI_OUT) $(GUI_OUT) $(CHECK_OUT)
 	$(PYTHON) tools/check-i18n.py
 	$(PYTHON) tools/check-widths.py
 	$(PYTHON) tools/check-shell.py
+# 启动项品牌名统一（PIT-246）：UEFI 项名 / BCD 描述 / GRUB title 必须同源
+	$(PYTHON) tools/check-brand.py
 # 救援层字模：覆盖/列宽（C8 之外的独立口径；不写文件，不需要 freetype）
 	$(PYTHON) tools/gen-rescue-font.py --check
 	$(PYTHON) tools/check-config.py
@@ -383,11 +388,14 @@ check: $(TEST_BIN) $(CLI_OUT) $(GUI_OUT) $(CHECK_OUT)
 	$(PYTHON) tools/check-secrets.py
 	$(PYTHON) tools/check-versioninfo.py $(DISTDIR)/$(GUI_NAME) $(DISTDIR)/$(CLI_NAME) $(DISTDIR)/$(CHECK_NAME)
 	@bash tests/test_zjswap.sh
+	@bash tests/test_zjswap_undo.sh
 	@bash tests/test_boot_region.sh
 	@bash tests/test_rescue_triage.sh
 	@bash tests/test_conf_credible.sh
 	@bash tests/test_success_receipt.sh
 	@bash tests/test_log_home_rule.sh
+	@bash tests/test_say_wrap.sh
+	@bash tests/test_dev_path.sh
 	@bash tests/test_dual_receipt.sh
 	@bash tests/test_pack_hygiene.sh "$(PYTHON)"
 

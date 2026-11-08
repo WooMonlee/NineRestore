@@ -122,7 +122,7 @@
   - `is_our_temp_entry`（N21）：按描述/路径匹配，且用 `od -An -tx1` 打十六进制串
     （busybox 的 `tr -d '\000'` 不可靠），ASCII / UTF-16LE 都认。
   - `triage_previous`：三选一「回滚旧系统（大写 YES 确认）/ 再试新系统 / 仅重启」，
-    同屏 QQ 群 1128237828、邮箱 ms_2@qq.com；回滚失败按 `zjswap-undo.sh` 的 rc 2/3/其它
+    同屏 QQ 群 1128237828、邮箱 ms_w@qq.com；回滚失败按 `zjswap-undo.sh` 的 rc 2/3/其它
     给可读原因；回滚成功后清 `restore-task.conf` 与 `_zjresy*.log`。
 - **`tools/build-debian-rescue.py`**：`kernel/fs/efivarfs/` 不再排除，列入 `EXTRA_KEEP`。
 - **`src/tools/restore_boot_main.cpp`**：一次性清理改为保留 UEFI 救援项 + ESP 载荷
@@ -149,7 +149,7 @@
 - **`src/app/pending_task.{h,cpp}`**：`TakePendingTaskMarker` 读 UTF-8 后**立即 `DeleteFileW`**
   （先删再提示）；`src/gui/main_form.cpp::ShowPendingTaskNotice` 在每次正常启动的
   `WM_CHECK_RESCUE` 里调用，提示"上次还原任务未完成：系统已回滚到原来的系统。"、
-  `记录时间：`、QQ 群 1128237828 / 邮箱 ms_2@qq.com。
+  `记录时间：`、QQ 群 1128237828 / 邮箱 ms_w@qq.com。
 - **单测**：`pending_task_marker_read_then_self_delete`（读到内容 → 文件消失 → 二次为假）。
 - **QEMU/OVMF 实测**（自建 512MB NTFS VHD 目标盘，盘上预置 `~old\Windows`；
   测试 initramfs 用追加 cpio 覆盖 `zjswap-undo.sh` 为 `exit 0`，不改仓库文件）：
@@ -223,7 +223,7 @@
   `D:\Software\System\_VMware\VMware17.6.1\vmrun.exe` → True；
   `...\VMdisks\初心Win10x64\Windows 10 x64.vmx` → True；
   **guest 凭据已知**：`Administrator` / `stylish`（`vmrun -gu Administrator -gp stylish …`），
-  带凭据的 `captureScreen` 实测可用（心跳目录 `temp\hb\`）。早前"匿名 guest 操作被拒"的记录
+  带凭据的 `captureScreen` 实测可用（心跳目录 `temp\evidence\hb\`）。早前"匿名 guest 操作被拒"的记录
   只说明**不能匿名**，不代表没有通道。
 - QEMU 可用：`D:\Prog\ProgIDE\msys64\mingw64\bin\qemu-system-x86_64.exe`；
   烟测后已 `poweroff`，无残留 QEMU 进程。

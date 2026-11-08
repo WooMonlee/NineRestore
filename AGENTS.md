@@ -553,8 +553,8 @@ GUI（Phase 5）：工作线程跑 wimlib，严禁在回调线程直接 `SetText
 - 生成的一切**临时程序 / 脚本 / 中间产物 / 截图 / 日志不得离开项目目录**
   （不要写到 `%TEMP%`、`D:\` 根、桌面等外部位置）。
 - **长期使用**的（工具、资产、样例、测试数据）→ 在项目内**新建专用子目录**存放，并入库/说明。
-- **一次性、随时可删**的 → 一律放 `D:\Prog\_Project\SysRecover\temp`
-  （已 `.gitignore`，只保留 `.gitkeep`；这个目录随时会被清空，不能放必须保留的东西）。
+- **一次性、随时可删**的 → 一律放 `D:\Prog\_Project\9SinoRecover\temp\scratch`
+  （已 `.gitignore`；`temp\bench`、`temp\evidence` 不参与清理，分类与规则见 §19）。
 - 例外：**用户明确指定的数据目录**（备份镜像、导出驱动、VM 虚拟盘等）按其指定位置生成。
 - 收尾：会话结束前清掉 `temp\` 里不再需要的东西。
 
@@ -617,3 +617,33 @@ SysRecover.exe --lang en help              # CLI 指定语言
 set SYSRECOVER_LANG=en && SysRecover.exe   # 环境变量指定语言（机房批量）
 `
 - 当前词条：**760**（en.lang 约 89 KB）。每增一语种 ≈ +89 KB。
+
+## 19. 磁盘目录约定（2026-11-08 用户规格，硬性）
+
+> 项目内容只放项目目录，工具与安装包各有固定位置；`D:\Software\System` 是用户的系统镜像库，任何人不得改动。
+
+| 类别 | 位置 | 说明 |
+|---|---|---|
+| 项目内容（源码/文档/构建/归档） | `D:\Prog\_Project\9SinoRecover` | 仓库根；旧仓库归档在 `archive\SysRecover`（`.gitignore` 覆盖，不入库） |
+| 编译类工具链 | `D:\Prog\ProgIDE` | mingw/msys2/Qt/JDK/dotnet/Python/cmake/vcpkg 等；安装包放 `ProgIDE\installers` |
+| 与编译无关的工具 | `D:\Prog\Tools` | ffmpeg、串口工具、EDA/MCP 等 |
+| 软件安装包 | `D:\Software\_我的U盘\Software\常用安装软件` | **死目录**：不搬、不整理、不纳入清理 |
+| 项目临时文件 | `D:\Prog\_Project\9SinoRecover\temp` | 分类见 §19.1 |
+| 发布用成品 exe | `D:\` 根 | 沿用 `D:\九转大还原<版本>.exe`；不要放进仓库 |
+
+### 19.1 temp 分类（清理只扫 `scratch`）
+
+| 子目录 | 放什么 | 清理 |
+|---|---|---|
+| `temp\bench\` | 测试台、VM 现场、ISO/载荷（含 `SysRecover-bench` 与 `share`） | **整目录豁免**，脚本显式跳过 |
+| `temp\evidence\` | 现场取证、验收记录（`verify-*`、`p0-oldpayload-*`、日志/心跳截图等） | 豁免；发布定稿后人工处理 |
+| `temp\scratch\` | 可再生成的临时脚本/日志/中间产物/打包 zip | **唯一清理目标**：默认 dry-run，7 天起，压缩包 14 天 |
+
+- 需要大体积现场时放 `temp\bench\`，不要放仓库其它位置。
+- **不要对仓库执行 `git clean -xdf`**：会连同 `temp\bench`（几十 GB VM/ISO）一起清掉。
+- 清理入口 `python tools/clean-temp.py`：默认只列清单；`--apply` 才删；VM 进程在跑时整体跳过。
+
+### 19.2 禁止项
+- **禁止改动 `D:\Software\System`**（用户的全部系统镜像：多个 ESD、`老System镜像`、`_WinPE`、`_VMware`、已部署的 `九转还原` 副本）：不搬、不删、不纳入任何清理范围。
+- `系统还原IQI`、`系统还原WIT` 只标"待用户自行删除"，不要动。
+- 安装包死目录 `D:\Software\_我的U盘\Software\常用安装软件` 不搬不整理。
