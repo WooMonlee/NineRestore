@@ -375,6 +375,8 @@ check: $(TEST_BIN) $(CLI_OUT) $(GUI_OUT) $(CHECK_OUT)
 	$(PYTHON) tools/check-i18n.py
 	$(PYTHON) tools/check-widths.py
 	$(PYTHON) tools/check-shell.py
+	# 救援层字模：覆盖/列宽（C8 之外的独立口径；不写文件，不需要 freetype）
+	$(PYTHON) tools/gen-rescue-font.py --check
 	$(PYTHON) tools/check-config.py
 	$(PYTHON) tools/check-layers.py
 	$(PYTHON) tools/check-foreground.py

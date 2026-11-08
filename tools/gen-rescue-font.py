@@ -16,7 +16,10 @@
 用法：
   python tools/gen-rescue-font.py            # 重新生成 bootfiles/zjfont.psf
                                              #       bootfiles/zjzhmap.sed
-  python tools/gen-rescue-font.py --check    # 只检查：字模是否覆盖脚本用字
+  python tools/gen-rescue-font.py --check    # 只校验：字模/映射是否覆盖脚本用字、
+                                             #   每条是否 ≤78 列（make check 会跑，不写文件）
+  python tools/gen-rescue-font.py --verify   # 重新生成并与入库文件逐字节比对
+                                             #   （需 freetype-py + simsun，可选）
 依赖：freetype-py（pip install freetype-py）+ Windows 自带 simsun.ttc。
 改动提示语后必须重跑本工具，否则 check-shell.py 的 C8 会报"字模未覆盖"。
 """
@@ -25,8 +28,6 @@ import os
 import re
 import struct
 import sys
-
-import freetype
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FONT_SRC = r"C:\Windows\Fonts\simsun.ttc"
@@ -88,6 +89,7 @@ def collect_hanzi(msgs):
 
 
 def load_bitmap(face, ch):
+    import freetype
     face.load_char(ch, freetype.FT_LOAD_RENDER | freetype.FT_LOAD_TARGET_MONO)
     g = face.glyph
     bm = g.bitmap
@@ -145,6 +147,8 @@ def canvas_to_bytes(cv):
 
 
 def build(hanzi):
+    # freetype 只在真正出字模时需要：--check 要在没装 freetype-py 的机器上也能跑。
+    import freetype
     face = freetype.Face(FONT_SRC, FONT_INDEX)
     face.set_pixel_sizes(0, PX)
 
@@ -192,10 +196,77 @@ def sed_text(index, hanzi):
     return "\n".join(out) + "\n"
 
 
+SED_LINE_RE = re.compile(r"s/(.)/(..)/g$")
+PREFIX_COLS = 4          # "ZJ: " / "SR: "
+CONSOLE_COLS = 78        # 80 列控制台，留 2 列余量
+ZH_FONT = "bootfiles/zjfont.psf"
+ZH_MAP = "bootfiles/zjzhmap.sed"
+
+
+def load_map(path):
+    """读已入库的 zjzhmap.sed，返回 {汉字: (左PUA, 右PUA)}。"""
+    out = {}
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            m = SED_LINE_RE.match(line.rstrip("\n"))
+            if m and len(m.group(2)) == 2:
+                out[m.group(1)] = (m.group(2)[0], m.group(2)[1])
+    return out
+
+
+def load_font_pua(path):
+    """读已入库的 zjfont.psf（PSF1），返回 unicode 表里的码位集合。"""
+    data = open(path, "rb").read()
+    if len(data) < 4:
+        raise SystemExit("%s 太短，不是 PSF1" % path)
+    m0, m1, mode, charsize = struct.unpack("<BBBB", data[:4])
+    if (m0, m1) != (0x36, 0x04):
+        raise SystemExit("%s 不是 PSF1（头 %02x %02x；PSF2 本镜像 busybox 不支持）"
+                         % (path, m0, m1))
+    if mode > 0x05:
+        raise SystemExit("%s PSF1 mode=0x%02x 不受支持" % (path, mode))
+    count = 512 if mode & 0x01 else 256
+    table = data[4 + count * charsize:]
+    pua = set()
+    for i in range(0, len(table) - 1, 2):
+        cp = struct.unpack("<H", table[i:i + 2])[0]
+        if cp != 0xffff:
+            pua.add(cp)
+    return pua
+
+
+def check_layers(msgs, zh_map, pua):
+    """C8 同类校验：映射覆盖 + 字模覆盖 + 单行宽度。错误信息带 文件:行号。"""
+    bad = 0
+    for rel, ln, s in msgs:
+        cols = PREFIX_COLS + width(s)
+        if cols > CONSOLE_COLS:
+            print("  %s:%d %d 列 > %d 列（含 %d 列前缀），必须拆行: %s"
+                  % (rel, ln, cols, CONSOLE_COLS, PREFIX_COLS, s))
+            bad += 1
+        for ch in s:
+            if not is_cjk(ch):
+                continue
+            if ch not in zh_map:
+                print("  %s:%d 汉字 %r 没有映射（%s 未覆盖；请重跑 "
+                      "python tools/gen-rescue-font.py）" % (rel, ln, ch, ZH_MAP))
+                bad += 1
+                continue
+            left, right = zh_map[ch]
+            if ord(left) not in pua or ord(right) not in pua:
+                print("  %s:%d 汉字 %r 的字形缺失（%s 里没有 U+%04X/U+%04X；"
+                      "请重跑生成器）"
+                      % (rel, ln, ch, ZH_FONT, ord(left), ord(right)))
+                bad += 1
+    return bad
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true",
-                    help="只检查字模是否覆盖脚本用字，不写文件")
+                    help="只校验：字模/映射是否覆盖脚本用字、每行是否 ≤78 列（不写文件）")
+    ap.add_argument("--verify", action="store_true",
+                    help="重新生成并与仓库内文件逐字节比对（需 freetype-py + simsun）")
     args = ap.parse_args()
 
     msgs = scan_messages()
@@ -208,7 +279,19 @@ def main():
     print("中文字面量 %d 条，不同汉字 %d 个，字形预算 %d/512"
           % (len(msgs), len(hanzi), 95 + 2 * len(hanzi)))
 
+    fp = os.path.join(ROOT, "bootfiles", "zjfont.psf")
+    sp = os.path.join(ROOT, "bootfiles", "zjzhmap.sed")
+
     if args.check:
+        maxc = max(PREFIX_COLS + width(s) for _, _, s in msgs)
+        print("列宽上限 %d（%d 条中最宽 %d 列），字模 %s，映射 %s"
+              % (CONSOLE_COLS, len(msgs), maxc, ZH_FONT, ZH_MAP))
+        if not os.path.isfile(fp) or not os.path.isfile(sp):
+            raise SystemExit("缺 %s / %s；请先跑 python tools/gen-rescue-font.py"
+                             % (ZH_FONT, ZH_MAP))
+        bad = check_layers(msgs, load_map(sp), load_font_pua(fp))
+        if bad:
+            raise SystemExit("字模/映射/宽度校验失败 %d 处（见上）" % bad)
         print("(check only, nothing written)")
         return 0
 
@@ -220,25 +303,36 @@ def main():
     if clip_cjk:
         print("汉字裁剪: %r" % clip_cjk)
 
-    fp = os.path.join(ROOT, "bootfiles", "zjfont.psf")
+    if args.verify:
+        ok = True
+        if not os.path.isfile(fp) or open(fp, "rb").read() != psf:
+            print("不一致: %s（重新生成的 %d B）" % (fp, len(psf)))
+            ok = False
+        want = sed_text(index, hanzi)
+        have = open(sp, encoding="utf-8").read() if os.path.isfile(sp) else ""
+        if have != want:
+            print("不一致: %s（重新生成 %d 行）" % (sp, len(want.splitlines())))
+            ok = False
+        print("verify: %s" % ("byte-identical" if ok else "MISMATCH"))
+        return 0 if ok else 1
+
     with open(fp, "wb") as fh:
         fh.write(psf)
-    sp = os.path.join(ROOT, "bootfiles", "zjzhmap.sed")
     with open(sp, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(sed_text(index, hanzi))
 
     print("wrote %s (%d bytes), %s (%d bytes); glyphs used %d/512"
           % (os.path.relpath(fp, ROOT), len(psf),
              os.path.relpath(sp, ROOT), os.path.getsize(sp), used))
-    print("提示语列宽（含 4 列前缀）：")
+    print("提示语列宽（含 %d 列前缀）：" % PREFIX_COLS)
     over = 0
     for rel, ln, s in msgs:
-        cols = 4 + width(s)
-        if cols > 78:
+        cols = PREFIX_COLS + width(s)
+        if cols > CONSOLE_COLS:
             over += 1
         print("  %-28s:%-4d %3d  %s" % (os.path.basename(rel), ln, cols, s))
     if over:
-        raise SystemExit("有 %d 条提示超过 78 列，必须拆行" % over)
+        raise SystemExit("有 %d 条提示超过 %d 列，必须拆行" % (over, CONSOLE_COLS))
     return 0
 
 
