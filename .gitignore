@@ -105,3 +105,8 @@ archive/
 tools/fonts/*.hex.gz
 tools/fonts/*.hex.zst
 tools/fonts/upstream/
+
+# stray release artifacts at repo root (never commit)
+/*.exe
+/*.zip
+/*.log

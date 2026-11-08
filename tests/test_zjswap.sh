@@ -78,11 +78,22 @@ rcD=$(run_swap "$TD" "")
 $(cat "$TD/out.log" 2>/dev/null)"
 [ -e "$MD/~new" ] || fail "D: ~new removed although verify failed"
 
-for _t in "$TA" "$TB" "$TC" "$TD"; do rm -rf "$_t"; done
+# ── E：根上已有 ~old（上次中断/早期退出）→ 退出 3，旧树一根汗毛都没动 ──
+# 审查用例：lite 重跑在 `~old` 无 Windows 的早期中断现场必须被拒绝，
+# 不许把半截备份再换一遍（门在 zjswap.sh L1，不在 init）。
+TE=$(mkcase); ME=$TE/disk
+mkdir -p "$ME/~old"
+rcE=$(run_swap "$TE" "")
+[ "$rcE" = "3" ] || fail "E: exit=$rcE (want 3)"
+[ -e "$ME/Windows/System32/ntoskrnl.exe" ] || fail "E: old tree was touched"
+[ -e "$ME/~new/.zj-done" ] || fail "E: ~new was removed"
+grep -q 'leftover ~old present' "$TE/out.log" || fail "E: refusal reason missing"
+
+for _t in "$TA" "$TB" "$TC" "$TD" "$TE"; do rm -rf "$_t"; done
 
 if [ "$FAILED" -ne 0 ]; then
     echo "test_zjswap: FAIL"
     exit 1
 fi
-echo "test_zjswap: PASS (A fail-closed/rollback, B happy path, C marker gate, D post-verify)"
+echo "test_zjswap: PASS (A fail-closed/rollback, B happy path, C marker gate, D post-verify, E leftover ~old)"
 exit 0

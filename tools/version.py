@@ -5,6 +5,9 @@
   主版本.次版本 由人指定（当前 1.0）；
   测试版：beta 号在**第四段**，每发一版 +1，第三位固定 0；
           `1.0 beta.N` / 内部 `1.0.0.N` / 文件 `九转大还原1.0-beta.N.exe`
+  RC 版（2026-11-08 用户定）：`SYSRECOVER_RC=N`（0=不是 RC）。显示 `1.0 RC1`、
+          文件 `九转大还原1.0-rc.1.exe`，**内部四段继续递增**（第四段用 beta 号
+          作计数器，不回退）——RC 只改对外名称，不改内部号。
   正式版：beta=0 → `1.0.0` / `1.0.0.0` / `九转大还原1.0.0.exe`
   正式版之后：第三位递增 → `1.0.1` / `1.0.1.0` / `九转大还原1.0.1.exe`
 版本判定按文件名与渠道，不靠数字大小比较（正式版四段会回落）。
@@ -35,11 +38,12 @@ MACROS = {
     "SYSRECOVER_MINOR": r"#define\s+SYSRECOVER_MINOR\s+(\d+)",
     "SYSRECOVER_PATCH": r"#define\s+SYSRECOVER_PATCH\s+(\d+)",
     "SYSRECOVER_BETA": r"#define\s+SYSRECOVER_BETA\s+(\d+)",
+    "SYSRECOVER_RC": r"#define\s+SYSRECOVER_RC\s+(\d+)",
     "SYSRECOVER_VERSION": r'#define\s+SYSRECOVER_VERSION\s+"([^"]+)"',
     "SYSRECOVER_DISPLAY": r'#define\s+SYSRECOVER_DISPLAY\s+"([^"]+)"',
 }
 NUM_KEYS = ("SYSRECOVER_MAJOR", "SYSRECOVER_MINOR", "SYSRECOVER_PATCH",
-            "SYSRECOVER_BETA")
+            "SYSRECOVER_BETA", "SYSRECOVER_RC")
 
 
 def read_macros(path: Path = VERSION_H) -> dict:
@@ -60,14 +64,19 @@ def derive(m: dict) -> dict:
     patch = int(m["SYSRECOVER_PATCH"])
     beta = int(m["SYSRECOVER_BETA"])
     internal = "%d.%d.%d.%d" % (major, minor, patch, beta)
-    if beta:
+    rc = int(m.get("SYSRECOVER_RC", 0))
+    if rc:
+        # RC 只换对外名称；内部四段继续递增（第四段 = beta 计数器，不回退）
+        display = "%d.%d RC%d" % (major, minor, rc)
+        filename = "%s%d.%d-rc.%d.exe" % (PRODUCT_ZH, major, minor, rc)
+    elif beta:
         display = "%d.%d beta.%d" % (major, minor, beta)
         filename = "%s%d.%d-beta.%d.exe" % (PRODUCT_ZH, major, minor, beta)
     else:
         display = "%d.%d.%d" % (major, minor, patch)
         filename = "%s%d.%d.%d.exe" % (PRODUCT_ZH, major, minor, patch)
     return {"internal": internal, "display": display, "filename": filename,
-            "beta": beta}
+            "beta": beta, "rc": rc}
 
 
 def write_macros(m: dict, path: Path = VERSION_H) -> None:
@@ -99,9 +108,14 @@ def check(m: dict) -> list[str]:
         bad.append("SYSRECOVER_DISPLAY=%r != %r"
                    % (m["SYSRECOVER_DISPLAY"], d["display"]))
     if int(m["SYSRECOVER_BETA"]) and int(m["SYSRECOVER_PATCH"]):
-        bad.append("beta 期间第三位必须为 0（beta 号在第四段）")
+        bad.append("beta/RC 期间第三位必须为 0（发布号在第四段）")
     if int(m["SYSRECOVER_BETA"]) > 999:
         bad.append("beta 号必须在 0..999（能进 16 位数字段）")
+    rc = int(m.get("SYSRECOVER_RC", 0))
+    if rc and not int(m["SYSRECOVER_BETA"]):
+        bad.append("RC 版内部四段必须继续递增（第四段不能为 0，否则与正式版撞号）")
+    if rc > 99:
+        bad.append("RC 号必须在 0..99")
     return bad
 
 
@@ -110,6 +124,8 @@ def main() -> None:
     ap.add_argument("--bump", action="store_true", help="beta 号 +1")
     ap.add_argument("--release", action="store_true", help="切正式版（beta=0）")
     ap.add_argument("--beta", type=int, metavar="N", help="切回 beta 渠道并指定 beta 号")
+    ap.add_argument("--rc", type=int, metavar="N",
+                    help="切 RC 渠道并指定 RC 号（内部四段继续用 beta 计数器）")
     ap.add_argument("--patch", type=int, metavar="N",
                     help="正式版之后：第三位指定为 N（beta=0）")
     ap.add_argument("--display", action="store_true", help="打印界面显示串")
@@ -133,11 +149,22 @@ def main() -> None:
     if a.patch is not None:
         m["SYSRECOVER_PATCH"] = a.patch
         m["SYSRECOVER_BETA"] = 0
+        m["SYSRECOVER_RC"] = 0
+        write_macros(m)
+        print(derive(m)["filename"])
+        return
+    if a.rc is not None:
+        if int(m["SYSRECOVER_PATCH"]) != 0:
+            sys.exit("ERROR: 切 RC 前请先把第三位归零（--patch 0 或手工改）")
+        if not int(m["SYSRECOVER_BETA"]):
+            sys.exit("ERROR: RC 的内部四段要继续递增；先 --beta <下一个可用号>")
+        m["SYSRECOVER_RC"] = a.rc
         write_macros(m)
         print(derive(m)["filename"])
         return
     if a.release:
         m["SYSRECOVER_BETA"] = 0
+        m["SYSRECOVER_RC"] = 0
         write_macros(m)
         print(derive(m)["filename"])
         return
@@ -145,6 +172,7 @@ def main() -> None:
         if int(m["SYSRECOVER_PATCH"]) != 0:
             sys.exit("ERROR: 切回 beta 前请先把第三位归零（--patch 0 或手工改）")
         m["SYSRECOVER_BETA"] = a.beta
+        m["SYSRECOVER_RC"] = 0
         write_macros(m)
         print(derive(m)["filename"])
         return

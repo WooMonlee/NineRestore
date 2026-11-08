@@ -98,20 +98,11 @@ def main():
         if os.path.exists(vj):
             with open(vj, 'r', encoding='utf-8') as f:
                 ver = json.load(f).get('version', ver)
-        # 2026-11-07 命名规范：
-        #   内部 1.0.0.2（beta.2）  -> 九转大还原1.0-beta.2.exe
-        #   内部 1.0.0.0（正式）    -> 九转大还原1.0.0.exe
-        #   内部 1.0.1.0（正式之后）-> 九转大还原1.0.1.exe
-        parts = str(ver).split('.')
-        while len(parts) < 4:
-            parts.append('0')
-        major, minor, patch, beta = (int(parts[0]), int(parts[1]),
-                                     int(parts[2]), int(parts[3]))
-        if beta:
-            display = '%d.%d-beta.%d' % (major, minor, beta)
-        else:
-            display = '%d.%d.%d' % (major, minor, patch)
-        zh = '九转大还原%s.exe' % display
+        # 2026-11-08 命名规范（RC 渠道）：文件名统一由 tools/version.py 派生，
+        # 避免这里再抄一遍规则（对外 RC 号与内部四段号是两套独立计数）。
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import version as vmod
+        zh = vmod.derive(vmod.read_macros())['filename']
         dst_zh = os.path.join(release_dir, zh)
         # 同版本号不覆盖旧包：撞名说明忘了递增 beta 号。
         if os.path.exists(dst_zh):

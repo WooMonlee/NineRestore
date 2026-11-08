@@ -1471,6 +1471,58 @@ TEST(esp_soft_item_verdict) {
     CHECK(EspSoftItemVerdict(false, false) == SoftItemVerdict::SkipSourceMissing);
 }
 
+// PIT-251：UEFI 去重/回滚的"同一 ESP"判据 —— 双盘双 ESP 时不能把另一块
+// ESP 上的同类条目当成重复项删掉。构造只差 HD 节点的 Boot#### 原始数据，
+// 断言判据只在"起止 LBA + GPT 分区 GUID 三者全等"时成立。
+namespace {
+std::vector<BYTE> MakeUefiBootOption(const GUID& sig, unsigned long long start,
+                                     unsigned long long size,
+                                     const wchar_t* desc) {
+    std::vector<BYTE> b(6, 0);  // Attributes + FilePathListLength
+    for (const wchar_t* p = desc; *p; ++p) {
+        b.push_back((BYTE)(*p & 0xFF));
+        b.push_back((BYTE)((*p >> 8) & 0xFF));
+    }
+    b.push_back(0);
+    b.push_back(0);  // 描述结束
+    sysrecover::UefiHdNode hd{};
+    hd.type = 4;
+    hd.subType = 1;
+    hd.length = (WORD)sizeof(hd);
+    hd.partStart = start;
+    hd.partSize = size;
+    hd.signature = sig;
+    hd.mbrType = 2;
+    hd.sigType = 2;
+    const BYTE* p = reinterpret_cast<const BYTE*>(&hd);
+    b.insert(b.end(), p, p + sizeof(hd));
+    return b;
+}
+}  // namespace
+
+TEST(uefi_dedup_same_esp_only) {
+    using sysrecover::UefiEntryTargetsEsp;
+    GUID espA = {};
+    GUID espB = {};
+    espA.Data1 = 0x11111111;
+    espB.Data1 = 0x22222222;
+    const unsigned long long kStart = 2048, kSize = 204800;
+    const auto entryA = MakeUefiBootOption(espA, kStart, kSize, L"NineRestore");
+    const auto entryB = MakeUefiBootOption(espB, kStart, kSize, L"NineRestore");
+    // 同一 ESP（描述/路径相同）：是
+    CHECK(UefiEntryTargetsEsp(entryA, espA, kStart, kSize));
+    // 双盘双 ESP：另一块 ESP 上的同名条目**不匹配** → 去重不能删它
+    CHECK(!UefiEntryTargetsEsp(entryB, espA, kStart, kSize));
+    CHECK(!UefiEntryTargetsEsp(entryA, espB, kStart, kSize));
+    // 只有起止 LBA 或扇区数不同：也不是同一 ESP
+    CHECK(!UefiEntryTargetsEsp(entryA, espA, kStart + 1, kSize));
+    CHECK(!UefiEntryTargetsEsp(entryA, espA, kStart, kSize + 1));
+    // 截断数据不得误判为匹配
+    std::vector<BYTE> cut = entryA;
+    cut.resize(cut.size() - 8);
+    CHECK(!UefiEntryTargetsEsp(cut, espA, kStart, kSize));
+}
+
 // UEFI 引导修复的路线选择（PIT-193）：缺 BCD-Template / 空间不够 / 没有
 // bcdboot 都必须**退回随包资产自足**，绝不能把整单判死（客户实测被误杀）。
 TEST(uefi_bcd_plan) {

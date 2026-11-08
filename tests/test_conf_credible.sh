@@ -15,6 +15,8 @@ trap 'rm -rf "$WORK"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { echo "  ok: $*"; }
 
+eval "$(sed -n '/^guid_norm(){/,/^}/p' "$INIT")"
+type guid_norm >/dev/null 2>&1 || fail "cannot extract guid_norm() from $INIT"
 eval "$(sed -n '/^conf_is_credible(){/,/^}/p' "$INIT")"
 type conf_is_credible >/dev/null 2>&1 || fail "cannot extract conf_is_credible() from $INIT"
 
@@ -68,6 +70,22 @@ mk_conf "$c"
 conf_is_credible "$c/restore-task.conf" && fail "case6: unanchored conf was accepted"
 ok "unanchored rejected"
 
+# ⑥b P0-3（2026-11-08 真机）：目标分区根 + conf 与 _zjresy*.log 同目录且
+# target_offset 一致 → 接受（这是写者 task.cpp WriteRestoreLog 的合法布局，
+# 旧规则只认 exe 旁边 / ZJRESTORE，把这份活契约误判成陈旧副本）。
+c="$WORK/disk2"
+mk_conf "$c"
+{ echo "target_part_offset=1048576"; } > "$c/_zjresy-20261108.log"
+conf_is_credible "$c/restore-task.conf" || fail "case6b: root conf beside matching task log was rejected"
+ok "root conf beside matching log accepted"
+
+# ⑥c 同目录有日志但 offset 对不上 → 仍然拒绝（陈旧/跨盘副本）
+c="$WORK/disk3"
+mk_conf "$c"
+{ echo "target_part_offset=2097152"; } > "$c/_zjresy-stale.log"
+conf_is_credible "$c/restore-task.conf" && fail "case6c: root conf with mismatched task log was accepted"
+ok "root conf with mismatched log rejected"
+
 # ⑦ action 非法 → 拒绝
 c="$WORK/disk/SysRecover2"
 mk_conf "$c" format; : > "$c/SysRecover.exe"
@@ -107,7 +125,7 @@ ok "identity match accepted"
 # ⑫ 静态断言：搜索逻辑必须"收集候选→逐个可信度过滤"，不能拿 find 第一个
 grep -Fq 'find "$ZJ_M" -maxdepth 4 -name restore-task.conf > /tmp/zj-conf-cands' "$INIT" || \
     fail "case12: candidate collection missing in init"
-grep -Fq 'conf_is_credible "$_c" || continue' "$INIT" || \
+grep -Fq 'if ! conf_is_credible "$_c"; then' "$INIT" || \
     fail "case12: candidate filter missing in init"
 grep -Fq 'find "$ZJ_M" -maxdepth 4 -name restore-task.conf | head -1' "$INIT" && \
     fail "case12: old head -1 conf search still present in init"

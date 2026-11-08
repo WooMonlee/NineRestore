@@ -56,7 +56,7 @@ PRODUCT = [
     "bootfiles/zjlog.sh",
     "bootfiles/alpine/init",
 ]
-SAY_RE = re.compile(r'\bsay\s+"([^"]*)"')
+SAY_RE = re.compile(r'\bsay2?\s+"([^"]*)"')
 CJK_RE = re.compile('[\u4e00-\u9fff]')
 FULLWIDTH_RE = re.compile('[\u3000-\u303f\uff00-\uffef]')
 
@@ -321,6 +321,59 @@ def check_layers(msgs, zh_map, pua):
     return bad
 
 
+def runtime_screen(s, zh_map, pua):
+    """模拟运行期 zj_ascii（bootfiles/zjlog.sh）：ASCII 保留；字模内汉字保留
+    （运行时会被 zjzhmap.sed 换成 PUA 半字）；**其余字符连续串压成一个 `.`**。"""
+    out, in_run = [], False
+    for ch in s:
+        if ASCII_START <= ord(ch) <= ASCII_END:
+            out.append(ch)
+            in_run = False
+        elif ch in zh_map and all(ord(p) in pua for p in zh_map[ch]):
+            out.append(ch)
+            in_run = False
+        else:
+            if not in_run:
+                out.append(".")
+            in_run = True
+    return "".join(out)
+
+
+def check_dynamic_samples(zh_map, pua):
+    """PIT-238（重做）回归：用户文本（镜像名/卷标/路径）里的**库外汉字**必须
+    被替换成 `.`，绝不允许原样送屏（真机：白底方块/问号）。"""
+    log_sh = os.path.join(ROOT, "bootfiles", "zjlog.sh")
+    with open(log_sh, encoding="utf-8") as fh:
+        shell_src = fh.read()
+    if "s/[^ -~][^ -~]*/./g" not in shell_src:
+        print("  bootfiles/zjlog.sh 的 zj_ascii 占位符不是 `.`（运行期与校验器不一致）")
+        return 1
+    bad = 0
+    # 库外汉字样例（真机实测串）：忘/初/心 三个都没有字形。
+    sample = "C:\\images\\不忘初心\\win10.wim"
+    got = runtime_screen(sample, zh_map, pua)
+    if any(is_cjk(c) and c not in zh_map for c in got):
+        print("  样例仍有库外汉字未替换: %r" % got)
+        bad += 1
+    # 库里有的「不」必须保留（这正是真机"部分正常"的来源）。
+    if "不" in zh_map and "不" not in got:
+        print("  样例把字模内的「不」也替换掉了: %r" % got)
+        bad += 1
+    # 纯库外串必须只剩 ASCII + `.`，且连续串只留一个点。
+    plain = "D:\\忘初心\\win10.wim"
+    want = "D:\\.\\win10.wim"
+    got = runtime_screen(plain, zh_map, pua)
+    if got != want:
+        print("  库外汉字替换结果不对: %r（应为 %r）" % (got, want))
+        bad += 1
+    # 字模内的字必须原样保留（不许误伤自有提示文案）。
+    covered = "".join(list(zh_map)[:4])
+    if zh_map and runtime_screen(covered, zh_map, pua) != covered:
+        print("  字模内汉字被误替换: %r" % covered)
+        bad += 1
+    return bad
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true",
@@ -359,6 +412,10 @@ def main():
         bad = check_layers(msgs, load_map(sp), load_font_pua(fp))
         if bad:
             raise SystemExit("字模/映射/宽度校验失败 %d 处（见上）" % bad)
+        dyn_bad = check_dynamic_samples(load_map(sp), load_font_pua(fp))
+        if dyn_bad:
+            raise SystemExit("用户文本替换校验失败 %d 处（见上）" % dyn_bad)
+        print("动态样例校验：库外汉字 → `.`，字模内汉字保留（不忘初心 / D:\\忘初心）")
         print("(check only, nothing written)")
         return 0
 

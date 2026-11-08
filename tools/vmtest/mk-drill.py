@@ -393,13 +393,17 @@ def main():
     # ZJRESTORE/ = 软件目录（log 里 software_path=D:\ZJRESTORE\SysRecover.exe）：
     # 救援层 find_soft_dir 会命中它 → zjrestore-debug.log / zjrestore-apply.out
     # 落盘（回归：日志实时镜像与最终持久化）。
+    # 契约也放这里（beta.11 演练修复）：init 的 conf_is_credible 只认"软件目录
+    # 下的 conf"（P1-b beta.7），根目录裸放的 conf 会被当成 stale copy 拒掉 →
+    # swap 演练退化成 no-task 黑匣子路径。真机 conf 本来就在 SysRecover.exe 旁
+    # （ZJRESTORE\），演练按同一落点摆。
     image_entry = ((RTWIM, 'images/reparse-test.wim') if REPARSE == 'reject'
                    else (EFWIM, 'images/efs-test.wim') if EFS
                    else (ENCZJE, 'images/enc.zje') if ENC
                    else (WIM, 'images/test.wim'))
     make_part(2, [
         image_entry,
-        (conf, 'restore-task.conf'),
+        (conf, 'ZJRESTORE/restore-task.conf'),
         (os.path.join(bf, 'bootmgr'), 'bootfix/bootmgr'),
         (os.path.join(bf, 'Boot', 'BCD'), 'bootfix/Boot/BCD'),
         (os.path.join(bf, 'Boot', 'fonts', 'chs_boot.ttf'), 'bootfix/Boot/fonts/chs_boot.ttf'),

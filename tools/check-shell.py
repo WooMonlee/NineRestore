@@ -172,6 +172,7 @@ def deny_violations(rel):
 CJK_RE = re.compile('[\u4e00-\u9fff]')
 FULLWIDTH_RE = re.compile('[\u3000-\u303f\uff00-\uffef]')
 SAY_RE = re.compile(r'\bsay\s+"([^"]*)"')
+SAY2_RE = re.compile(r'\bsay2\s+"([^"]*)"\s+"([^"]*)"')
 ZH_MAP = "bootfiles/zjzhmap.sed"
 ZH_FONT = "bootfiles/zjfont.psf"
 CONSOLE_COLS = 78     # 80 列控制台，留 2 列余量
@@ -243,6 +244,23 @@ def console_ascii_violations():
         for i, line in enumerate(read_lines(rel), 1):
             if is_comment(line):
                 continue
+            m2 = SAY2_RE.search(line)
+            if m2:
+                msg, eng = m2.group(1), m2.group(2)
+                if any(not (0x20 <= ord(c) <= 0x7E) for c in eng):
+                    out.append("%s:%d: say2 的英文版必须是纯 ASCII: %r" % (rel, i, eng[:40]))
+                cols = PREFIX_COLS + sum(_char_cols(c) for c in msg)
+                if cols > CONSOLE_COLS:
+                    out.append("%s:%d: 控制台提示 %d 列 > %d 列，必须拆成多行独立 say2: %s"
+                               % (rel, i, cols, CONSOLE_COLS, msg[:50]))
+                for c in msg:
+                    if FULLWIDTH_RE.match(c):
+                        out.append("%s:%d: 全角标点 %r 不在字模里，请换半角: %s"
+                                   % (rel, i, c, msg[:40]))
+                    elif CJK_RE.match(c) and c not in cmap:
+                        out.append("%s:%d: 汉字 %r 未被字模覆盖（先跑 tools/gen-rescue-font.py）"
+                                   % (rel, i, c))
+                continue
             m = SAY_RE.search(line)
             if not m:
                 continue
@@ -251,17 +269,75 @@ def console_ascii_violations():
                 if any(not (0x20 <= ord(c) <= 0x7E) for c in msg):
                     out.append("%s:%d: 非 ASCII 但也不含汉字: %r" % (rel, i, msg[:40]))
                 continue
-            cols = PREFIX_COLS + sum(_char_cols(c) for c in msg)
-            if cols > CONSOLE_COLS:
-                out.append("%s:%d: 控制台提示 %d 列 > %d 列，必须拆成多行独立 say: %s"
-                           % (rel, i, cols, CONSOLE_COLS, msg[:50]))
-            for c in msg:
-                if FULLWIDTH_RE.match(c):
-                    out.append("%s:%d: 全角标点 %r 不在字模里，请换半角: %s"
-                               % (rel, i, c, msg[:40]))
-                elif CJK_RE.match(c) and c not in cmap:
-                    out.append("%s:%d: 汉字 %r 未被字模覆盖（先跑 tools/gen-rescue-font.py）"
-                               % (rel, i, c))
+            # beta.14（PIT-238）：含中文的界面句一律走 say2，必须带英文兜底，
+            # 否则字模在真机没装上时整屏中文会退成 [CJK] 残句。
+            out.append("%s:%d: 含中文的界面句必须用 say2 \"中文\" \"English\"（字模失败时走英文）: %s"
+                       % (rel, i, msg[:40]))
+    return out
+
+
+def raw_console_violations():
+    """C9：绕过 say/say2 的中文上屏路径（PIT-247）。
+
+    历史教训：RC1 把"用户数据里的汉字"收口到 say→zj_ascii，但真机仍出现
+    「目录中的中文」白底问号 —— 只要有人新写一条 echo/printf 直接把中文送到
+    控制台，覆盖判定和 ASCII 兜底都会被绕过。这里静态拦住：
+      · echo/printf 行里出现非 ASCII（注释除外）；
+      · 直接写 /dev/tty* 且带非 ASCII。
+    同时把 PIT-247 的两个关键机制钉死，防止回归时被删掉：
+      · zjlog.sh 必须有 zj_fbcon()；
+      · zj_console_cjk 必须调用 zj_fbcon；
+      · zj_font_load 必须有 vgacon 分支（rc=7）。
+    """
+    out = []
+    raw_re = re.compile(r"(?:^|[|;&{(])\s*(?:echo|printf|cat)\b")
+    tty_re = re.compile(r">\s*/dev/tty")
+    for rel in PRODUCT:
+        for i, line in enumerate(read_lines(rel), 1):
+            if is_comment(line):
+                continue
+            non_ascii = any(ord(c) > 0x7E for c in line)
+            if not non_ascii:
+                continue
+            if raw_re.search(line) or tty_re.search(line):
+                out.append("%s:%d: 中文/非 ASCII 直接写控制台会绕过 say 的覆盖判定"
+                           "与 ASCII 兜底；改用 say2 或 say（见 PIT-247）" % (rel, i))
+    zj = os.path.join(ROOT, "bootfiles", "zjlog.sh")
+    if os.path.isfile(zj):
+        txt = "\n".join(read_lines("bootfiles/zjlog.sh"))
+        if not re.search(r"^zj_fbcon\s*\(\s*\)", txt, re.M):
+            out.append("bootfiles/zjlog.sh: 缺少 zj_fbcon()（PIT-247 的 BIOS 判据）")
+        if "zj_fbcon || return 1" not in txt:
+            out.append("bootfiles/zjlog.sh: zj_console_cjk 必须用 zj_fbcon 兜底（PIT-247）")
+        if "ZJ_FONT_RC=7" not in txt:
+            out.append("bootfiles/zjlog.sh: zj_font_load 缺少 vgacon 分支（rc=7，PIT-247）")
+    return out
+
+
+def interrupted_swap_guard_violations():
+    """C10：`_ran=0` 不得把"交换做到一半断了"当成"没有任务"直接重启（PIT-249）。
+
+    成功还原：zjswap 删 ~new，只留 ~old；中断：~new/.zj-done 与 ~old 同时在。
+    后者若走"没有还原任务 → 5 秒后重启"，用户就失去了唯一能回滚的入口。
+    静态钉死：init 必须有 has_new_tree()（判 ~new/.zj-done），且 _ran=0 分支
+    在同时命中 ~old 与 ~new 时必须进 triage_previous。
+    """
+    out = []
+    txt = "\n".join(read_lines("bootfiles/alpine/init"))
+    if not re.search(r"^has_new_tree\s*\(\s*\)\s*\{", txt, re.M):
+        out.append("bootfiles/alpine/init: 缺少 has_new_tree()（PIT-249 的中断判据）")
+    if "~new/.zj-done" not in txt:
+        out.append("bootfiles/alpine/init: has_new_tree 必须判 ~new/.zj-done")
+    if not re.search(r'has_new_tree\s+"\$_\w+"\s*;\s*then', txt):
+        out.append("bootfiles/alpine/init: _ran=0 分支缺少 has_new_tree 条件（PIT-249）")
+    if 'triage_previous "$_zb_dev" 0 ""' not in txt:
+        out.append("bootfiles/alpine/init: 中断的交换必须进 triage_previous（PIT-249）")
+    # 光弹菜单不够：回滚脚本必须认得"正向交换中断"现场，否则 [1] 会 exit 3 空转。
+    und = "\n".join(read_lines("bootfiles/zjswap-undo.sh"))
+    if '"$M/~new/.zj-done"' not in und:
+        out.append("bootfiles/zjswap-undo.sh: 缺少 ~new/.zj-done 判据（PIT-249 中断收场）")
+    if 'PHASE=2' not in und:
+        out.append("bootfiles/zjswap-undo.sh: 中断收场必须跳过 L5（PHASE=2）")
     return out
 
 
@@ -484,6 +560,8 @@ def main():
         fail.extend(payload_freshness_violations())
         fail.extend(payload_version_violations())
         fail.extend(console_ascii_violations())
+        fail.extend(raw_console_violations())
+        fail.extend(interrupted_swap_guard_violations())
         if fail:
             print("check-shell: FAIL (%d, payload-only)" % len(fail))
             for f in fail:
@@ -533,6 +611,8 @@ def main():
     fail.extend(payload_freshness_violations())
     fail.extend(payload_version_violations())
     fail.extend(console_ascii_violations())
+    fail.extend(raw_console_violations())
+    fail.extend(interrupted_swap_guard_violations())
 
     if fail:
         print("check-shell: FAIL (%d)" % len(fail))

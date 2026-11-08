@@ -81,6 +81,8 @@ def main() -> int:
     minor = int(grab(r'#define\s+SYSRECOVER_MINOR\s+(\d+)', vh, "MINOR"))
     patch = int(grab(r'#define\s+SYSRECOVER_PATCH\s+(\d+)', vh, "PATCH"))
     beta = int(grab(r'#define\s+SYSRECOVER_BETA\s+(\d+)', vh, "BETA"))
+    m_rc = re.search(r'#define\s+SYSRECOVER_RC\s+(\d+)', vh)
+    rc = int(m_rc.group(1)) if m_rc else 0
     ver = grab(r'SYSRECOVER_VERSION\s+"([^"]+)"', vh, "SYSRECOVER_VERSION")
     display = grab(r'SYSRECOVER_DISPLAY\s+"([^"]+)"', vh, "SYSRECOVER_DISPLAY")
     company = grab(r'SYSRECOVER_COMPANY\s+"([^"]*)"', vh, "SYSRECOVER_COMPANY")
@@ -89,7 +91,9 @@ def main() -> int:
     n = numeric(major, minor, patch, beta)
     # 属性页字符串用显示串（beta 带 beta 字样）；数字字段是纯四段。
     # 文件描述带上渠道文字，方便用户一眼区分测试版/正式版。
-    if beta:
+    if rc:
+        desc = desc + " (RC%d)" % rc
+    elif beta:
         desc = desc + " (Beta)"
 
     def esc(s: str) -> str:
