@@ -52,7 +52,7 @@ MBR → bootmgr → BCD「实模式启动扇区」条目(device=<目标盘>: pat
 | PID1 | **自写** `bootfiles/alpine/init`（无 rcS/inittab、无交互提示） | 启动干净、可控 |
 | 执行 | `bootfiles/zjrestore-lite.sh` | 格式化 + apply + 修引导 + 重启 |
 
-**屏上文字一律 ASCII**：内核内置字体无中文字形（中文显示成方框）。**必须有 fbcon**：若内核
+**屏上文字可含中文**：initramfs 内置 `zjfont.psf`（GNU Unifont 18.0.01 子集，SIL OFL 1.1，PSF1-512 / 8×16，95 ASCII + 151 汉字），交互屏（首屏、菜单、求助）为中文；单行 ≤78 列（80 列控制台留 2 列），汉字须已在字模内、禁全角标点，`check-shell.py` C8 把关。执行/进度/诊断行仍为英文（PIT-233）。**必须有 fbcon**：若内核
 `CONFIG_SYSFB_SIMPLEFB=y` 顶掉了内建 efifb，要加载 `simpledrm`，否则 UEFI 下黑屏像死机（PIT-061）。
 进度条与阶段提示见《04-跨层契约》。
 

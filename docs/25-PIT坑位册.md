@@ -268,7 +268,7 @@
 
 ### PIT-061
 
-- PIT-061 **UEFI 救援"黑屏像卡死"：内核 `CONFIG_SYSFB_SIMPLEFB=y` 顶掉内建 efifb，而 `simpledrm` 是模块、没打包 → 没有 fbcon**（2026-09-19，用户实测踩到）：症状 = UEFI 还原时屏幕停在 `EFI stub: Loaded initrd from command line option` 加一个一闪一闪的光标，看着完全像死机；**其实内核在正常跑** —— 用户按 Ctrl+Alt+Del 热重启后，还原**已经做完并且进的是新系统**（进度条一直在输出，只是屏幕没有）。根因：Alpine 内核带 `CONFIG_SYSFB_SIMPLEFB=y`，开机把 UEFI GOP 帧缓冲注册成 "simple-framebuffer" 平台设备，**因此内建 `efifb`（`CONFIG_FB_EFI=y`）不绑定**；能接管它的只有 `simpledrm`（`CONFIG_DRM_SIMPLEDRM=m`），而 `build-alpine-initramfs.py` 的 `MODULE_EXCLUDES` 把整个 `kernel/drivers/gpu` 排除了（旧注释写"文字控制台用内建 efifb/vesafb"——**该假设在 UEFI 下不成立**）。**修复**：①构建脚本新增 `EXTRA_MODULES = ['kernel/drivers/gpu/drm/tiny/simpledrm.ko.gz']`（依赖闭包自动带回 `drm.ko`/`drm_kms_helper.ko`/`drm_shmem_helper.ko`，整包只 +0.13MB）；②`bootfiles/alpine/init` 里提前 `ldmod simpledrm`；③cmdline 仍是 `console=tty0`。**回归测试**：`tools/vmtest/uefi-screen.ps1`（QEMU+OVMF，`-display none` + monitor `screendump` 抓两次，字节差异 8.4% ⇒ 控制台活着；PASS）。**屏上文字只能 ASCII**：内核内置字体没有中文字形（中文显示成方框，同 PIT-036 GRUB4DOS 的教训），所以救援横幅一律英文、中文细节进日志。**BIOS 路径不受影响**（走 `vgacon`，`CONFIG_VGA_CONSOLE=y`）。✅ 2026-09-19（QEMU 截图实证 + 用户 VM 实证还原成功）
+- PIT-061 **UEFI 救援"黑屏像卡死"：内核 `CONFIG_SYSFB_SIMPLEFB=y` 顶掉内建 efifb，而 `simpledrm` 是模块、没打包 → 没有 fbcon**（2026-09-19，用户实测踩到）：症状 = UEFI 还原时屏幕停在 `EFI stub: Loaded initrd from command line option` 加一个一闪一闪的光标，看着完全像死机；**其实内核在正常跑** —— 用户按 Ctrl+Alt+Del 热重启后，还原**已经做完并且进的是新系统**（进度条一直在输出，只是屏幕没有）。根因：Alpine 内核带 `CONFIG_SYSFB_SIMPLEFB=y`，开机把 UEFI GOP 帧缓冲注册成 "simple-framebuffer" 平台设备，**因此内建 `efifb`（`CONFIG_FB_EFI=y`）不绑定**；能接管它的只有 `simpledrm`（`CONFIG_DRM_SIMPLEDRM=m`），而 `build-alpine-initramfs.py` 的 `MODULE_EXCLUDES` 把整个 `kernel/drivers/gpu` 排除了（旧注释写"文字控制台用内建 efifb/vesafb"——**该假设在 UEFI 下不成立**）。**修复**：①构建脚本新增 `EXTRA_MODULES = ['kernel/drivers/gpu/drm/tiny/simpledrm.ko.gz']`（依赖闭包自动带回 `drm.ko`/`drm_kms_helper.ko`/`drm_shmem_helper.ko`，整包只 +0.13MB）；②`bootfiles/alpine/init` 里提前 `ldmod simpledrm`；③cmdline 仍是 `console=tty0`。**回归测试**：`tools/vmtest/uefi-screen.ps1`（QEMU+OVMF，`-display none` + monitor `screendump` 抓两次，字节差异 8.4% ⇒ 控制台活着；PASS）。**屏上文字（beta.10 起）可含中文**：initramfs 已内置 `zjfont.psf`（GNU Unifont 18.0.01 子集，PSF1-512 / 8×16），首屏、菜单、求助为中文；但 PSF 缺字仍显示方框（同 PIT-036 GRUB4DOS 的教训），新增汉字必须先进字模，见 PIT-233。**BIOS 路径不受影响**（走 `vgacon`，`CONFIG_VGA_CONSOLE=y`）。✅ 2026-09-19（QEMU 截图实证 + 用户 VM 实证还原成功）
 
 ### PIT-062
 
@@ -2323,6 +2323,9 @@
     `say` 屏幕消息全部改纯 ASCII；中文保留在 `.sh` 注释与落盘日志。新增 `check-shell.py` C8：
     救援脚本 `say "..."` 出现 CJK 直接失败。
   · 口径：与 PIT-061 的"屏幕 ASCII"一致，救援界面不显示中文。
+  · ⚠️ **本条"不塞字库 / 纯 ASCII"口径已被 PIT-233 取代（2026-11-08，beta.10）**：
+    initramfs 实测只 +10 KB 点阵字模即可覆盖 151 个汉字；C8 改为"允许中文、必须字模
+    覆盖 + 无全角标点 + ≤78 列"，不再强制纯 ASCII。
 
 ### PIT-223
 
@@ -2454,6 +2457,27 @@
     命中直接 `REFUSE`；`check-dist.py` 复用。`portable_main.cpp` 换版本解包时删
     AppDir 里旧版的契约副件/状态文件（`logs\` 保留给用户）。
   · 回归：`tests/test_pack_hygiene.sh` 6 条；`check-dist` 在 dist 有残留时直接失败。
+
+### PIT-233
+
+- PIT-233 **救援字模来源不可复现、许可不明：freetype + 本机 SimSun**（2026-11-08，beta.10）
+  · 现象：beta.9 的 `zjfont.psf` 由生成器调用 freetype、从本机 SimSun 取模 —— 换机器/
+    换字体文件就生成不出同样字节，别人拿到仓库也无法复现；SimSun 无随产品分发许可，
+    `THIRD_PARTY_LICENSES.txt` 五项写不完整 → 发布合规无法闭环。
+  · 处置：**定源 GNU Unifont 18.0.01（16×16，SIL OFL 1.1）**。生成器去掉
+    freetype/SimSun 依赖，改为纯 `.hex` 点阵文本解析；`--from-unifont` 导出子集
+    （95 ASCII + 151 汉字，文件头记上游内容 SHA-256），`--check`/`--verify` 逐字节复现。
+    既有硬约束不变：PSF1-512 / 8×16、汉字左右切半 + PUA（U+E000 起）双码位拼 16×16、
+    ASCII 锁 0x20..0x7E、`zjzhmap.sed` 同步。
+  · 结果：`bootfiles/zjfont.psf` **10,014 B**，SHA256
+    `93A51D67E1A9188BCB84E36D053C176276FA8ED5A46D89A5DDFE7D5DFA8E1424`；
+    `zjzhmap.sed` 内容未变。151 个汉字中 **149 个与 beta.9 逐像素相同**（"回"/"失"两字
+    有差异），ASCII 随字源变为 Unifont 外观。
+  · 许可：`THIRD_PARTY_LICENSES.txt` 补齐五项（版本 / 上游 URL / 内容 SHA-256 /
+    OFL-1.1 全文 / 修改声明），`docs/06` 的"字源待定不得出包"门禁转为**已通过**。
+  · 出包校验：initramfs 内 `zjfont.psf` 必须与仓库源文件**逐字节一致**（beta.10 实测
+    同一 SHA-256）；`zjzhmap.sed` 与 `zjfont.psf` 的同步性由 `check-shell.py` C8 校验。
+  · 回归：`python tools/gen-rescue-font.py --check` / `--verify`；`make check` 全绿。
 
 
 

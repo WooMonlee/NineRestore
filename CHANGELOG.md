@@ -3,6 +3,46 @@
 > 版本号唯一来源是 `src/common/version.h`；发布时 `version.h` / git tag / `dist/version.json` 三处同源。
 > 命名规则见 `docs/37-版本命名规范.md`（测试版 `1.0 beta.N` / 内部 `1.0.0.N` / 文件 `九转大还原1.0-beta.N.exe`）。
 
+## 1.0 beta.10（2026-11-08，内部 `1.0.0.10`）
+
+> 测试版（Beta）。本批**只含救援层中文化/字模**（提交 `1021d83`，父提交为 beta.9 的
+> `2c38ad9`），不掺功能改动。beta.9 的救援界面已中文化，但字模由 freetype + 本机
+> SimSun 取模：别人复现不出同样字节、SimSun 也无随产品分发许可；本版定源
+> GNU Unifont 18.0.01（SIL OFL 1.1）。
+
+### 1. 字模定源：GNU Unifont 18.0.01（SIL OFL 1.1）
+
+- 生成器去掉 freetype/SimSun 依赖，改为纯 `.hex` 点阵解析；`--from-unifont` 导出子集
+  （95 ASCII + 151 汉字，文件头记上游内容 SHA-256），`--check`/`--verify` 逐字节复现（PIT-233）。
+- `bootfiles/zjfont.psf` **10,014 B** / `93A51D67E1A9188BCB84E36D053C176276FA8ED5A46D89A5DDFE7D5DFA8E1424`；
+  `bootfiles/zjzhmap.sed` 内容未变。
+- 151 个汉字中 **149 个与 beta.9 逐像素相同**（"回"/"失"两字有差异）；ASCII 换为 Unifont 外观。
+- 既有约束不变：PSF1-512 / 8×16、汉字左右切半 + PUA 双码位拼 16×16、ASCII 锁 0x20..0x7E、
+  单行 ≤78 列（`check-shell.py` C8）。
+
+### 2. 许可与文档口径
+
+- `THIRD_PARTY_LICENSES.txt` 补齐 Unifont 五项（名称与版本 / 上游 URL / 内容 SHA-256 /
+  OFL-1.1 全文 / 修改声明）；`docs/06` 的字源门禁转为**已通过**。
+- `docs/03`、`docs/04`、`docs/25`（PIT-061 尾注、PIT-222 口径）、`docs/33` 的"屏幕只能
+  ASCII"表述同步改为"可含中文 + 字模覆盖 + 无全角标点 + ≤78 列"（PIT-233）。
+
+### 3. 已知未完成（本版不动，先说明再出包）
+
+- `zjrestore-lite.sh` 的 apply/执行进度/诊断行仍为**英文**；交互屏（首屏、回滚/失败菜单、
+  确认、求助）已为中文。属下一版范围，不阻塞本版。
+- 当前无超过 78 列的 `say` 文案（C8 全部通过）；新增中文提示仍须先补字模。
+
+### 4. 门禁与包
+
+- `make check` 全绿（摘要见 `docs/34` §18）。
+- 四点版本一致 `1.0.0.10`：`dist/bootfiles/rescue-build.txt` / `dist/version.json` /
+  initramfs 内 `zjrescue-version` / exe 资源；文件名 `九转大还原1.0-beta.10.exe`。
+- 包 41,847,963 B / `B75D160C6F602A86A69E0151EBED993CC51FF601D3951BAC2471C47B4F68991E`；
+  initramfs 17,419,427 B / `FCA37139E4598841388CFCFBC60402318942934D6F8FB56D6EA7DBFCA950F846`；
+  initramfs 内 `zjfont.psf` 与仓库源文件逐字节一致；载荷 74 项，无运行产物。
+- 历史包 beta.1–beta.9 未改动。VM 逐屏复验项见 `docs/35` §K。
+
 ## 1.0 beta.9（2026-11-08，内部 `1.0.0.9`）
 
 > 测试版（Beta）。beta.8 复验 A2/A3/A4 通过、A1 失败、A5 缺条件；本版修 A1 的结构性
