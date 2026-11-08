@@ -29,6 +29,7 @@ SysRecover（SysRecover.exe / SysRecoverUI.exe 及 src/ 下的源码）为独立
 | shim（Debian） | shim-signed 1.51+16.1-2（shimx64.efi） | BSD-2-Clause | 仅分发二进制（未修改，微软 CA2011+CA2023 双签） |
 | GRUB4DOS | grldr / grldr.mbr | GPL-2.0 | 仅分发二进制（未修改） |
 | Microsoft UCRT | ucrtbase.dll 等 16 个（x64 / x86） | Microsoft 可再分发（Windows SDK / app-local 部署） | 仅分发二进制（未修改，随包以支持 Win7 零安装运行） |
+| 救援层控制台点阵字模（`bootfiles/zjfont.psf`） | GNU Unifont 18.0.01（16×16 点阵） | SIL OFL 1.1（上游另有 GPLv2+字体例外，本产品按 OFL 分发） | 子集化（95 ASCII + 151 汉字）并按 8×16 切半重排后嵌入 initramfs，随产品分发；**修改已声明**，版权与许可全文见文末 |
 
 构建/测试期使用、**不随产品分发**的工具：MinGW-w64 GCC、osslsigncode (GPL-3.0)、
 QEMU/OVMF (GPL-2.0)、mtools (GPL-3.0)、zstd、Python。
@@ -49,6 +50,12 @@ QEMU/OVMF (GPL-2.0)、mtools (GPL-3.0)、zstd、Python。
 - Microsoft UCRT：来自 Windows SDK / mingw-w64 的应用程序本地（app-local）
   再分发件；获取方式见 https://learn.microsoft.com/cpp/windows/redistributing-components
   与 https://www.mingw-w64.org/
+- 救援层控制台点阵字模：**GNU Unifont 18.0.01（16×16）**，上游
+  https://unifoundry.com/unifont/ ；本产品只取其中 95 个 ASCII 与 151 个汉字，
+  子集快照见 `tools/fonts/rescue-16px.hex`（文件头记有上游内容 SHA-256），
+  可用 `tools/gen-rescue-font.py --from-unifont <上游 .hex>` 逐字节复现。
+  许可按 **SIL OFL 1.1** 分发（上游为 OFL-1.1 与 GPLv2+字体例外双许可），
+  全文与版权行见文末专节。
 
 四、许可条款全文
 ------------------------------------------------------------------------------
@@ -1297,3 +1304,125 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+
+==============================================================================
+救援层控制台点阵字模 —— GNU Unifont 18.0.01（SIL OFL 1.1）
+==============================================================================
+本产品在 initramfs 中嵌入 bootfiles/zjfont.psf（PSF1，512 字形，10,014 B）。
+来源与声明字段：
+
+  1. 名称与版本：GNU Unifont 18.0.01（16×16 点阵，unifont-18.0.01.hex）
+  2. 上游 URL：  https://unifoundry.com/pub/unifont/unifont-18.0.01/font-builds/unifont-18.0.01.hex.gz
+                 项目主页：https://unifoundry.com/unifont/
+  3. 内容 SHA-256（上游 .hex 解压后文本）：
+     2ab7801c809b76541a10b25858c1a962bdb650eee56b4c7df1f325b56e3955ee
+     子集快照 tools/fonts/rescue-16px.hex 的 SHA-256：
+     f98c8e3acb2ef36734ee4da90fd63a09bdea7e194478d073fb381f28d6020035
+  4. 版权声明（取自上游 unifont-18.0.01.bdf 的 COPYRIGHT 字段）：
+     Copyright (C) 1998-2026 Roman Czyborra, Paul Hardy, Qianqian Fang,
+     Andrew Miller, Johnnie Weaver, David Corbett, Ælla Chiana Moskopp,
+     Rebecca Bettencourt, Minseo Lee, Ho-Seok Ee, et al.
+     License: SIL Open Font License version 1.1 and GPLv2+: GNU GPL version 2
+     or later <http://gnu.org/licenses/gpl.html> with the GNU Font Embedding
+     Exception.
+  5. 本产品采用的许可：SIL Open Font License 1.1。上游为 OFL-1.1 与
+     GPLv2+字体例外双许可，本产品按 OFL-1.1 分发，全文见下。
+  6. 修改声明：本产品仅从上游取 95 个 ASCII（U+0020..U+007E）与 151 个汉字，
+     按 8×16 切半重排、映射到私用区码位后打包为 PSF1 嵌入 initramfs；字形点阵
+     本身未改动。上游未声明 Reserved Font Name，本产品也不把 "Unifont" 用作
+     对外字体名称（仅在救援层内核控制台内部加载）。
+  7. 复现：python tools/gen-rescue-font.py --from-unifont <上游 .hex> 导出子集，
+     再 python tools/gen-rescue-font.py 生成资产；--verify 应输出 byte-identical。
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+This license is copied below, and is also available with a FAQ at:
+https://openfontlicense.org
+
+
+-----------------------------------------------------------
+SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
+-----------------------------------------------------------
+
+PREAMBLE
+The goals of the Open Font License (OFL) are to stimulate worldwide
+development of collaborative font projects, to support the font creation
+efforts of academic and linguistic communities, and to provide a free and
+open framework in which fonts may be shared and improved in partnership
+with others.
+
+The OFL allows the licensed fonts to be used, studied, modified and
+redistributed freely as long as they are not sold by themselves. The
+fonts, including any derivative works, can be bundled, embedded,
+redistributed and/or sold with any software provided that any reserved
+names are not used by derivative works. The fonts and derivatives,
+however, cannot be released under any other type of license. The
+requirement for fonts to remain under this license does not apply
+to any document created using the fonts or their derivatives.
+
+DEFINITIONS
+"Font Software" refers to the set of files released by the Copyright
+Holder(s) under this license and clearly marked as such. This may
+include source files, build scripts and documentation.
+
+"Reserved Font Name" refers to any names specified as such after the
+copyright statement(s).
+
+"Original Version" refers to the collection of Font Software components as
+distributed by the Copyright Holder(s).
+
+"Modified Version" refers to any derivative made by adding to, deleting,
+or substituting -- in part or in whole -- any of the components of the
+Original Version, by changing formats or by porting the Font Software to a
+new environment.
+
+"Author" refers to any designer, engineer, programmer, technical
+writer or other person who contributed to the Font Software.
+
+PERMISSION & CONDITIONS
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of the Font Software, to use, study, copy, merge, embed, modify,
+redistribute, and sell modified and unmodified copies of the Font
+Software, subject to the following conditions:
+
+1) Neither the Font Software nor any of its individual components,
+in Original or Modified Versions, may be sold by itself.
+
+2) Original or Modified Versions of the Font Software may be bundled,
+redistributed and/or sold with any software, provided that each copy
+contains the above copyright notice and this license. These can be
+included either as stand-alone text files, human-readable headers or
+in the appropriate machine-readable metadata fields within text or
+binary files as long as those fields can be easily viewed by the user.
+
+3) No Modified Version of the Font Software may use the Reserved Font
+Name(s) unless explicit written permission is granted by the corresponding
+Copyright Holder. This restriction only applies to the primary font name as
+presented to the users.
+
+4) The name(s) of the Copyright Holder(s) or the Author(s) of the Font
+Software shall not be used to promote, endorse or advertise any
+Modified Version, except to acknowledge the contribution(s) of the
+Copyright Holder(s) and the Author(s) or with their explicit written
+permission.
+
+5) The Font Software, modified or unmodified, in part or in whole,
+must be distributed entirely under this license, and must not be
+distributed under any other license. The requirement for fonts to
+remain under this license does not apply to any document created
+using the Font Software.
+
+TERMINATION
+This license becomes null and void if any of the above conditions are
+not met.
+
+DISCLAIMER
+THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT
+OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL
+DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
+OTHER DEALINGS IN THE FONT SOFTWARE.
+

@@ -101,3 +101,7 @@ build/versioninfo/
 
 # 归档的旧发布物（用户决定从盘根移入，不入库）
 archive/
+# 救援层点阵字源：只入库子集（tools/fonts/rescue-16px.hex）；上游整库体积大、随版本漂移，本地缓存不入库
+tools/fonts/*.hex.gz
+tools/fonts/*.hex.zst
+tools/fonts/upstream/

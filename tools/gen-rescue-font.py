@@ -13,28 +13,37 @@
     直接写进显存的（绕过 unicode 映射），空格不在 0x20 会在清屏后满屏乱码。
   · 0x80..0x1ff + 0x00..0x1f 汉字左右半（这些槽不会被 8 位裸字符命中）。
 
+字源格式（与 GNU Unifont 的 .hex 相同，便于换源）：
+  每行 `码位:点阵`，点阵是 16 行、每行 8 列（32 个 hex 字符）或 16 列（64 个）。
+  `#` 开头为注释。入库的子集在 tools/fonts/rescue-16px.hex，文件头写明上游
+  来源与内容 SHA-256 —— 换源时用 --from-unifont 从上游整库导出即可。
+
 用法：
   python tools/gen-rescue-font.py            # 重新生成 bootfiles/zjfont.psf
                                              #       bootfiles/zjzhmap.sed
   python tools/gen-rescue-font.py --check    # 只校验：字模/映射是否覆盖脚本用字、
                                              #   每条是否 ≤78 列（make check 会跑，不写文件）
   python tools/gen-rescue-font.py --verify   # 重新生成并与入库文件逐字节比对
-                                             #   （需 freetype-py + simsun，可选）
-依赖：freetype-py（pip install freetype-py）+ Windows 自带 simsun.ttc。
+  python tools/gen-rescue-font.py --from-unifont <上游 .hex|.hex.gz>
+                                             # 只导出 tools/fonts/rescue-16px.hex
+                                             #   （ASCII 0x20..0x7E + 脚本用到的汉字），
+                                             #   不写 zjfont.psf / zjzhmap.sed
+
+依赖：**无第三方库**。纯文本点阵解析，不需要 freetype，也不需要系统字体，
+因此任何人拿到仓库都能复现出同一份字节（这一点是换开源字源的主要目的之一）。
 改动提示语后必须重跑本工具，否则 check-shell.py 的 C8 会报"字模未覆盖"。
 """
 import argparse
+import gzip
+import hashlib
 import os
 import re
 import struct
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FONT_SRC = r"C:\Windows\Fonts\simsun.ttc"
-FONT_INDEX = 0
-PX = 16
+FONT_HEX = os.path.join(ROOT, "tools", "fonts", "rescue-16px.hex")
 CELL_W, CELL_H = 8, 16
-BASELINE = 14
 PUA_BASE = 0xE000
 ASCII_START, ASCII_END = 0x20, 0x7E
 MAX_GLYPHS = 512
@@ -88,79 +97,90 @@ def collect_hanzi(msgs):
     return chars, bad
 
 
-def load_bitmap(face, ch):
-    import freetype
-    face.load_char(ch, freetype.FT_LOAD_RENDER | freetype.FT_LOAD_TARGET_MONO)
-    g = face.glyph
-    bm = g.bitmap
-    assert bm.pixel_mode == freetype.FT_PIXEL_MODE_MONO, "not a mono bitmap"
-    rows = []
-    buf = bm.buffer
-    for y in range(bm.rows):
-        row = []
-        for x in range(bm.width):
-            byte = buf[y * bm.pitch + (x >> 3)]
-            row.append(1 if (byte >> (7 - (x & 7))) & 1 else 0)
-        rows.append(row)
-    return rows, g.bitmap_left, g.bitmap_top
+def read_text(path):
+    """读 .hex（可 gzip），返回文本。"""
+    if path.endswith(".gz"):
+        with gzip.open(path, "rb") as fh:
+            return fh.read().decode("utf-8")
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
 
 
-def place(face, ch, cw, chh, clip_report):
-    rows, left, top = load_bitmap(face, ch)
-    wsrc = len(rows[0]) if rows else 0
-    if wsrc > cw:
-        scaled = []
-        for row in rows:
-            out = []
-            for x in range(cw):
-                a = (x * wsrc) // cw
-                b = ((x + 1) * wsrc) // cw
-                out.append(1 if any(row[i] for i in range(a, max(a + 1, b))) else 0)
-            scaled.append(out)
-        clip_report.append((ch, "squeezed %d->%d" % (wsrc, cw)))
-        rows, wsrc = scaled, cw
-    canvas = [[0] * cw for _ in range(chh)]
-    x0 = left
-    y0 = BASELINE - top
-    if x0 < 0 or y0 < 0 or x0 + wsrc > cw or y0 + len(rows) > chh:
-        clip_report.append((ch, left, top, wsrc, len(rows)))
-    for y, row in enumerate(rows):
-        yy = y0 + y
-        if not (0 <= yy < chh):
+def parse_hex(text, where="<hex>"):
+    """解析 `码位:点阵`，返回 {码位: rows}。rows 是 16 行、每行 8 或 16 个 0/1。"""
+    glyphs = {}
+    for ln, line in enumerate(text.splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
             continue
-        for x, bit in enumerate(row):
-            xx = x0 + x
-            if bit and 0 <= xx < cw:
-                canvas[yy][xx] = 1
-    return canvas
+        if ":" not in line:
+            raise SystemExit("%s:%d 不是 `码位:点阵` 格式: %r" % (where, ln, line))
+        cp_s, bits = line.split(":", 1)
+        try:
+            cp = int(cp_s, 16)
+        except ValueError:
+            raise SystemExit("%s:%d 码位不是十六进制: %r" % (where, ln, cp_s))
+        if len(bits) not in (32, 64):
+            raise SystemExit("%s:%d 点阵应为 32（8 列）或 64（16 列）个 hex 字符，"
+                             "实为 %d 个" % (where, ln, len(bits)))
+        cols = 8 if len(bits) == 32 else 16
+        step = cols // 4
+        rows = []
+        for i in range(0, len(bits), step):
+            v = int(bits[i:i + step], 16)
+            rows.append([(v >> (cols - 1 - b)) & 1 for b in range(cols)])
+        if len(rows) != CELL_H:
+            raise SystemExit("%s:%d 应为 %d 行，实为 %d 行"
+                             % (where, ln, CELL_H, len(rows)))
+        glyphs[cp] = rows
+    return glyphs
 
 
-def canvas_to_bytes(cv):
+def load_font_hex():
+    if not os.path.isfile(FONT_HEX):
+        raise SystemExit("缺少字源 %s；先用 --from-unifont <上游 .hex> 导出子集，"
+                         "或从仓库恢复该文件" % os.path.relpath(FONT_HEX, ROOT))
+    return parse_hex(read_text(FONT_HEX), os.path.relpath(FONT_HEX, ROOT))
+
+
+def pack_rows(rows, cols=CELL_W):
+    """rows（每行 cols 个 0/1）→ 每行 1 字节（cols=8）。"""
     out = bytearray()
-    for row in cv:
+    for row in rows:
         b = 0
-        for i, bit in enumerate(row):
-            if bit:
+        for i in range(cols):
+            if row[i]:
                 b |= 0x80 >> i
         out.append(b)
     return bytes(out)
 
 
 def build(hanzi):
-    # freetype 只在真正出字模时需要：--check 要在没装 freetype-py 的机器上也能跑。
-    import freetype
-    face = freetype.Face(FONT_SRC, FONT_INDEX)
-    face.set_pixel_sizes(0, PX)
+    glyphs = load_font_hex()
+    warned = []
 
-    clip_ascii, clip_cjk = [], []
     index = {}
     slot_bytes = [None] * MAX_GLYPHS
     slot_maps = [[] for _ in range(MAX_GLYPHS)]
 
     for cp in range(ASCII_START, ASCII_END + 1):
-        cv = place(face, chr(cp), CELL_W, CELL_H, clip_ascii)
-        slot_bytes[cp] = canvas_to_bytes(cv)
+        rows = glyphs.get(cp)
+        if rows is None:
+            raise SystemExit("字源缺少 ASCII U+%04X 的字形（0x20..0x7E 必须齐全）" % cp)
+        if len(rows[0]) != CELL_W:
+            # 字源若把 ASCII 画成 16 列，取左 8 列（控制台一格只有 8px）
+            warned.append(cp)
+            rows = [r[:CELL_W] for r in rows]
+        slot_bytes[cp] = pack_rows(rows)
         slot_maps[cp] = [cp]
+    if warned:
+        print("注意：字源里 %d 个 ASCII 字形是 16 列，已取左 8 列（U+%04X 起）"
+              % (len(warned), warned[0]))
+
+    missing = [ch for ch in hanzi if ord(ch) not in glyphs]
+    if missing:
+        raise SystemExit("字源缺 %d 个汉字: %s；请用 --from-unifont 重新导出子集"
+                         % (len(missing), "".join(missing)))
 
     free = [s for s in (list(range(0x80, MAX_GLYPHS)) + list(range(0x00, ASCII_START))
                         ) if slot_bytes[s] is None]
@@ -168,11 +188,14 @@ def build(hanzi):
         raise SystemExit("字模预算超了：需要 %d 槽，只剩 %d"
                          % (2 * len(hanzi), len(free)))
     for i, ch in enumerate(hanzi):
-        cv16 = place(face, ch, 16, 16, clip_cjk)
+        rows = glyphs[ord(ch)]
+        if len(rows[0]) != 16:
+            raise SystemExit("汉字 %r 在字源里只有 %d 列，16 点阵需要 16 列"
+                             % (ch, len(rows[0])))
         lslot, rslot = free[2 * i], free[2 * i + 1]
-        slot_bytes[lslot] = canvas_to_bytes([r[0:8] for r in cv16])
+        slot_bytes[lslot] = pack_rows([r[:8] for r in rows])
+        slot_bytes[rslot] = pack_rows([r[8:16] for r in rows])
         slot_maps[lslot] = [PUA_BASE + 2 * i]
-        slot_bytes[rslot] = canvas_to_bytes([r[8:16] for r in cv16])
         slot_maps[rslot] = [PUA_BASE + 2 * i + 1]
         index[ch] = (lslot, rslot, PUA_BASE + 2 * i, PUA_BASE + 2 * i + 1)
 
@@ -186,7 +209,7 @@ def build(hanzi):
     psf = struct.pack("<BBBB", 0x36, 0x04, 0x03, charsize) + body + bytes(table)
 
     used = sum(1 for b in slot_bytes if b is not None)
-    return psf, index, used, clip_ascii, clip_cjk
+    return psf, index, used
 
 
 def sed_text(index, hanzi):
@@ -194,6 +217,43 @@ def sed_text(index, hanzi):
     for ch in hanzi:
         out.append("s/%s/%s%s/g" % (ch, chr(index[ch][2]), chr(index[ch][3])))
     return "\n".join(out) + "\n"
+
+
+def export_subset(src_path, hanzi):
+    """从上游整库 .hex 导出本脚本用到的子集（ASCII + 汉字），写 FONT_HEX。"""
+    text = read_text(src_path)
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    glyphs = parse_hex(text, src_path)
+    want = list(range(ASCII_START, ASCII_END + 1)) + [ord(ch) for ch in hanzi]
+    missing = [cp for cp in want if cp not in glyphs]
+    if missing:
+        raise SystemExit("上游缺 %d 个字形: %s"
+                         % (len(missing), ", ".join("U+%04X" % cp for cp in missing[:12])))
+
+    lines = [
+        "# 救援层控制台点阵子集（%d ASCII + %d 汉字，16 行；8 或 16 列）" % (95, len(hanzi)),
+        "# 由 tools/gen-rescue-font.py --from-unifont 从上游整库导出，勿手改。",
+        "# 上游文件：%s" % os.path.basename(src_path),
+        "# 上游内容 SHA-256（解压后文本）：%s" % digest,
+        "# 说明：本文件只含脚本当前用到的字；改提示语后请重跑 --from-unifont。",
+        "",
+    ]
+    for cp in want:
+        rows = glyphs[cp]
+        stride = len(rows[0]) // 4
+        bits = ""
+        for row in rows:
+            v = 0
+            for b in row:
+                v = (v << 1) | b
+            bits += ("%0*x" % (stride, v))
+        lines.append("%04X:%s" % (cp, bits))
+    os.makedirs(os.path.dirname(FONT_HEX), exist_ok=True)
+    with open(FONT_HEX, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("\n".join(lines) + "\n")
+    print("导出 %s：%d 个字形（ASCII 95 + 汉字 %d），%d B"
+          % (os.path.relpath(FONT_HEX, ROOT), len(want), len(hanzi),
+             os.path.getsize(FONT_HEX)))
 
 
 SED_LINE_RE = re.compile(r"s/(.)/(..)/g$")
@@ -266,7 +326,9 @@ def main():
     ap.add_argument("--check", action="store_true",
                     help="只校验：字模/映射是否覆盖脚本用字、每行是否 ≤78 列（不写文件）")
     ap.add_argument("--verify", action="store_true",
-                    help="重新生成并与仓库内文件逐字节比对（需 freetype-py + simsun）")
+                    help="用 tools/fonts/rescue-16px.hex 重新生成并与仓库内文件逐字节比对")
+    ap.add_argument("--from-unifont", metavar="UPSTREAM_HEX",
+                    help="从上游整库 .hex（可 gzip）导出子集，不生成资产")
     args = ap.parse_args()
 
     msgs = scan_messages()
@@ -278,6 +340,11 @@ def main():
 
     print("中文字面量 %d 条，不同汉字 %d 个，字形预算 %d/512"
           % (len(msgs), len(hanzi), 95 + 2 * len(hanzi)))
+
+    if args.from_unifont:
+        export_subset(args.from_unifont, hanzi)
+        print("（未生成 zjfont.psf / zjzhmap.sed；确认字源后直接运行本工具生成）")
+        return 0
 
     fp = os.path.join(ROOT, "bootfiles", "zjfont.psf")
     sp = os.path.join(ROOT, "bootfiles", "zjzhmap.sed")
@@ -295,13 +362,7 @@ def main():
         print("(check only, nothing written)")
         return 0
 
-    if not os.path.isfile(FONT_SRC):
-        raise SystemExit("缺少字体源 %s" % FONT_SRC)
-    psf, index, used, clip_ascii, clip_cjk = build(hanzi)
-    if clip_ascii:
-        print("ASCII 裁剪: %r" % clip_ascii)
-    if clip_cjk:
-        print("汉字裁剪: %r" % clip_cjk)
+    psf, index, used = build(hanzi)
 
     if args.verify:
         ok = True
