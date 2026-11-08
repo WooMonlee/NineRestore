@@ -88,10 +88,16 @@ void CMainForm::RefreshBootMenuBtn() {
             if (uefiPath) {
                 // 开机键按品牌/机型识别（bioskey：表移植自 BiosKC，2026-10-18）；
                 // 识别不到用中性措辞，绝不写死 F12（HP 是 F9，见客户反馈）。
-                swprintf(tip, 512,
-                         Tr(L"已安装：开机按 %ls 选「SysRecover」，\n把 %ls（第 %d 个镜像）还原到 %ls。\n要清除请用「更多功能>>」→「清除启动中还原菜单」\n镜像请勿移动或删除，否则该菜单无法还原"),
-                         BootMenuKeyHint().c_str(), boundImg.c_str(), boundIdx,
-                         tgt.c_str());
+                // beta.8：VMware 客户机没有"开机按键窗口"，改为电源菜单进固件。
+                if (IsVmwareGuest())
+                    swprintf(tip, 512,
+                             Tr(L"已安装：关机，然后用「电源 → 打开电源时进入固件」选「SysRecover」，\n把 %ls（第 %d 个镜像）还原到 %ls。\n要清除请用「更多功能>>」→「清除启动中还原菜单」\n镜像请勿移动或删除，否则该菜单无法还原"),
+                             boundImg.c_str(), boundIdx, tgt.c_str());
+                else
+                    swprintf(tip, 512,
+                             Tr(L"已安装：开机按 %ls 选「SysRecover」，\n把 %ls（第 %d 个镜像）还原到 %ls。\n要清除请用「更多功能>>」→「清除启动中还原菜单」\n镜像请勿移动或删除，否则该菜单无法还原"),
+                             BootMenuKeyHint().c_str(), boundImg.c_str(), boundIdx,
+                             tgt.c_str());
             } else
                 swprintf(tip, 512,
                          Tr(L"已安装：开机菜单里选「SysRecover」即可把\n%ls（第 %d 个镜像）还原到 %ls。\n要清除请用「更多功能>>」→「清除启动中还原菜单」\n镜像请勿移动或删除，否则该菜单无法还原"),
@@ -177,14 +183,22 @@ void CMainForm::ToggleBootMenu() {
         if (name.size() > 18)
             name = name.substr(0, 18) + L"...";
         wchar_t msg[512];
-        if (UseUefiBootFor(part))
-            swprintf(msg, 512,
-                     Tr(L"重启后按 %ls 选「SysRecover」还原\n"
-                        L"镜像：%ls（第 %d 个）\n"
-                        L"目标：%ls: 盘 —— 选中即格式化该分区"),
-                     BootMenuKeyHint().c_str(), name.c_str(), m_selImageIndex,
-                     part.letter.empty() ? L"?" : part.letter.c_str());
-        else
+        if (UseUefiBootFor(part)) {
+            if (IsVmwareGuest())
+                swprintf(msg, 512,
+                         Tr(L"关机后用「电源 → 打开电源时进入固件」选「SysRecover」还原\n"
+                            L"镜像：%ls（第 %d 个）\n"
+                            L"目标：%ls: 盘 —— 选中即格式化该分区"),
+                         name.c_str(), m_selImageIndex,
+                         part.letter.empty() ? L"?" : part.letter.c_str());
+            else
+                swprintf(msg, 512,
+                         Tr(L"重启后按 %ls 选「SysRecover」还原\n"
+                            L"镜像：%ls（第 %d 个）\n"
+                            L"目标：%ls: 盘 —— 选中即格式化该分区"),
+                         BootMenuKeyHint().c_str(), name.c_str(), m_selImageIndex,
+                         part.letter.empty() ? L"?" : part.letter.c_str());
+        } else
             swprintf(msg, 512,
                      Tr(L"重启后在启动菜单选「SysRecover」还原\n"
                         L"镜像：%ls（第 %d 个）\n"
@@ -425,9 +439,13 @@ void CMainForm::OnMenuDone(int rc, bool install) {
                             UseUefiBootFor(m_parts[m_selPart]);
             if (uefiPath) {
                 wchar_t done[256];
-                swprintf(done, 256,
-                         Tr(L"启动还原菜单已安装：开机按 %ls 选「SysRecover」即可还原该镜像"),
-                         BootMenuKeyHint().c_str());
+                if (IsVmwareGuest())
+                    swprintf(done, 256,
+                             Tr(L"启动还原菜单已安装：关机后用「电源 → 打开电源时进入固件」选「SysRecover」即可还原该镜像"));
+                else
+                    swprintf(done, 256,
+                             Tr(L"启动还原菜单已安装：开机按 %ls 选「SysRecover」即可还原该镜像"),
+                             BootMenuKeyHint().c_str());
                 SetStatus(done);
             } else {
                 SetStatus(Tr(L"启动还原菜单已安装：开机选「SysRecover」即可还原该镜像"));

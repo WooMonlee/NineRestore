@@ -523,6 +523,45 @@ bb_esp_drop(){
         umount /tmp/zj_bb 2>/dev/null
     fi
 }
+# ── 兜底日志窝的确定性落点（beta.8，测试台复验问题 2）──
+# 现象：同一版本 1.0.0.7，兜底窝先后出现在 C:\ZJRESTORE-logs、一块 2GB 小盘、
+# 以及 Data 卷 —— 原来是"按设备枚举顺序抓到第一个能挂的分区"，与插拔顺序有关。
+# 规则（可预测、可文档化，与枚举顺序无关）：
+#   ① 跳过目标 / 循环 / 内存 / 光驱 / 软驱 / 已挂载分区；
+#   ② 容量 < 2 GiB 的卷不认领（小 U 盘常被误插、随时会拔走）；
+#   ③ **内置盘优先于可移动盘**（/sys/class/block/<disk>/removable = 1 视为可移动）；
+#   ④ 同类按容量降序；容量相同按设备名升序（sort 固定顺序）。
+# 结论：落到"内置盘中最大的那个可用分区"；同一台机器每次开机落点一致。
+# Windows 侧收集器遍历 C..Z（CollectDeployArtifacts），不依赖固定盘符。
+is_part_dev(){ [ -b "$1" ]; }   # 便于回归脚本 stub（beta.8）
+bb_part_removable(){ # 1=可移动 0=内置/未知
+    _n=$(basename "$1")
+    case "$_n" in
+        nvme*|mmcblk*) _dk=$(echo "$_n" | sed 's/p[0-9][0-9]*$//') ;;
+        *) _dk=$(echo "$_n" | sed 's/[0-9][0-9]*$//') ;;
+    esac
+    if [ -r "/sys/class/block/$_dk/removable" ]; then
+        _r=$(cat "/sys/class/block/$_dk/removable")
+    else
+        _r=0
+    fi
+    case "$_r" in 1) echo 1 ;; *) echo 0 ;; esac
+}
+pick_bb_home_devs(){ # 按上述规则输出候选设备，一行一个，最优在前
+    : > /tmp/zj-bb-cands
+    for _d in $(list_parts); do
+        is_part_dev "$_d" || continue
+        case "$_d" in *loop*|*ram*|*sr*|*cdrom*|*fd*|*floppy*) continue ;; esac
+        [ "$_d" = "${TARGET_DEV:-}" ] && continue
+        is_mounted "$_d" && continue
+        _sz=$(dev_size "$_d")
+        [ -n "$_sz" ] && [ "$_sz" -ge 2147483648 ] || continue
+        _rm=$(bb_part_removable "$_d")
+        echo "$_rm $_sz $_d" >> /tmp/zj-bb-cands
+    done
+    sort -k1,1n -k2,2nr -k3,3 /tmp/zj-bb-cands | awk '{print $3}'
+    rm -f /tmp/zj-bb-cands
+}
 # 兜底日志窝落盘（PIT-137，用户 2026-10-08 规格："以后只写一个固定地方，
 # 不要每个分区乱放"）：固定三处 —— ①软件目录（persist_log 已写）②兜底窝
 # <数据盘>\ZJRESTORE-logs\（此刻没有就现认领一个非目标分区）③ESP 的
@@ -545,14 +584,10 @@ bb_home_drop(){
         fi
     fi
     if [ -z "$BB_HOME" ]; then
-        for _d in $(list_parts); do
-            [ -b "$_d" ] || continue
-            case "$_d" in *loop*|*ram*|*sr*|*cdrom*|*fd*|*floppy*) continue ;; esac
-            # ⚠️ 必须 `${TARGET_DEV:-}`：zz-blackbox 模式下本函数在"解析目标分区"
-            #    之前就被调用，裸引用未定义变量会让 set -u 直接 rc=2 → init 的兜底
-            #    黑匣子写盘失败（PIT-138，2026-10-12 现场）。
-            [ "$_d" = "${TARGET_DEV:-}" ] && continue
-            is_mounted "$_d" && continue
+        # beta.8（问题 2）：确定性落点（内置 + 容量≥2GiB + 容量降序 + 设备名），
+        # 不再按 list_parts 枚举顺序撞运气；ZZ_BLACKBOX 早于目标解析也不受影响
+        # （pick_bb_home_devs 内部用 ${TARGET_DEV:-}）。
+        for _d in $(pick_bb_home_devs); do
             mkdir -p /tmp/zj_home2
             if mnt_dev "$_d" /tmp/zj_home2; then
                 if mkdir -p /tmp/zj_home2/ZJRESTORE-logs 2>/dev/null; then
@@ -749,11 +784,9 @@ claim_bb_home(){
         start_log_mirror
         return 0
     fi
-    for _d in $(list_parts); do
-        [ -b "$_d" ] || continue
-        case "$_d" in *loop*|*ram*|*sr*|*cdrom*|*fd*|*floppy*) continue ;; esac
-        [ "$_d" = "$TARGET_DEV" ] && continue
-        is_mounted "$_d" && continue
+    # beta.8（问题 2）：确定性候选顺序（内置优先 → 容量≥2GiB → 容量降序 → 设备名），
+    # 不再按 list_parts 枚举顺序碰运气；pick_bb_home_devs 内部跳过目标/已挂载。
+    for _d in $(pick_bb_home_devs); do
         mkdir -p /tmp/zj_home
         if mnt_dev "$_d" /tmp/zj_home; then
             # 这个分区也许就是软件目录所在（之前瞬时打不开）→ 直接当软件目录用

@@ -3,6 +3,49 @@
 > 版本号唯一来源是 `src/common/version.h`；发布时 `version.h` / git tag / `dist/version.json` 三处同源。
 > 命名规则见 `docs/37-版本命名规范.md`（测试版 `1.0 beta.N` / 内部 `1.0.0.N` / 文件 `九转大还原1.0-beta.N.exe`）。
 
+## 1.0 beta.8（2026-11-08，内部 `1.0.0.8`）
+
+> 测试版（Beta）。beta.7 的 4 项复验全通过；本版处理测试台提的两条"用户会碰到"的
+> 体验/一致性问题，并改 VMware 虚拟机的进固件提示。
+
+### 1. returnold 的 software_dir 在目标卷上，软件目录回执必然写不到（中）
+
+- 根因：`ops_returnold.cpp` 只判 `fixedDisk` 就把 `software_dir` 设成 `exeDir`；
+  程序放在目标盘（最常见的 C:）时，该目录随还原/回退消失（apply 会格式化，
+  returnold 的 `L5` 会把根下所有条目搬进 `~new` 再删除），救援层 `softscan`
+  又只扫非目标卷 → 两条 `dir=no`，两处回执只有兜底窝一处生效。
+- 修复：与 `ops_staged` 同规则——程序在目标盘时 `software_dir` 落到
+  `<数据盘>\ZJRESTORE`，救援层能按非目标卷找到，回执两处都真实生效。
+  找不到数据盘（单盘整盘为目标）时保留 `exeDir` 兜底并记
+  `software dir unusable for logs (on target/removable)`。
+- 评估过"换盘前只读挂目标卷解析软件目录"：**不采用**。目录解析得出来也活不过
+  交换（`L5` 整树搬家后 `L7` 删除），只读挂载只是多一次挂/卸（NTFS 脏卷还可能
+  RO 挂失败），收益为零、风险非零。理由写入 `docs/25` PIT-227。
+
+### 2. 兜底日志窝落点不稳定（中）
+
+- 根因：`claim_bb_home` / 晚到兜底原来按 `list_parts` **设备枚举顺序**抓第一个能挂
+  的分区：1.0.0.7 同版本先后落到 `C:\ZJRESTORE-logs`、2GB 小盘、Data 卷。
+- 修复：新增 `pick_bb_home_devs()`，规则固定且与枚举顺序无关：
+  跳过目标/循环/内存/光驱/软驱/已挂载 → **容量 < 2GiB 不认领** → **内置优先于
+  可移动**（`/sys/class/block/<disk>/removable`）→ 容量降序 → 设备名升序。
+  结论 = "内置盘中最大的可用分区"；`claim_bb_home` 与晚到 `bb_home_drop` 共用。
+  Windows 侧收集器本来就遍历 C..Z（`CollectDeployArtifacts`），不依赖固定盘符。
+- 新增 `tests/test_log_home_rule.sh`（7 条，已进 `make check`）：内置优先、容量降序、
+  同容量设备名升序、跳过目标、拒绝 2GB 小盘、两处共用、staged/returnold 同规则。
+
+### 3. VMware 虚拟机进固件的提示（体验）
+
+- `common/bioskey` 新增 `IsVmwareGuest()` / `LooksLikeVmware()`（只读注册表
+  `HARDWARE\DESCRIPTION\System\BIOS` 的 SMBIOS 标识，含 "VMWARE" 即判定；纯函数有单测）。
+- VMware 客户机没有"开机按键窗口"：所有 UEFI 分支的"开机按 <热键>"改为
+  "关机，然后用「电源 → 打开电源时进入固件」选 SysRecover"：
+  `main_form_bootmenu.cpp` 的已安装悬浮提示、安装确认、安装完成状态，
+  以及 `main_form_notice.cpp` 的"还原菜单未执行"正确操作与失败兜底两句。
+- 非 VMware 保持原有动态热键（`BootMenuKeyHint()`，不写死 F10/F12）。
+- 中英文同步：`tools/i18n-en.py` 新增 5 条，`lang/en.lang` 由 `i18n-wrap.py --gen-lang`
+  重新生成。
+
 ## 1.0 beta.7（2026-11-08，内部 `1.0.0.7`）
 
 > 测试版（Beta）。修 beta.6 复验未过的 2 项（P1-b 陈旧契约 / P3a returnold 回执），

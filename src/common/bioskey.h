@@ -23,4 +23,15 @@ std::wstring LocalBootMenuKey(std::wstring* vendor = nullptr);
 // 识别不到返回 Tr(L"快捷启动键")（中性措辞，绝不臆测 F12）。结果缓存。
 std::wstring BootMenuKeyHint();
 
+// 纯逻辑：四个 SMBIOS 标识串里出现 "VMWARE" 即视为 VMware 虚拟机
+//（顾客机型串如 "VMware Virtual Platform" / "VMware20,1"，大小写不敏感）。
+bool LooksLikeVmware(const std::wstring& baseBoardManufacturer,
+                     const std::wstring& baseBoardProduct,
+                     const std::wstring& systemManufacturer,
+                     const std::wstring& systemProduct);
+
+// 本机是否 VMware 虚拟机（纯注册表读 SMBIOS 标识，禁用 WMI；结果缓存）。
+// 用于把"开机按热键"改成"关机 → 电源 → 打开电源时进入固件"。
+bool IsVmwareGuest();
+
 }  // namespace sysrecover

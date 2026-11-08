@@ -291,6 +291,34 @@ std::wstring LocalBootMenuKey(std::wstring* vendor) {
     return key;
 }
 
+bool LooksLikeVmware(const std::wstring& baseBoardManufacturer,
+                     const std::wstring& baseBoardProduct,
+                     const std::wstring& systemManufacturer,
+                     const std::wstring& systemProduct) {
+    const std::wstring* src[] = {&baseBoardManufacturer, &baseBoardProduct,
+                                 &systemManufacturer, &systemProduct};
+    for (const std::wstring* s : src) {
+        if (s->empty()) continue;
+        if (wcsstr(ToUpperAscii(*s).c_str(), L"VMWARE")) return true;
+    }
+    return false;
+}
+
+bool IsVmwareGuest() {
+    static bool done = false;
+    static bool vm = false;
+    if (!done) {
+        const wchar_t* sub = L"HARDWARE\\DESCRIPTION\\System\\BIOS";
+        std::wstring bm = RegStr(HKEY_LOCAL_MACHINE, sub, L"BaseBoardManufacturer");
+        std::wstring bp = RegStr(HKEY_LOCAL_MACHINE, sub, L"BaseBoardProduct");
+        std::wstring sm = RegStr(HKEY_LOCAL_MACHINE, sub, L"SystemManufacturer");
+        std::wstring sp = RegStr(HKEY_LOCAL_MACHINE, sub, L"SystemProductName");
+        vm = LooksLikeVmware(bm, bp, sm, sp);
+        done = true;
+    }
+    return vm;
+}
+
 std::wstring BootMenuKeyHint() {
     static bool done = false;
     static std::wstring hint;

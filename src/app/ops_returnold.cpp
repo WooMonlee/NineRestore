@@ -202,17 +202,27 @@ int StageReturnOld(const PartitionInfo& target, std::string& err,
     t.softwarePath = ExePath();
     {
         wchar_t exLetter = exeDir.size() > 1 ? exeDir[0] : L'\0';
+        wchar_t tgtLetter = target.letter.empty() ? L'\0' : target.letter[0];
         wchar_t exRoot[4] = {exLetter, L':', L'\\', L'\0'};
         bool fixedDisk = exLetter && GetDriveTypeW(exRoot) == DRIVE_FIXED;
-        if (fixedDisk) {
+        // beta.8（测试台复验问题 1）：与 ops_staged 同规则 —— 程序在**目标盘**上时
+        // 软件目录随还原/交换一起消失（apply 会格式化，returnold 的 L5 会把根下
+        // 所有条目搬进 ~new 再删除），把日志/回执写在 exeDir 等于永远写不到。
+        // 此时改落到数据盘 <数据盘>\ZJRESTORE，救援层能按非目标卷找到。
+        bool onTarget = exLetter && tgtLetter && SameDrive(exLetter, tgtLetter);
+        if (fixedDisk && !onTarget) {
             t.softwareDir = exeDir;
         } else {
             std::wstring dataDrive = FindDataDrive(target.letter.empty() ? 0 : target.letter[0]);
-            t.softwareDir = dataDrive.empty() ? exeDir : dataDrive + kRecoveryDir;
+            if (dataDrive.empty())
+                t.softwareDir = exeDir;
+            else
+                t.softwareDir = dataDrive + kRecoveryDir;
             CreateDirectoryW(t.softwareDir.c_str(), nullptr);
+            LogInfo("software dir unusable for logs (on target/removable); log dir=" +
+                    W2U(t.softwareDir));
         }
     }
-
     // 清场（A2）+ 主/副契约写入
     {
         std::string clog;

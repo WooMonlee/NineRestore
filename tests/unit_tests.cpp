@@ -1081,6 +1081,24 @@ TEST(bios_key_lookup) {
     CHECK_EQ(ven, L"ASRock");
 }
 
+// ────────────────────── VMware 识别（beta.8：虚拟机提示改走电源菜单） ──────
+TEST(vmware_guest_detect) {
+    using sysrecover::LooksLikeVmware;
+    // 典型 VMware Workstation/ESXi 客户机 SMBIOS 串
+    CHECK(LooksLikeVmware(L"", L"", L"VMware, Inc.", L"VMware Virtual Platform"));
+    CHECK(LooksLikeVmware(L"", L"", L"VMWARE", L"VMware20,1"));
+    CHECK(LooksLikeVmware(L"VMware, Inc.", L"440BX Desktop Reference Platform",
+                          L"", L""));
+    // 大小写不敏感、串里含关键字即可
+    CHECK(LooksLikeVmware(L"", L"", L"vmware, inc.", L""));
+    // 物理机 / 其它虚拟机 / 空串 → 否
+    CHECK(!LooksLikeVmware(L"ASUSTeK COMPUTER INC.", L"PRIME B450M-A",
+                           L"System manufacturer", L"System Product Name"));
+    CHECK(!LooksLikeVmware(L"", L"", L"Microsoft Corporation",
+                           L"Virtual Machine"));
+    CHECK(!LooksLikeVmware(L"", L"", L"", L""));
+}
+
 // ────────────────────── rescue_decision（回执/待执行标记判定，PIT-115） ────
 // 用户 2026-10-05 规格："救援层是否真的跑过"必须能从记录中判定：
 //   标记（pending）比所有回执新 / 压根没回执 → 任务从未执行；

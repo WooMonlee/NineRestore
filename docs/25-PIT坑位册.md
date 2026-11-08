@@ -2377,5 +2377,45 @@
   · 回归：`tests/test_success_receipt.sh` 5 条（两处直写点 / 仅兜底窝 / 全失败 WARN /
     两条成功路径共用 helper）。
 
+### PIT-227
+
+- PIT-227 **returnold 的 software_dir 指向目标卷，软件目录回执永远写不到**（2026-11-08，beta.8，测试台复验）
+  · 现场：swap 模式 `softscan` 两条都是 `dir=no`；软件目录在目标卷上，"两处回执"只有兜底一处生效。
+  · 根因：`ops_returnold.cpp` 只判 `fixedDisk` → `software_dir = exeDir`；与 `ops_staged`
+    的 `onTarget` 规则不一致。目标卷上的目录活不过交换：apply 会格式化，returnold 的
+    `zjswap-undo` L5 把根下所有条目搬进 `~new`、L7 再删除。
+  · 处置：returnold 与 staged 同规则——程序在目标盘时 `software_dir` 落
+    `<数据盘>\ZJRESTORE`；无数据盘时保留 `exeDir` 并记
+    `software dir unusable for logs (on target/removable)`。
+  · **不采用"换盘前只读挂目标卷解析"**：解析结果在 swap 后必然失效（目录已被搬走/删除），
+    只读挂/卸只增加一次 NTFS 挂载风险（脏卷 RO 挂可能失败），收益为零。
+  · 回归：`tests/test_log_home_rule.sh` 第 ⑦ 条（staged/returnold 静态同规则）。
+  · 剩余限制：单块物理盘、整盘为目标时没有"非目标面"，回执只能靠 ESP；BIOS + 单盘
+    场景外部读不到回执 —— 属物理限制，写入 `docs/34` §16。
+
+### PIT-228
+
+- PIT-228 **兜底日志窝落点按设备枚举顺序，随机漂移**（2026-11-08，beta.8，测试台复验）
+  · 现场：同一 1.0.0.7 先后落到 `C:\ZJRESTORE-logs`、2GB 小盘、Data 卷。
+  · 根因：`claim_bb_home` / 晚到 `bb_home_drop` 用 `list_parts` 顺序 + "第一个能挂的"，
+    与 U 盘插拔/内核枚举顺序有关。
+  · 处置：`pick_bb_home_devs()` 固定规则（与枚举无关）：跳过目标/已挂载/光驱等 →
+    容量 < 2GiB 不认领 → 内置优先于可移动（`/sys/class/block/<disk>/removable`）→
+    容量降序 → 设备名升序。两处共用。
+  · 为什么不按"卷标签/盘符"排序：卷标签用户可改、盘符在 Linux 侧不存在，都会把
+    "确定性"建在可变输入上；容量+内置属性来自硬件，稳定可预测。
+  · 回归：`tests/test_log_home_rule.sh` 7 条。
+
+### PIT-229
+
+- PIT-229 **VMware 客户机提示"开机按 F10/热键"没有按键窗口**（2026-11-08，beta.8，用户反馈）
+  · 处置：`common/bioskey` 新增 `IsVmwareGuest()`（注册表 SMBIOS 标识含 "VMWARE"），
+    UEFI 分支全部改用"关机 → 电源 → 打开电源时进入固件 → 选 SysRecover"；
+    非 VMware 保持动态热键 `BootMenuKeyHint()`，不写死 F10/F12。
+  · 覆盖点：`main_form_bootmenu.cpp` 悬浮提示 / 安装确认 / 安装完成状态；
+    `main_form_notice.cpp` "还原菜单未执行"正确操作 + 失败兜底。
+  · 回归：`tests/unit_tests.cpp` `vmware_guest_detect`（7 组 SMBIOS 串）。
+
+
 
 
