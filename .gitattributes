@@ -10,6 +10,10 @@
 *.ps1       text eol=crlf
 *.bat       text eol=crlf
 Makefile    text eol=lf
+# 救援层取模中文化产物：sed 规则必须是 LF（CRLF 会让 sed 把 \r 当规则一部分），
+# 字模是二进制，绝不能做换行转换
+*.sed       text eol=lf
+*.psf       binary
 
 # 二进制（不做换行转换）
 *.dll       binary
