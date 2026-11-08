@@ -183,7 +183,9 @@ bool CMainForm::AskRebootRestoreConfirm(const PartitionInfo& part,
                     L"重启后还原，是重启格式化%ls: 盘后还原镜像，无法恢复现在状态\n"
                     L"加密镜像：重启后还原需要输入密码"),
                  part.letter.empty() ? L"?" : part.letter.c_str(),
-                 part.diskIndex, part.partNumber,
+                 part.diskIndex,
+                 part.displayNo ? part.displayNo
+                                : (part.ordinal ? part.ordinal : part.partNumber),
                  part.letter.empty() ? L"?" : part.letter.c_str());
     else
         swprintf(confirm, 1200,
@@ -192,7 +194,9 @@ bool CMainForm::AskRebootRestoreConfirm(const PartitionInfo& part,
                     L"重启后还原，是重启格式化%ls: 盘后还原镜像，无法恢复现在状态\n"
                     L"含 EFS 加密文件或特殊重解析点的镜像，请选「还原后重启」"),
                  part.letter.empty() ? L"?" : part.letter.c_str(),
-                 part.diskIndex, part.partNumber,
+                 part.diskIndex,
+                 part.displayNo ? part.displayNo
+                                : (part.ordinal ? part.ordinal : part.partNumber),
                  part.letter.empty() ? L"?" : part.letter.c_str());
     if (spaceShort) {
         wchar_t sp[192];
@@ -272,7 +276,10 @@ bool CMainForm::AskInPlaceRestoreConfirm(const PartitionInfo& part,
                 L"该分区上的所有数据将丢失！%ls\n"
                 L"目标分区当前未被占用，将立即就地还原，不需要重启。"),
              part.letter.empty() ? L"?" : part.letter.c_str(),
-             part.diskIndex, part.partNumber, logNote.c_str());
+             part.diskIndex,
+             part.displayNo ? part.displayNo
+                            : (part.ordinal ? part.ordinal : part.partNumber),
+             logNote.c_str());
     if (!bootNote.empty()) {
         wcscat(confirm, L"\n");
         wcscat(confirm, bootNote.c_str());

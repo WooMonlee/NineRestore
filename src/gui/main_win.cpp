@@ -655,6 +655,16 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
                                 Tr(L"删除旧系统"), MB_OK | MB_ICONWARNING);
                             continue;
                         }
+                        // beta.14（PIT-240）：连带清掉"解压并安装"留下的 ~new
+                        //（只删带 .zj-* 标记的；~old 永不触碰），删不干净就不自删。
+                        if (!sysrecover::CleanupMenuStaging(blog)) {
+                            MessageBoxW(
+                                h,
+                                Tr(L"目标盘上的 ~new 未能删除，已取消删除本程序。\n"
+                                   L"请确认该目录未被占用后重试。"),
+                                Tr(L"删除旧系统"), MB_OK | MB_ICONWARNING);
+                            continue;
+                        }
                         sysrecover::DeleteMenuBinding();
                         ScheduleProgramSelfDelete(sysrecover::AppDir());
                         MessageBoxW(h,

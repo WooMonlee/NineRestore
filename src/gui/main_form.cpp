@@ -178,6 +178,26 @@ void CMainForm::StartupLazyWork() {
     // logs\collected，各盘根的散件立即清掉。契约/引导文件不动。
     sysrecover::CleanupStrayLogs();
     sysrecover::StartupPhase("cleanup-stray");
+    // beta.14（PIT-241）：旧版装过菜单的机器，启动时把 menu.lst 标题/内核参数与
+    // BCD 描述自愈成当前文案（"SysRecovery Environment" → NineRestore），避免
+    // 旧条目一直留着或与新版并存。没装过则完全不写盘。
+    for (const std::wstring& drv :
+         {sysrecover::SystemDrive(), sysrecover::FindDataDrive()}) {
+        std::string rlog;
+        sysrecover::RefreshBootLayerNames(drv, sysrecover::ExeDir(), rlog);
+        if (!rlog.empty()) sysrecover::LogInfo("boot-name refresh: " + rlog);
+    }
+    sysrecover::StartupPhase("boot-name-refresh");
+    // beta.14（PIT-243）：还原会把 C:\ 的启动载荷与 \Boot\BCD 里的启动项一起覆盖。
+    // 救援层已把载荷写回新系统根并留 bcd=pending 标记，这里补建 BCD 条目；
+    // 成功改 bcd=done、失败保留 pending（下次启动重试，日志留痕）。
+    {
+        std::string mlog;
+        if (!sysrecover::EnsureMenuAfterRestore(mlog) && !mlog.empty())
+            mlog += "menu-redeploy: result FAILED (retry next start)\n";
+        if (!mlog.empty()) sysrecover::LogInfo("menu-redeploy: " + mlog);
+    }
+    sysrecover::StartupPhase("menu-redeploy");
     // 回主线程填分区下拉（lParam 所有权交给 handler，由它 delete）。
     auto* out = new std::vector<DiskInfo>(std::move(disks));
     if (!::PostMessage(m_hWnd, WM_PARTS_READY, 0, (LPARAM)out)) {

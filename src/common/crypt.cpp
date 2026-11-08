@@ -486,7 +486,7 @@ int UnlockV2(HANDLE h, const std::wstring& password, HeaderV2& hdr,
     }
     if (std::memcmp(hdr.magic, kMagic2, 8) != 0 || hdr.version != kVersion2 ||
         hdr.kdf != kKdfPbkdf2Sha256) {
-        err = Tr(L"加密镜像版本不受支持（请用更新版本的 SysRecover）");
+        err = Tr(L"加密镜像版本不受支持（请用更新版本的 NineRestore）");
         return 1;
     }
     if (hdr.sectorSize != kSectorSizeV2) {
@@ -549,7 +549,7 @@ int UnlockV1(HANDLE h, const std::wstring& password, HeaderV1& hdr,
     }
     if (std::memcmp(hdr.magic, kMagic1, 8) != 0 ||
         hdr.version != kVersion1 || hdr.kdf != kKdfPbkdf2Sha256) {
-        err = Tr(L"加密镜像版本不受支持（请用更新版本的 SysRecover）");
+        err = Tr(L"加密镜像版本不受支持（请用更新版本的 NineRestore）");
         return 1;
     }
     if (hdr.chunkSize < 4096 || hdr.chunkSize > 64u * 1024u * 1024u ||

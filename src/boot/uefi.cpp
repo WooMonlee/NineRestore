@@ -74,17 +74,6 @@ struct EfiDirNode {      // 描述符结束节点
     BYTE subType;        // 0xff
     WORD length;         // 4
 };
-struct EfiHdNode {       // Media / HardDrive（短格式，固件会自行展开成完整路径）
-    BYTE type = 0;           // 4
-    BYTE subType = 0;        // 1
-    WORD length = 0;         // 42
-    DWORD partNumber = 0;
-    unsigned long long partStart = 0;  // 起始 LBA
-    unsigned long long partSize = 0;   // 扇区数
-    GUID signature{};                // GPT PartitionId
-    BYTE mbrType = 0;        // 2 = GPT
-    BYTE sigType = 0;        // 2 = GUID
-};
 #pragma pack(pop)
 
 typedef BOOL(WINAPI* FnSetFwEx)(LPCWSTR, LPCWSTR, PVOID, DWORD, DWORD);
@@ -120,24 +109,11 @@ bool DeleteVarW(const std::wstring& name) {
 }
 
 // Boot#### 的 HD(...) 节点是不是指向"这块 ESP"（起止 LBA + 分区 GUID 三者全等）。
-// 用于去重：只删"同一块盘同一分区上、描述和路径都一样"的多余条目，
-// 别的硬盘上的 Windows Boot Manager 一律不碰。
+// 用于安装/升级去重与失败回滚：只删"同一块盘同一分区"的多余条目，别的硬盘/
+// 别的 ESP 上的同类条目一律不碰。判据本体在 uefi.h::UefiEntryTargetsEsp（可单测）。
 bool OptionHdMatches(const std::vector<BYTE>& b, const GUID& sig,
                      unsigned long long partStart, unsigned long long partSize) {
-    if (b.size() < 8) return false;
-    size_t off = 6;  // Attributes(4) + FilePathListLength(2) 之后是描述
-    while (off + 2 <= b.size()) {
-        wchar_t c = 0;
-        memcpy(&c, &b[off], 2);
-        off += 2;
-        if (c == 0) break;
-    }
-    if (off + sizeof(EfiHdNode) > b.size()) return false;
-    EfiHdNode hd{};
-    memcpy(&hd, &b[off], sizeof(hd));
-    if (hd.type != 4 || hd.subType != 1) return false;
-    return hd.partStart == partStart && hd.partSize == partSize &&
-           memcmp(&hd.signature, &sig, sizeof(GUID)) == 0;
+    return UefiEntryTargetsEsp(b, sig, partStart, partSize);
 }
 
 // 写固件变量需要 SeSystemEnvironmentPrivilege（管理员默认持有但**未启用**）。
@@ -233,19 +209,40 @@ bool ContainsNoCase(const std::wstring& hay, const wchar_t* needle) {
     return it != hay.end();
 }
 
-bool IsOurs(const std::vector<BYTE>& b, const wchar_t* expectDesc) {
+namespace {
+// 条目种类：1 = 常驻菜单，2 = 一次性临时项，0 = 不是我们认识的名字。
+// PIT-246：旧版本生成过 SysRecover / SysRecovery Environment /
+// "NineRestore Recovery Environment" 等描述；升级时必须识别成"同一份载荷"，
+// 否则 FindOurEntry 找不到旧项 → 新建一条 → 固件菜单里同时出现新旧两个名字。
+int EntryKindOf(const std::wstring& desc) {
+    if (desc == kMenuEntryDesc) return 1;
+    if (desc == kTempEntryDesc) return 2;
+    for (const wchar_t* d : kLegacyPermanentDescs)
+        if (desc == d) return 1;
+    for (const wchar_t* d : kLegacyTempDescs)
+        if (desc == d) return 2;
+    return 0;
+}
+
+bool IsOurs(const std::vector<BYTE>& b, int kind) {
     std::wstring desc, dev;
     if (!ParseOption(b, desc, dev))
         return false;
-    return desc == expectDesc && ContainsNoCase(dev, L"ZJRESTORE");
+    // 必须同时满足：描述是我们（含历史品牌）的，且设备路径指向我们的目录。
+    // 只按描述名匹配会误伤用户自建的同名项；只按路径匹配会把临时项当常驻项。
+    return EntryKindOf(desc) == kind && ContainsNoCase(dev, L"ZJRESTORE");
 }
+}  // namespace
 
 // 找我们已存在的条目；找到返回条目号，否则 -1。
+// 同名（当前品牌）优先；找不到再回退到历史品牌名，保证升级路径只更新不新增。
 int FindOurEntry(bool temporary) {
+    const int kind = temporary ? 2 : 1;
     const wchar_t* expect = EntryDesc(temporary);
     std::vector<BYTE> order;
     if (!ReadVar(L"BootOrder", order))
         return -1;
+    int legacy = -1;
     int n = (int)(order.size() / 2);
     for (int i = 0; i < n; ++i) {
         WORD v = 0;
@@ -253,11 +250,106 @@ int FindOurEntry(bool temporary) {
         std::vector<BYTE> b;
         if (!ReadVar(VarName(v), b))
             continue;
-        if (IsOurs(b, expect))
-            return v;
+        if (!IsOurs(b, kind))
+            continue;
+        std::wstring desc, dev;
+        if (ParseOption(b, desc, dev) && desc == expect)
+            return v;  // 当前品牌名：直接复用（描述会被重写成最新名字）
+        if (legacy < 0)
+            legacy = v;  // 历史品牌名：升级用，装完后再清理重复项
     }
-    return -1;
+    return legacy;
 }
+
+namespace {
+// 删除指定 Boot####：先从 BootOrder 摘掉，再删变量，最后清 BootNext。
+// （原 RemoveUefiBootEntry 的 1/2/3 步；抽出来供"去重"复用）
+// 返回 true = 回读确认 BootOrder 不再列出它、且 Boot#### 变量确实读不到了。
+// PIT-250：只看 SetVarW 返回值不够 —— 安全软件可能"返回成功但写入被吞"。
+bool RemoveEntryNum(int num) {
+    std::vector<BYTE> order;
+    bool orderOk = false;
+    if (ReadVar(L"BootOrder", order)) {
+        std::vector<WORD> list;
+        for (size_t i = 0; i + 1 < order.size(); i += 2) {
+            WORD v = 0;
+            memcpy(&v, &order[i], 2);
+            if (v != (WORD)num)
+                list.push_back(v);
+        }
+        std::vector<BYTE> nb(list.size() * 2);
+        for (size_t i = 0; i < list.size(); ++i)
+            memcpy(&nb[i * 2], &list[i], 2);
+        orderOk = SetVarW(L"BootOrder", kGlobalGuid, nb.data(),
+                          (DWORD)nb.size()) != FALSE;
+    }
+    bool optOk =
+        SetVarW(VarName(num).c_str(), kGlobalGuid, nullptr, 0) != FALSE;
+    // 回读①：Boot#### 变量必须真的消失。
+    std::vector<BYTE> chk;
+    if (ReadVar(VarName(num), chk))
+        optOk = false;
+    // 回读②：BootOrder 里也不能再有这个号（否则留下悬空引用）。
+    std::vector<BYTE> ord2;
+    if (ReadVar(L"BootOrder", ord2)) {
+        orderOk = true;
+        for (size_t i = 0; i + 1 < ord2.size(); i += 2) {
+            WORD v = 0;
+            memcpy(&v, &ord2[i], 2);
+            if (v == (WORD)num) {
+                orderOk = false;
+                break;
+            }
+        }
+    } else {
+        orderOk = false;
+    }
+    WORD next = 0;
+    DWORD len = GetFirmwareEnvironmentVariableW(L"BootNext", kGlobalGuid, &next,
+                                                sizeof(next));
+    if (len == sizeof(next) && next == (WORD)num)
+        SetVarW(L"BootNext", kGlobalGuid, nullptr, 0);
+    return orderOk && optOk;
+}
+
+// 只删"当前这块 ESP"上的同种类条目（安装/升级失败回滚用）。
+// PIT-251（2026-11-08）：安装/升级的失败清理原先走 RemoveUefiBootEntry 的
+// "全盘按描述+路径"删除 —— 双 ESP 机器上会顺带摘掉另一块 ESP 的可用菜单。
+// 判据与去重一致：HD 节点起止 LBA + GPT 分区 GUID 三者全等才算同一 ESP。
+bool RemoveOurEntriesOnEsp(const GUID& sig, unsigned long long start,
+                           unsigned long long size, bool temporary,
+                           std::string& log) {
+    const int kind = temporary ? 2 : 1;
+    bool allOk = true;
+    int removed = 0;
+    for (int guard = 0; guard < 8; ++guard) {
+        std::vector<BYTE> order;
+        if (!ReadVar(L"BootOrder", order))
+            break;
+        int hit = -1;
+        for (size_t i = 0; i + 1 < order.size(); i += 2) {
+            WORD v = 0;
+            memcpy(&v, &order[i], 2);
+            std::vector<BYTE> b;
+            if (ReadVar(VarName(v), b) && IsOurs(b, kind) &&
+                OptionHdMatches(b, sig, start, size)) {
+                hit = (int)v;
+                break;
+            }
+        }
+        if (hit < 0)
+            break;
+        if (!RemoveEntryNum(hit))
+            allOk = false;
+        ++removed;
+    }
+    if (removed > 0) {
+        log += "firmware boot entry removed on this ESP x" +
+               std::to_string(removed) + "\n";
+    }
+    return allOk;
+}
+}  // namespace
 
 int FindFreeEntry() {
     BYTE tmp[8];
@@ -423,10 +515,10 @@ static bool BuildAndWrite(int num, const GUID& sig, DWORD partNum,
                           unsigned long long start, unsigned long long size,
                           const std::wstring& targetPath, const wchar_t* cmdLine,
                           const wchar_t* entryDesc, std::string& log) {
-    EfiHdNode hd{};
+    UefiHdNode hd{};
     hd.type = 4;
     hd.subType = 1;
-    hd.length = sizeof(EfiHdNode);
+    hd.length = sizeof(UefiHdNode);
     hd.partNumber = partNum;
     hd.partStart = start;
     hd.partSize = size;
@@ -445,7 +537,7 @@ static bool BuildAndWrite(int num, const GUID& sig, DWORD partNum,
     EfiDirNode end{0x7f, 0xff, 4};
 
     DWORD fpll =
-        (DWORD)(sizeof(EfiHdNode) + fpLen + sizeof(EfiDirNode));
+        (DWORD)(sizeof(UefiHdNode) + fpLen + sizeof(EfiDirNode));
     size_t descBytes = (wcslen(entryDesc) + 1) * 2;
     size_t cmdBytes = cmdLine ? (wcslen(cmdLine) + 1) * 2 : 0;
 
@@ -506,7 +598,22 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
                    L"/deletevalue {bootmgr} bootsequence", out);
     }
 
-    // 1) 救援文件 → ESP 的 EFI\ZJRESTORE 目录（注意：C++ 注释行尾不能是反斜杠，
+    // 1) 先确定"这块 ESP"的身份：安装/升级的去重、失败回滚共用同一判据
+    //   （起止 LBA + GPT 分区 GUID），不再按"描述 + 路径"跨 ESP 误删。
+    GUID espSig{};
+    DWORD espPart = 0;
+    unsigned long long espStart = 0, espSize = 0;
+    const bool espIdOk =
+        QueryEspGpt(espRoot, espSig, espPart, espStart, espSize, log);
+    auto removeOurEntries = [&](bool temp) {
+        if (espIdOk)
+            return RemoveOurEntriesOnEsp(espSig, espStart, espSize, temp, log);
+        // 拿不到 GPT 身份时退回旧的全盘删除（0.9/1.0 RC2 行为，保底）。
+        log += "ESP identity unavailable: removing our entries globally\n";
+        return RemoveUefiBootEntry(log, temp);
+    };
+
+    // 2) 救援文件 → ESP 的 EFI\ZJRESTORE 目录（注意：C++ 注释行尾不能是反斜杠，
     //    否则会行继续、把下一行代码吞掉）
     std::wstring efiDir = espRoot + L"EFI";
     std::wstring dir = efiDir + L"\\ZJRESTORE";
@@ -775,7 +882,7 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
             // 若上面的定点清理已经删过旧载荷文件，此刻 ESP 上已不完整 →
             // 不能留下指向残骸的启动项（用户 2026-11-07 要求）。
             if (MustRemoveBootEntryAfterFailure(payloadRemoved))
-                RemoveUefiBootEntry(log, temporary);
+                removeOurEntries(temporary);
             log += RescuePayloadWriteFailedMessage() + "\n";
             return false;
         }
@@ -814,7 +921,7 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
         log += RescuePayloadWriteFailedMessage() + "\n";
         // 旧载荷已删 → 不能留下指向残骸的启动项（用户 2026-11-07 要求）。
         if (MustRemoveBootEntryAfterFailure(payloadRemoved))
-            RemoveUefiBootEntry(log, temporary);
+            removeOurEntries(temporary);
         if (RescuePayloadMustNotBeReused(priorState))
             log += RescuePayloadFailMessage(prior.build, SYSRECOVER_VERSION) +
                    "\n";
@@ -834,7 +941,7 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
             log += "verify deployed rescue FAIL\n";
             log += RescuePayloadWriteFailedMessage() + "\n";
             if (MustRemoveBootEntryAfterFailure(payloadRemoved))
-                RemoveUefiBootEntry(log, temporary);
+                removeOurEntries(temporary);
             if (RescuePayloadMustNotBeReused(priorState))
                 log += RescuePayloadFailMessage(prior.build,
                                                 SYSRECOVER_VERSION) + "\n";
@@ -924,18 +1031,16 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
             return false;
         }
         // 清掉可能残留的**同类**固件启动项（临时项不得动常驻菜单）
-        RemoveUefiBootEntry(log, temporary);
+        removeOurEntries(temporary);
         log += "bootapp ready: bootmgr -> efiloader -> zjrestore-uki.efi\n";
         return true;
     }
 
-    // 2) 固件启动项
-    GUID sig{};
-    DWORD partNum = 0;
-    unsigned long long start = 0, size = 0;
-    if (!QueryEspGpt(espRoot, sig, partNum, start, size, log))
+    // 3) 固件启动项（ESP 身份已在步骤 1 取得）
+    if (!espIdOk) {
+        log += "ESP GPT identity unavailable; refuse to write Boot####\n";
         return false;
-
+    }
     int num = FindOurEntry(temporary);
     if (num < 0)
         num = FindFreeEntry();
@@ -964,9 +1069,50 @@ bool InstallUefiBootEntry(const std::wstring& espRoot,
             }
         }
     }
-    if (!BuildAndWrite(num, sig, partNum, start, size, targetPath, cmdLine,
-                       entryDesc, log))
+    if (!BuildAndWrite(num, espSig, espPart, espStart, espSize, targetPath,
+                       cmdLine, entryDesc, log))
         return false;
+
+    // PIT-246 / PIT-251：升级时同种类可能还有历史品牌名的残留项（SysRecover /
+    // SysRecovery Environment / 旧 "NineRestore Recovery Environment"）。
+    // 保留刚写好/复用的 num；其余项必须**同时**满足"是我们这一类"且
+    // "HD 起止 LBA + GPT 分区 GUID 与当前 ESP 全等"才删 —— 别的 ESP 上的
+    // NineRestore 菜单不属于本次安装，不能连带删掉。
+    {
+        std::vector<BYTE> dupOrder;
+        if (ReadVar(L"BootOrder", dupOrder)) {
+            const int kind = temporary ? 2 : 1;
+            for (size_t i = 0; i + 1 < dupOrder.size(); i += 2) {
+                WORD v = 0;
+                memcpy(&v, &dupOrder[i], 2);
+                if ((int)v == num)
+                    continue;
+                std::vector<BYTE> b;
+                if (!ReadVar(VarName(v), b) || !IsOurs(b, kind))
+                    continue;
+                if (!OptionHdMatches(b, espSig, espStart, espSize)) {
+                    char nm2[32] = {};
+                    snprintf(nm2, sizeof(nm2), "Boot%04X", (int)v);
+                    log += std::string("duplicate on another ESP kept: ") +
+                           nm2 + "\n";
+                    continue;
+                }
+                // PIT-250：RemoveEntryNum 内部已回读 BootOrder + Boot####；
+                // 只看 SetVarW 返回值时"安全软件吞写"会在日志里谎报已删。
+                const bool gone = RemoveEntryNum((int)v);
+                char dup[80];
+                if (!gone) {
+                    snprintf(dup, sizeof(dup),
+                             "duplicate Boot%04X delete FAILED (read-back mismatch)\n",
+                             (int)v);
+                } else {
+                    snprintf(dup, sizeof(dup), "removed duplicate Boot%04X\n",
+                             (int)v);
+                }
+                log += dup;
+            }
+        }
+    }
 
     // 3) 挂进 BootOrder（**末尾**：默认仍进 Windows，固件启动菜单里能选到）
     std::vector<BYTE> order;
@@ -1120,36 +1266,42 @@ bool UefiBootEntryExists(std::string& detail) {
 bool RemoveUefiBootEntry(std::string& log, bool temporary) {
     if (!EnableEnvPrivilege(log))
         return false;
-    int num = FindOurEntry(temporary);
-    if (num < 0) {
+    // PIT-246：循环删到没有为止 —— 升级前可能同时存在
+    // SysRecover / SysRecovery Environment / NineRestore 多条指向同一份载荷的
+    // 残留项；只删一条会留下"看得见但已失效"的旧名字。
+    int removed = 0;
+    bool allOk = true;
+    for (int guard = 0; guard < 8; ++guard) {
+        int num = FindOurEntry(temporary);
+        if (num < 0)
+            break;
+        if (!RemoveEntryNum(num))
+            allOk = false;
+        ++removed;
+    }
+    // PIT-250：RemoveEntryNum 回读确认了 BootOrder+Boot#### 两处；"安全软件吞写"
+    // 时循环会空转 8 次仍报"已删除"。这里再按 FindOurEntry 复查一遍（防止
+    // 删除只改了变量、BootOrder 还列着）。
+    const int left = FindOurEntry(temporary);
+    if (left >= 0) {
+        char lb[64];
+        snprintf(lb, sizeof(lb),
+                 "firmware boot entry removal INCOMPLETE: Boot%04X still present\n",
+                 left);
+        log += lb;
+        return false;
+    }
+    if (!allOk) {
+        log += "firmware boot entry removal INCOMPLETE: BootOrder/Boot#### write not confirmed\n";
+        return false;
+    }
+    if (removed == 0) {
         log += temporary ? "no temporary firmware entry to remove\n"
                          : "no firmware entry to remove\n";
         return true;
     }
-    // 1) 从 BootOrder 摘掉
-    std::vector<BYTE> order;
-    if (ReadVar(L"BootOrder", order)) {
-        std::vector<WORD> list;
-        for (size_t i = 0; i + 1 < order.size(); i += 2) {
-            WORD v = 0;
-            memcpy(&v, &order[i], 2);
-            if (v != (WORD)num)
-                list.push_back(v);
-        }
-        std::vector<BYTE> nb(list.size() * 2);
-        for (size_t i = 0; i < list.size(); ++i)
-            memcpy(&nb[i * 2], &list[i], 2);
-        SetVarW(L"BootOrder", kGlobalGuid, nb.data(), (DWORD)nb.size());
-    }
-    // 2) 删 Boot####（SetVariable 长度 0 = 删除）
-    std::wstring name = VarName(num);
-    SetVarW(name.c_str(), kGlobalGuid, nullptr, 0);
-    // 3) BootNext 若指向我们，一并清掉
-    WORD next = 0;
-    DWORD len = GetFirmwareEnvironmentVariableW(L"BootNext", kGlobalGuid, &next, sizeof(next));
-    if (len == sizeof(next) && next == (WORD)num)
-        SetVarW(L"BootNext", kGlobalGuid, nullptr, 0);
-    log += "firmware boot entry removed\n";
+    log += "firmware boot entry removed x" + std::to_string(removed) +
+           " (verified)\n";
     return true;
 }
 
@@ -1214,13 +1366,16 @@ bool CleanupStaleUefiEntries(std::string& log) {
             break;
         std::wstring desc, dev;
         ParseOption(b, desc, dev);
-        if (desc != EntryDesc(true))
+        // PIT-246：不再要求 desc == 当前名字 —— 历史品牌名也在清理范围内；
+        // FindOurEntry(true) 已保证种类是"临时项"且路径在 ZJRESTORE 下。
+        if (!RemoveUefiBootEntry(log, true)) {
+            log += "stale cleanup INCOMPLETE (firmware entry still present)\n";
             break;
-        RemoveUefiBootEntry(log, true);
+        }
         ++removed;
     }
     if (removed > 0)
-        log += "stale SysRecover entry removed x" + std::to_string(removed) +
+        log += "stale restore entry removed x" + std::to_string(removed) +
                "\n";
     return removed > 0;
 }

@@ -939,10 +939,21 @@ static int ExtractNewSystem(StageCtx& c) {
             HANDLE h = CreateFileW((newDir + L"\\.zj-done").c_str(),
                                    GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                                    FILE_ATTRIBUTE_NORMAL, nullptr);
+            bool markerOk = false;
             if (h != INVALID_HANDLE_VALUE) {
                 DWORD wr = 0;
-                WriteFile(h, line, (DWORD)len, &wr, nullptr);
+                markerOk = WriteFile(h, line, (DWORD)len, &wr, nullptr) != FALSE &&
+                           wr == (DWORD)len;
                 CloseHandle(h);
+            }
+            // PIT-250：.zj-done 是 zjswap 的"可交换"前提。写失败（只读/空间不足/
+            // 安全软件拦截）时若照样落契约，救援层会在交换前 exit 2，用户卡在半途。
+            // 这里在目标分区尚未改动前失败，~new 保留可重试。
+            if (!markerOk) {
+                DeleteFileW((newDir + L"\\.zj-done").c_str());
+                err = Tr("无法写完成标记 ~new\\.zj-done（目标盘只读或空间不足），已在交换前中止。");
+                LogError(err);
+                return 5;
             }
         }
         // ── 异机还原（2026-10-21；2026-10-30 改为"失败保留 ~new"）──
@@ -1535,34 +1546,11 @@ static int InstallStagedBoot(StageCtx& c) {
         // 单次启动**只在"暂存+重启"模式设**；菜单项模式保持"用户自己选"（用户规格）。
         // 三处都校验：安全软件可让命令返回 0 但不落盘 → 重启照旧进原系统（用户反馈）。
         if (menuEntry) {
-            // 常驻菜单**可被选中**的前提：{bootmgr} timeout > 0 —— timeout=0 时
-            // bootmgr 不停留直接进 Windows，按什么键都没用（用户 2026-09-29 实测；
-            // timeout=0 来源：还原后的系统 BCD 被 bootfix 写成 0，见 bootfix.cpp）。
-            // 策略**只升不降**：原值 ≥1 一律保留（用户："原来大于 1 就保留原值"），
-            // 0/缺失补成 1 秒（用户：1 秒足够用上下键选、几乎不拖慢开机）。
-            // 仅 BCD 菜单路径需要（BIOS，或 Secure Boot 的 bootapp 模式）；
-            // UEFI 常驻项在固件 BootOrder（开机按快捷启动键选，键名按品牌识别：
-            // common/bioskey），与 bootmgr timeout 无关。
-            if (!useUefi || CurrentSbMode() == SbMode::Bootapp) {
-                std::string tlog;
-                int cur = BcdGetBootmgrTimeout(tlog);
-                if (cur < 1) {
-                    if (!BcdSetBootmgrTimeout(1, tlog)) {
-                        ProgressDone("restore", "failed");
-                        err = Tr("设置启动菜单停留时间失败（菜单将无法被选中）: ") +
-                              tlog + BootWriteBlockedHint();
-                        LogError(err);
-                        return 1;
-                    }
-                    LogInfo("bootmgr timeout: " + std::to_string(cur) +
-                            " -> 1s (menu selectable)");
-                } else {
-                    LogInfo("bootmgr timeout kept at " + std::to_string(cur) +
-                            "s (>=1, menu selectable)");
-                }
-            }
-            LogInfo("menu entry mode: no BootNext/bootsequence (user picks it in "
-                    "the boot menu)");
+            // beta.14（PIT-239）：**绝不改用户的启动等待时间**。原值 0 或缺失也
+            // 保持原样（用户 2026-11-07 明确要求："原来是多少就应该是多少"）。
+            // 代价：timeout=0 的机器 bootmgr 不停留，只能靠开机连按 ↑/↓ 进菜单；
+            // 该操作指引已写进安装成功提示，不再用改 timeout 的方式"帮忙"。
+            LogInfo("menu entry mode: bootmgr timeout untouched");
         } else if (useUefi && CurrentSbMode() != SbMode::Bootapp) {
             // 用独立日志串：blog 在安装引导项时已经写进日志了，BootNext 的
             // 结果必须自己再打一遍（PIT-194 —— 以前这段 message 被吞掉，

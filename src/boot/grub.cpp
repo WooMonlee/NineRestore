@@ -5,6 +5,7 @@
 #include <windows.h>
 
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -181,13 +182,15 @@ int DeployGrldr(const std::wstring& dataDrive, const std::wstring& exeDir,
 bool WriteMenuLst(const std::wstring& dataDrive, std::string& log) {
     // 菜单文本必须为 ASCII：GRUB4DOS 显示中文需额外加载字体文件（fontfile +
     // GBK 码表），本项目未随包分发字体，写中文会显示为乱码（PIT-036）。
-    const char* content =
-        "# SysRecover GRUB4DOS menu (auto-generated)\n"
+    // PIT-246：title 只引用 bootnames.h 的同一常量，不再各写一套（门禁
+    // check-brand.py 会校验 kMenuEntryDescAnsi 与 kMenuEntryDesc 一致）。
+    std::string content =
+        "# NineRestore GRUB4DOS menu (auto-generated)\n"
         "timeout 0\n"
         "default 0\n"
         "\n"
-        "title SysRecover Restore Environment\n"
-        "kernel /ZJRESTORE/boot/vmlinuz-zjrestore nvme_core.io_timeout=1\n"
+        "title " + std::string(kMenuEntryDescAnsi) + "\n"
+        "kernel /ZJRESTORE/boot/vmlinuz-zjrestore nvme_core.io_timeout=1 quiet loglevel=3\n"
         "initrd /ZJRESTORE/boot/initramfs-zjrestore.cpio.gz\n";
     bool ok = WriteTextFile(dataDrive + L"menu.lst", content);
     if (ok)
@@ -269,22 +272,202 @@ bool InstallBootLayer(const std::wstring& deployDrive,
     return ok;
 }
 
+// 小工具：读文件前 N 字节找 ASCII 子串（menu.lst 只有几行，不引额外依赖）。
+static bool FileHasUtf8(const std::wstring& path, const char* needle) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    char buf[2048] = {0};
+    DWORD n = 0;
+    ReadFile(h, buf, sizeof(buf) - 1, &n, nullptr);
+    CloseHandle(h);
+    return strstr(buf, needle) != nullptr;
+}
+
+bool RefreshBootLayerNames(const std::wstring& deployDrive,
+                           const std::wstring& exeDir, std::string& log) {
+    if (deployDrive.empty()) return true;
+    std::wstring menu = deployDrive + L"menu.lst";
+    // 没装过菜单 → 什么都不做（绝不因为升级就给别人装一个启动项）。
+    if (GetFileAttributesW(menu.c_str()) == INVALID_FILE_ATTRIBUTES) return true;
+    bool dirty = !FileHasUtf8(menu, "title NineRestore") ||
+                 !FileHasUtf8(menu, "quiet loglevel=3");
+    if (!dirty) return true;
+    log += "boot layer refresh: legacy menu.lst on " +
+           std::string(1, deployDrive[0]) + ":, rewriting names/cmdline\n";
+    bool ok = true;
+    ok &= WriteMenuLst(deployDrive, log);
+    ok &= (DeployGrldr(deployDrive, exeDir, log) == 2);
+    if (BcdEntryExists(RecoveryGuid())) {
+        std::string bcdLog;
+        ok &= BcdCreateBootsector(RecoveryGuid(), kMenuBcdDesc,
+                                  deployDrive[0], bcdLog);
+        log += bcdLog;
+    }
+    return ok;
+}
+
+// PIT-243：还原后启动菜单自愈。BIOS 的启动项在 \Boot\BCD 里，救援层的 Linux
+// 改不了它；救援侧只把载荷（ZJRESTORE + grldr/mbr/menu.lst）写回新系统根，
+// 并留 <系统盘>\ZJRESTORE\menu-redeploy.txt（bcd=pending）。这里在 Windows
+// 启动时把 BCD 条目补建：成功 → 标记改 bcd=done（下次启动删掉）；失败 → 保留
+// pending 并写日志，下次启动还能重试（失败必须留痕，PIT-243 第 3 条）。
+bool EnsureMenuAfterRestore(std::string& log) {
+    const std::wstring mark = SystemDrive() + L"ZJRESTORE\\menu-redeploy.txt";
+    HANDLE h = CreateFileW(mark.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return true;  // 没有"载荷被还原覆盖"这件事
+    char buf[512] = {0};
+    DWORD n = 0;
+    ReadFile(h, buf, sizeof(buf) - 1, &n, nullptr);
+    CloseHandle(h);
+    if (!strstr(buf, "bcd=pending")) {
+        if (strstr(buf, "bcd=done"))  // 已补装过，标记用完即删
+            DeleteFileW(mark.c_str());
+        return true;
+    }
+    if (IsUefiFirmware()) {
+        log += "menu-redeploy: UEFI (entry lives on ESP), marker ignored\n";
+        return true;
+    }
+    log += "menu-redeploy: pending marker after restore, reinstalling boot entry\n";
+    std::string insLog;
+    bool ok = InstallBootLayer(SystemDrive(), ExeDir(), insLog, false);
+    log += insLog;
+    if (!ok) {
+        log += "menu-redeploy: FAILED (entry still missing; will retry next start)\n";
+        return false;
+    }
+    const std::wstring tmp = mark + L".new";
+    HANDLE w = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (w != INVALID_HANDLE_VALUE) {
+        const char body[] = "state=payload-ok\r\nbcd=done\r\n";
+        DWORD wr = 0;
+        WriteFile(w, body, (DWORD)strlen(body), &wr, nullptr);
+        CloseHandle(w);
+        MoveFileExW(tmp.c_str(), mark.c_str(), MOVEFILE_REPLACE_EXISTING);
+    }
+    log += "menu-redeploy: boot entry recreated\n";
+    return true;
+}
+
+namespace {
+// bcdedit 的输出是本地化的：只认明确的"不存在"措辞，其余非 0 一律按失败报。
+bool AsciiContainsNoCase(const std::string& hay, const char* needle) {
+    std::string h = hay, n = needle;
+    for (char& c : h)
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    for (char& c : n)
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    return h.find(n) != std::string::npos;
+}
+
+std::string NarrowAscii(const wchar_t* s) {
+    std::string r;
+    for (; s && *s; ++s) r.push_back((char)*s);
+    return r;
+}
+
+enum class BcdState { Present, Absent, Unknown };
+
+// 用 `bcdedit /enum`（列全部条目）判断某 GUID 是否存在：
+// - 输出里有该 GUID（ASCII）= 存在；
+// - 命令成功但输出里没有 = 不存在（覆盖任何语言的"没有匹配的对象"提示）；
+// - 命令失败 = 无法判定（按失败上报，不猜"已删除"）。
+// 这样不依赖 bcdedit 的本地化文案（中文/英文系统的提示不同）。
+BcdState BcdQuery(const wchar_t* guid, std::string& out) {
+    if (RunProcess(SysToolPath(L"bcdedit.exe"), L"/enum", out) != 0)
+        return BcdState::Unknown;
+    const std::string id = NarrowAscii(guid);
+    return AsciiContainsNoCase(out, id.c_str()) ? BcdState::Present
+                                                : BcdState::Absent;
+}
+
+bool BcdDeleteEntry(const wchar_t* guid, std::string& log) {
+    std::string out;
+    const BcdState st = BcdQuery(guid, out);
+    if (st == BcdState::Absent) {
+        log += "bcd entry absent: " + NarrowAscii(guid) + "\n";
+        return true;
+    }
+    if (st == BcdState::Unknown) {
+        log += "bcdedit /enum FAILED (cannot verify " + NarrowAscii(guid) +
+               ")\n" + out;
+        return false;
+    }
+    const int rc = RunProcess(SysToolPath(L"bcdedit.exe"),
+                              L"/delete " + std::wstring(guid) + L" /f", out);
+    if (rc != 0)
+        log += "bcdedit /delete " + NarrowAscii(guid) +
+               " FAILED rc=" + std::to_string(rc) + "\n" + out;
+    // 无论返回码，都以回读为准：真没了才算成功。
+    std::string chk;
+    const BcdState after = BcdQuery(guid, chk);
+    if (after == BcdState::Absent) {
+        log += "bcd entry deleted (verified): " + NarrowAscii(guid) + "\n";
+        return true;
+    }
+    if (after == BcdState::Unknown) {
+        log += "bcd verify inconclusive after delete: " + NarrowAscii(guid) +
+               "\n" + chk;
+        return false;
+    }
+    log += "bcd entry still present after delete: " + NarrowAscii(guid) +
+           "\n" + chk;
+    return false;
+}
+
+// 清除 {bootmgr} 的 bootsequence：字符串是 ASCII，判定与语言无关。
+bool BcdClearBootsequence(std::string& log) {
+    std::string out;
+    if (RunProcess(SysToolPath(L"bcdedit.exe"), L"/enum {bootmgr}", out) != 0) {
+        log += "bcdedit /enum {bootmgr} FAILED\n" + out;
+        return false;
+    }
+    if (!AsciiContainsNoCase(out, "bootsequence")) {
+        log += "bootsequence absent: nothing to clear\n";
+        return true;
+    }
+    const int rc = RunProcess(SysToolPath(L"bcdedit.exe"),
+                              L"/deletevalue {bootmgr} bootsequence", out);
+    if (rc != 0) {
+        log += "bcdedit /deletevalue bootsequence FAILED rc=" +
+               std::to_string(rc) + "\n" + out;
+        return false;
+    }
+    std::string chk;
+    if (RunProcess(SysToolPath(L"bcdedit.exe"), L"/enum {bootmgr}", chk) != 0) {
+        log += "bcd verify bootsequence FAILED\n" + chk;
+        return false;
+    }
+    if (AsciiContainsNoCase(chk, "bootsequence")) {
+        log += "bootsequence still present after delete\n" + chk;
+        return false;
+    }
+    log += "bootsequence cleared (verified)\n";
+    return true;
+}
+}  // namespace
+
 bool RemoveBootLayer(std::string& log) {
     log += "remove boot layer\n";
-    // 0) UEFI 固件启动项（菜单 + 临时项都清），装了才删
-    RemoveUefiBootEntry(log, false);
-    RemoveUefiBootEntry(log, true);
-    // 1) BCD：删常驻菜单条目 + 临时条目 + 清除单次启动
-    std::string out;
-    for (const wchar_t* guid : {RecoveryGuid(), TemporaryGuid()}) {
-        RunProcess(SysToolPath(L"bcdedit.exe"),
-                   L"/delete " + std::wstring(guid) + L" /f", out);
-        log += "delete entry: " + out + "\n";
-    }
-    RunProcess(SysToolPath(L"bcdedit.exe"),
-               L"/deletevalue {bootmgr} bootsequence", out);
-    // 2) 引导文件可能落在系统盘（新布局）或数据盘（旧布局）——两处都清
+    // 0) UEFI 固件启动项（菜单 + 临时项都清），装了才删；
+    //    删除失败必须计入返回值，不能再"没删掉也说成功"（PIT-252）。
     bool ok = true;
+    if (!RemoveUefiBootEntry(log, false))
+        ok = false;
+    if (!RemoveUefiBootEntry(log, true))
+        ok = false;
+    // 1) BCD：删常驻菜单条目 + 临时条目 + 清除单次启动。
+    //    先 /enum 判断存在性，再删，删后回读确认；不存在 = 已达成目标。
+    if (!BcdDeleteEntry(RecoveryGuid(), log))
+        ok = false;
+    if (!BcdDeleteEntry(TemporaryGuid(), log))
+        ok = false;
+    if (!BcdClearBootsequence(log))
+        ok = false;
+    // 2) 引导文件可能落在系统盘（新布局）或数据盘（旧布局）——两处都清
     const std::wstring drives[] = {SystemDrive(), FindDataDrive()};
     for (const std::wstring& drive : drives) {
         if (drive.empty())
@@ -301,9 +484,11 @@ bool RemoveBootLayer(std::string& log) {
     //     纯 BIOS 机器 mountvol /s 自然失败即跳过，只多几条日志、零副作用。）
     std::wstring espRoot = MountEsp(log);
     if (!espRoot.empty()) {
-        RemoveTree(espRoot + L"EFI\\ZJRESTORE");
+        const bool dirOk = RemoveTree(espRoot + L"EFI\\ZJRESTORE");
+        ok &= dirOk;
         UnmountEsp(espRoot, log);
-        log += "removed ESP rescue dir\n";
+        log += dirOk ? "removed ESP rescue dir\n"
+                     : "remove ESP rescue dir FAILED\n";
     }
     return ok;
 }

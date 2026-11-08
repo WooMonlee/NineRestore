@@ -107,7 +107,10 @@ bool BcdCreateBootsector(const std::wstring& guid, const std::wstring& desc,
         return false;
     // 顺带刷新描述（旧条目可能残留旧版本文案）
     std::wstring descCmd = L"/set " + guid + L" description \"" + desc + L"\"";
-    RunProcess(SysToolPath(L"bcdedit.exe"), descCmd, out);
+    rc = RunProcess(SysToolPath(L"bcdedit.exe"), descCmd, out);
+    log += out;
+    if (rc != 0)
+        return false;
     // displayorder：先摘（曾存在会报"找不到元素"，忽略），再 addlast 挂到末尾，
     // 避免重复调用 /addlast 在部分系统上对"已在列表中"的条目返回错误。
     RunProcess(SysToolPath(L"bcdedit.exe"),
@@ -120,6 +123,31 @@ bool BcdCreateBootsector(const std::wstring& guid, const std::wstring& desc,
     if (!BcdEntryExists(guid)) {
         log += "entry verify FAILED: bcdedit /enum does not echo this guid\n";
         return false;
+    }
+    // PIT-250：不仅"条目在"，还要回读 description/device/path 三个**值** ——
+    // 安全软件可以把 /set 假放行成 0 却让值保持旧内容（这正是升级后仍显示旧
+    // 品牌名 "NineRestore Recover Ev.." 的机理之一）。desc 只允许 ASCII
+    // （check-brand 钉住 kMenuBcdDesc），所以可直接在输出里找子串。
+    {
+        std::string chk;
+        RunProcess(SysToolPath(L"bcdedit.exe"), L"/enum " + guid, chk);
+        auto hasCi = [&chk](const std::string& needle) {
+            std::string low = chk;
+            for (auto& c : low) c = (char)tolower((unsigned char)c);
+            std::string n = needle;
+            for (auto& c : n) c = (char)tolower((unsigned char)c);
+            return low.find(n) != std::string::npos;
+        };
+        const std::string nd(desc.begin(), desc.end());
+        const std::string wantDev =
+            "partition=" + std::string(1, (char)driveLetter) + ":";
+        if (nd.empty() || !hasCi(nd) || !hasCi(wantDev) ||
+            !hasCi("grldr.mbr")) {
+            log += "entry value verify FAILED (desc/device/path not echoed)\n";
+            log += chk;
+            return false;
+        }
+        log += "entry value verify ok\n";
     }
     log += "entry verify ok\n";
     return true;

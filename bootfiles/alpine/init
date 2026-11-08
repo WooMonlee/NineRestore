@@ -32,9 +32,18 @@ LOG=/tmp/zjrestore.log
 # say 单源实现收进 /zjlog.sh（P0-B/PIT-145）；SR: 前缀是断言/录像取证契约。
 ZJPREFIX=SR
 . /zjlog.sh
-# 中文字库必须在第一句中文提示之前装好（串口控制台没有 tty0，这里会跳过）
-if ! zj_font_load; then
-    say "WARN: console CJK font not loaded (serial console or missing /zjfont.psf)"
+# 中文字库必须在第一句中文提示之前装好（串口控制台没有 tty0，这里会跳过）。
+# 加载结果**必须可见**（beta.14，PIT-238）：成功/失败/跳过都打一行英文到屏幕与
+# 日志；失败时后续中文界面句自动改走 say2 的英文版，绝不显示白底问号。
+zj_font_load
+_zfrc=$?
+if [ "$_zfrc" -eq 0 ]; then
+    _zgl=$(wc -l < /zjzhmap.sed 2>/dev/null | tr -d ' \n')
+    say "FONT: loaded zjfont.psf (PSF1 512 slots, CJK map ${_zgl:-0} entries, console $(zj_console_kind), tty=$_zt)"
+elif [ "$ZJ_FONT_RC" -eq 6 ]; then
+    say "FONT: skipped (serial console; raw UTF-8 passthrough)"
+else
+    say "FONT: load FAILED rc=$ZJ_FONT_RC reason=$ZJ_FONT_WHY console=$(zj_console_kind); CJK disabled, ASCII fallback"
 fi
 # 黑匣子探测表（与 zjrestore-lite.sh 共用同一文件）：每个分区的 mount 结果都
 # 记下来，失败时随日志写到所有可写面 —— "为什么找不到任务/镜像"有据可查。
@@ -42,9 +51,31 @@ PROBE=/tmp/zj-probe.txt
 : > "$PROBE" 2>/dev/null
 probe(){ echo "$(date '+%F %T') $*" >> "$PROBE" 2>/dev/null; say "PROBE $*"; }
 
-say "SysRecover 救援层 (内核 $(uname -r))"
+# ── 设备路径归一化（beta.13，PIT-237）────────────────────────────────────
+# 约定：**设备对外一律用完整路径 /dev/<name>**。输入可能是裸名（sysfs basename
+# 叫 sda1）、完整路径（/dev/sda1），甚至上游已拼成 /dev/dev/sda1 —— 统一在这里
+# 归一。**禁止任何地方再手拼 "/dev/$x"**：beta.12 测试台看到的 /dev/dev/sdb1
+# 就是"设备名已经带前缀、又被拼一次"的典型（本仓库源码已无该字面量，见 PIT-237）。
+zj_devname(){ # -> 裸名（sda1）；给 /sys/class/block/* 拼路径用
+    _zdn="${1:-}"
+    _zdn=${_zdn#/dev/}; _zdn=${_zdn#/dev/}; _zdn=${_zdn##*/}
+    printf '%s' "$_zdn"
+}
+zj_dev(){ # 裸名/带前缀 -> /dev/<name>；空输入返回空串（调用方自行判断）
+    _zdv=$(zj_devname "$1")
+    [ -n "$_zdv" ] && printf '/dev/%s' "$_zdv"
+    return 0
+}
+# sysfs 取值：空值显式 n/a(reason)，清点屏不留空白字段（beta.13 测试台反馈：
+# 空白字段在客户排障时比错误值更误导）。
+zj_sysval(){
+    _zsv=$(cat "${1:-}" 2>/dev/null | tr -d '\r\n')
+    [ -n "$_zsv" ] && printf '%s' "$_zsv" || printf 'n/a(no-sysfs-value)'
+}
+
+say2 "NineRestore 救援层 (内核 $(uname -r))" "NineRestore rescue layer (kernel $(uname -r))"
 # 救援层构建版本（PIT-103）：日志一眼可判"跑的是哪一版救援层"（防版本混淆）
-[ -f /zjrescue-version ] && say "rescue build $(cat /zjrescue-version 2>/dev/null)"
+[ -f /zjrescue-version ] && say "rescue build $(zj_sysval /zjrescue-version)"
 
 # ── 加载存储 / 文件系统模块（覆盖 SATA/AHCI、NVMe、各厂商 HBA、虚拟化、USB）──
 # 注意：不要跑 depmod（busybox depmod 可能写坏 modules.dep）；直接用镜像里
@@ -175,7 +206,8 @@ mark_entry_started
 
 say "modules loaded; waiting for disks"
 sleep 3
-say "nvme dmesg: $(dmesg 2>/dev/null | grep -iE 'nvme|pcie' | tail -n 5 | tr '\n' '|')"
+_nv=$(dmesg 2>/dev/null | grep -iE 'nvme|pcie' | tail -n 5 | tr '\n' '|')
+say "nvme dmesg: ${_nv:-n/a(no-nvme-pcie-lines)}"
 
 # NVMe I/O 超时：默认 30s。虚拟 NVMe（VMware/QEMU）偶发"完成中断丢失"——
 # 设备其实已把完成项写进 CQ，但驱动没收到中断 → 要等满 io_timeout（30s）才
@@ -208,40 +240,47 @@ list_parts(){
     for _p in /sys/class/block/*; do
         [ -f "$_p/partition" ] || continue
         _b=$(basename "$_p")
-        is_removable "$_b" || echo "/dev/$_b"
+        is_removable "$_b" || echo "$(zj_dev "$_b")"
     done
     for _p in /sys/class/block/*; do
         [ -f "$_p/partition" ] || continue
         _b=$(basename "$_p")
-        is_removable "$_b" && echo "/dev/$_b"
+        is_removable "$_b" && echo "$(zj_dev "$_b")"
     done
     for _p in /sys/class/block/*; do
         [ -f "$_p/partition" ] && continue
         _b=$(basename "$_p")
         case "$_b" in loop*|ram*|dm-*) continue ;; esac
-        is_removable "$_b" && echo "/dev/$_b"
+        is_removable "$_b" && echo "$(zj_dev "$_b")"
     done
 }
-say "block devs: $(ls /sys/class/block 2>/dev/null | tr '\n' ' ')"
+_bd=$(ls /sys/class/block 2>/dev/null | tr '\n' ' ')
+say "block devs: ${_bd:-n/a(no-block-devices)}"
 # 存储/USB 控制器清单（PCI ID + 绑定驱动）：排查"驱动覆盖/行为差异"用
 #（用户 2026-10-04 需求 A5；sysfs 直读，零新依赖）。
 say "storage/usb controllers (pci):"
+_ctl=0
 for _pd in /sys/bus/pci/devices/*; do
     _cl=$(cat "$_pd/class" 2>/dev/null)
     case "$_cl" in
         0x0100*|0x0101*|0x0104*|0x0106*|0x0107*|0x0108*|0x0109*|0x0c03*)
+            _ctl=$((_ctl + 1))
             _vn=$(cat "$_pd/vendor" 2>/dev/null)
             _de=$(cat "$_pd/device" 2>/dev/null)
             _dl=$(readlink "$_pd/driver" 2>/dev/null)
             _dr=${_dl##*/}
             [ -n "$_dr" ] || _dr=none
-            say "  $(basename "$_pd") $_vn:$_de class=$_cl driver=$_dr"
+            _vid="$_vn:$_de"
+            case "$_vid" in ":"|"") _vid="n/a(no-pci-ids)" ;; esac
+            say "  $(basename "$_pd") $_vid class=$_cl driver=$_dr"
             ;;
     esac
 done
+[ "$_ctl" -gt 0 ] || say "  n/a(no-storage-usb-controllers)"
 # 整机/主板/BIOS 标识（DMI，用户 2026-10-05 规格）：硬件兼容排查第一步
-say "dmi: $(cat /sys/class/dmi/id/sys_vendor 2>/dev/null) | $(cat /sys/class/dmi/id/product_name 2>/dev/null) | $(cat /sys/class/dmi/id/board_name 2>/dev/null) | bios $(cat /sys/class/dmi/id/bios_version 2>/dev/null) $(cat /sys/class/dmi/id/bios_date 2>/dev/null)"
-say "cmdline: $(cat /proc/cmdline 2>/dev/null)"
+# beta.13：任一字段读不到时输出 n/a(no-sysfs-value)，不留 "dmi:  |  |  | bios" 这种空白。
+say "dmi: $(zj_sysval /sys/class/dmi/id/sys_vendor) | $(zj_sysval /sys/class/dmi/id/product_name) | $(zj_sysval /sys/class/dmi/id/board_name) | bios $(zj_sysval /sys/class/dmi/id/bios_version) $(zj_sysval /sys/class/dmi/id/bios_date)"
+say "cmdline: $(zj_sysval /proc/cmdline)"
 
 # ── 兜底：一个分区都没枚举到 → 名单可能漏了驱动，全量 modprobe 两轮再扫 ──
 # 这是为了"通用兼容"而设的保险：宁可慢一次，也不要因为漏一个驱动名而
@@ -259,15 +298,17 @@ if [ -z "$(list_parts)" ]; then
         sleep 1
     done
     sleep 3
-    say "after sweep, block devs: $(ls /sys/class/block 2>/dev/null | tr '\n' ' ')"
+    _bd=$(ls /sys/class/block 2>/dev/null | tr '\n' ' ')
+    say "after sweep, block devs: ${_bd:-n/a(no-block-devices)}"
 fi
-say "partitions: $(list_parts | tr '\n' ' ')"
+_parts=$(list_parts | tr '\n' ' ')
+say "partitions: ${_parts:-n/a(no-partitions)}"
 
 ZJ_M=/tmp/zj_m
 mkdir -p "$ZJ_M"
 
 mnt_dev(){
-    _dev="$1"; _mnt="$2"
+    _dev=$(zj_dev "${1:-}"); _mnt="$2"
     # 屏幕级"进行中"标记（2026-10-05 用户规格）：内核级挂死/全盘不可写时，
     # 文件一个都留不下——**最后一屏就是唯一证据**，这行告诉现场"卡在哪个设备"。
     say "  mnt $_dev"
@@ -305,11 +346,182 @@ mnt_dev(){
 # ── 1) 找 _zjresy*.log（主契约，位于目标分区根）──
 found_log=""
 TARGET_DEV=""
+# P1（2026-11-08 真机）：任务"见过"与任务"可用"必须分开记。
+#   _task_seen=1  = 扫到过 _zjresy*.log（不管有没有拷进 /tmp）
+#   _conf_seen=1  = 扫到过 restore-task.conf 候选
+# 二者与 /tmp 里实际可读的文件共同决定 _ran / task-unreadable（见 3) 段）。
+_task_seen=0
+_conf_seen=0
+# 用户 2026-11-08：fallback 候选因身份不符被拒的次数（跨 scan_for_log 两轮累计，
+# 不在函数入口清零）。>0 且 /tmp 里没有可读日志 → 按"任务读不到"收场，并禁止
+# 后面 conf 扫描以 "conf-only" 把同一份任务跑起来（见 3) 段 _ran）。
+_fb_rejects=0
 # 分区实际起始偏移（字节 = sysfs start × 512；GPT/MBR/EBR 逻辑盘全准）。
 dev_offset_sectors(){
-    _st=$(cat "/sys/class/block/$(basename "$1")/start" 2>/dev/null)
+    _st=$(cat "/sys/class/block/$(zj_devname "$1")/start" 2>/dev/null)
     [ -n "$_st" ] && { echo $((_st * 512)); return 0; }
     return 1
+}
+# GUID 归一化（全项目唯一口径）：去花括号、连字符、空白，转小写。
+# 三个来源的书写各不相同：Windows 写 {XXXXXXXX-XXXX-...}、blkid 带连字符（大小写
+# 不定）、GPT 表项是 32 位裸串。不收敛到一种写法，同一分区会被判成"GUID 不符"。
+guid_norm(){
+    printf '%s' "${1:-}" | tr -d '{}' | tr -d '[:space:]-' | tr 'A-Z' 'a-z'
+}
+# ── GPT 直读 GUID（blkid 取不到 PART_ENTRY_UUID 时的兜底来源，2026-11-08）──
+# 背景（真机日志）：客户盘上 rescue 层 blkid 对目标分区返回空
+# （原样 guid=n/a(no-blkid-uuid)），"GUID 优先"判据等于不存在，只能退回序列号；
+# 而序列号两侧呈现长度都不同 → 正确目标被拒、任务被判"不可读"。
+# 做法（GPT 规范）：LBA1 的头（签名 + 头 CRC32 + 表项位置/条数/尺寸）→ 分区表项
+# 按 **起始 LBA 精确匹配** 当前分区 offset（size 有值时同时校验，防止串到相邻分区
+# 或同起点的残留项）→ 取 Unique Partition GUID（表项内偏移 16..31）。
+# 失败一律返回空（干净降级到序列号），绝不因读表失败就拒绝；原因写 _gp_why。
+# MBR 盘没有 GPT 头（签名不符）→ 同样干净降级，序列号判据维持原样。
+GPT_ERR=/tmp/zj-gpt.err
+: > "$GPT_ERR" 2>/dev/null
+# 头解析 + 头 CRC32（IEEE，多项式 0xEDB88320）校验；busybox awk 无位运算，
+# 用 32 次整数分解做 xor32（纯算术，92 字节头约 2 万次循环，毫秒级）。
+gpt_hdr_fields(){  # $1=头 hex 文件 -> "ok 表项LBA 条数 表项尺寸" / "fail 原因"
+    od -An -tx1 -v "$1" 2>>"$GPT_ERR" | tr -d ' \n' | awk '
+        function hv(c){ return index("0123456789abcdef", c) - 1 }
+        function by(o){ return hv(substr($0, o * 2 + 1, 1)) * 16 + hv(substr($0, o * 2 + 2, 1)) }
+        function le32(o){ return by(o) + by(o + 1) * 256 + by(o + 2) * 65536 + by(o + 3) * 16777216 }
+        function xor32(a, b,   r, m, i, ba, bb){
+            r = 0; m = 1
+            for (i = 0; i < 32; i++) {
+                ba = int(a / m) % 2; bb = int(b / m) % 2
+                if ((ba + bb) % 2 == 1) r += m
+                m *= 2
+            }
+            return r
+        }
+        {
+            if (length($0) < 184) { print "fail short-header"; exit }
+            if (substr($0, 1, 16) != "4546492050415254") { print "fail no-gpt-signature"; exit }
+            if (le32(12) != 92) { print "fail header-size=" le32(12); exit }
+            crc = 4294967295
+            for (i = 0; i < 92; i++) {
+                b = by(i)
+                if (i >= 16 && i <= 19) b = 0
+                crc = xor32(crc, b)
+                for (k = 0; k < 8; k++) {
+                    if (crc % 2 == 1) crc = xor32(int(crc / 2), 3988292384)
+                    else crc = int(crc / 2)
+                }
+            }
+            crc = xor32(crc, 4294967295)
+            wr = le32(16)
+            if (crc != wr) { print "fail header-crc-bad(calc=" crc ",stored=" wr ")"; exit }
+            if (le32(24) != 1) { print "fail not-primary-header"; exit }
+            elba = le32(72)
+            if (le32(76) != 0 || elba < 2) { print "fail entry-lba=" elba; exit }
+            cnt = le32(80); es = le32(84)
+            if (cnt < 1 || cnt > 1024) { print "fail entry-count=" cnt; exit }
+            if (es != 128 && es != 256 && es != 512 && es != 1024) { print "fail entry-size=" es; exit }
+            print "ok " elba " " cnt " " es
+        }'
+}
+# 表项内按起始 LBA 精确匹配；相邻分区/同起点残留项一律不认（防"串到邻居"）。
+gpt_entry_find(){  # $1=表项 hex 文件 $2=表项尺寸 $3=条数 $4=起始LBA $5=分区字节大小(可空)
+    od -An -tx1 -v "$1" 2>>"$GPT_ERR" | tr -d ' \n' | awk -v es="$2" -v cnt="$3" -v want="$4" -v psz="${5:-}" '
+        function hv(c){ return index("0123456789abcdef", c) - 1 }
+        function by(o){ return hv(substr($0, o * 2 + 1, 1)) * 16 + hv(substr($0, o * 2 + 2, 1)) }
+        function le32(o){ return by(o) + by(o + 1) * 256 + by(o + 2) * 65536 + by(o + 3) * 16777216 }
+        {
+            for (i = 0; i < cnt; i++) {
+                o = i * es
+                if (length($0) < (o + 128) * 2) break
+                type = substr($0, o * 2 + 1, 32)
+                ug = substr($0, o * 2 + 33, 32)
+                first = le32(o + 32); fhi = le32(o + 36); last = le32(o + 40)
+                if (type ~ /^0+$/) continue          # 未使用的表项
+                if (ug ~ /^0+$/ || ug ~ /^(f)+$/) continue
+                if (fhi != 0) continue               # 超 32 位的 LBA 现实不存在
+                if (first != want) continue
+                if (last < first) { print "fail entry-range"; exit }
+                if (psz != "" && (last - first + 1) * 512 != psz) {
+                    print "fail size-mismatch(first=" first ",last=" last ")"; exit
+                }
+                print "ok " ug; exit
+            }
+            print "fail no-entry-at-offset=" want
+        }'
+}
+# 输出契约：成功 "ok <guid32>"，失败 "fail <原因>"。调用方走 $(...) 取值，
+# 所以原因必须走 stdout（子 shell 里的变量传不回来）。
+gpt_part_guid(){  # $1=整盘设备（/dev/sda 或镜像文件） $2=分区起始字节偏移 $3=分区字节大小(可空)
+    _gp_dev=${1:-}; _gp_off=${2:-}; _gp_sz=${3:-}
+    [ -n "$_gp_dev" ] || { echo "fail no-disk-dev"; return 1; }
+    { [ -n "$_gp_off" ] && [ "$_gp_off" -ge 512 ]; } || { echo "fail no-offset"; return 1; }
+    _gp_hdr=/tmp/zj-gpt.hdr; _gp_ent=/tmp/zj-gpt.ent
+    if ! dd if="$_gp_dev" bs=512 skip=1 count=1 of="$_gp_hdr" 2>>"$GPT_ERR"; then
+        echo "fail header-read-fail"; return 1
+    fi
+    _gp_r=$(gpt_hdr_fields "$_gp_hdr")
+    case "$_gp_r" in
+        ok\ *) ;;
+        *) echo "${_gp_r:-fail header-parse-fail}"; return 1 ;;
+    esac
+    set -- $_gp_r    # ok 表项LBA 条数 表项尺寸（$1..$3 已存到 _gp_*，下面不再用入参）
+    _gp_elba=$2; _gp_cnt=$3; _gp_es=$4
+    _gp_sec=$(( (_gp_cnt * _gp_es + 511) / 512 ))
+    if ! dd if="$_gp_dev" bs=512 skip="$_gp_elba" count="$_gp_sec" of="$_gp_ent" 2>>"$GPT_ERR"; then
+        echo "fail entries-read-fail"; return 1
+    fi
+    _gp_r=$(gpt_entry_find "$_gp_ent" "$_gp_es" "$_gp_cnt" $(( _gp_off / 512 )) "$_gp_sz")
+    case "$_gp_r" in
+        ok\ *) printf 'ok %s' "${_gp_r#ok }"; return 0 ;;
+        *) echo "${_gp_r:-fail entry-parse-fail}"; return 1 ;;
+    esac
+}
+# 分区设备 -> 整盘设备名（GPT 头/表项在整盘 LBA1 起，分区设备上读不到）。
+gpt_disk_name(){  # $1=/dev/sda1 -> sda（取不到输出空）
+    basename "$(dirname "$(readlink -f "/sys/class/block/$(zj_devname "$1")" 2>>"$GPT_ERR")" 2>>"$GPT_ERR")" 2>>"$GPT_ERR"
+}
+# P0-2（2026-11-08 真机）：把与日志同目录的契约带进 /tmp —— 必须在挂载期内做。
+# 只带"描述的就是当前分区"的契约：offset 必查，size/GUID 双方有值时也查。
+# 旧代码靠 conf 可信度过滤器兜底；同目录直拷绕过了过滤器，所以把这道校验前移，
+# 防止数据盘上残留的"日志+契约"整对被当成任务。
+copy_task_conf(){  # $1=conf $2=分区字节偏移 $3=分区字节大小(可空) $4=分区GUID(可空)
+    [ -f "$1" ] || return 0
+    _ct_off=$(grep -m1 '^target_offset=' "$1" 2>/dev/null | cut -d= -f2- | tr -d '\r ')
+    _ct_sz=$(grep -m1 '^target_size=' "$1" 2>/dev/null | cut -d= -f2- | tr -d '\r ')
+    # GUID 与序列号同一套归一化（guid_norm：去花括号/连字符/空白 + 小写）：
+    # Windows、blkid、GPT 表项三种书写不该把同一分区判成两份（用户 2026-11-08）。
+    _ct_gd=$(guid_norm "$(grep -m1 '^target_guid=' "$1" 2>/dev/null | cut -d= -f2- | tr -d '\r')")
+    if [ -z "$_ct_off" ] || [ -z "$2" ] || [ "$_ct_off" != "$2" ]; then return 0; fi
+    if [ -n "$_ct_sz" ] && [ -n "$3" ] && [ "$_ct_sz" != "$3" ]; then return 0; fi
+    if [ -n "$_ct_gd" ] && [ -n "$4" ] && [ "$_ct_gd" != "$4" ]; then return 0; fi
+    cp "$1" /tmp/restore-task.conf 2>/dev/null \
+        || say "WARN: conf copy failed: $1 (fall back to task log)"
+}
+# 身份判据（用户 2026-11-08 批准，GUID 优先）。纯函数，测试台可直接喂四象限。
+# $1=want_serial $2=have_serial $3=want_guid $4=have_guid（均已归一化：去空白+小写）
+# 输出：ok-guid / ok-guid-serial-diff / ok-serial / reject-guid / reject-serial /
+#       unverifiable（任务文件没带 serial/guid）/ unverifiable-cand（任务带了但候选侧取不到）
+identity_verdict(){
+    _iv_ws=$1; _iv_hs=$2; _iv_wg=$3; _iv_hg=$4
+    if [ -n "$_iv_wg" ] && [ -n "$_iv_hg" ]; then
+        if [ "$_iv_wg" = "$_iv_hg" ]; then
+            if [ -n "$_iv_ws" ] && [ -n "$_iv_hs" ] && [ "$_iv_ws" != "$_iv_hs" ]; then
+                echo "ok-guid-serial-diff"
+            else
+                echo "ok-guid"
+            fi
+        else
+            echo "reject-guid"
+        fi
+        return 0
+    fi
+    if [ -n "$_iv_ws" ] && [ -n "$_iv_hs" ]; then
+        if [ "$_iv_ws" = "$_iv_hs" ]; then echo "ok-serial"; else echo "reject-serial"; fi
+        return 0
+    fi
+    if [ -n "$_iv_ws" ] || [ -n "$_iv_wg" ]; then
+        echo "unverifiable-cand"
+    else
+        echo "unverifiable"
+    fi
 }
 # 扫各分区找任务日志（主契约：_zjresy*.log 在目标分区根）→ 设 found_log / TARGET_DEV。
 # 用户 2026-10-04 规格 A2：**优先采用"日志里的 target_part_offset == 该分区实际
@@ -322,15 +534,52 @@ scan_for_log(){
         [ -b "$_d" ] || continue
         # 软驱不可能有契约/镜像（PIT-142 现场 fd0 白跑一遍）
         case "$_d" in *fd*|*floppy*) continue ;; esac
-        _sz=$(cat "/sys/class/block/$(basename "$_d")/size" 2>/dev/null)
-        _off=$(blkid -s PART_ENTRY_OFFSET -o value "$_d" 2>/dev/null)
+        _d=$(zj_dev "$_d")
+        _sz=$(cat "/sys/class/block/$(zj_devname "$_d")/size" 2>/dev/null)
+        # 分区起始偏移：**sysfs start×512 为主来源**（GPT/MBR/EBR 逻辑盘全准）。
+        # beta.13 根因：blkid 的 `-s PART_ENTRY_OFFSET` 在部分 vfat/MBR 分区上返回空
+        # → 清点屏打出 `off=?`（beta.12 演练日志可复现）。blkid 仅作后备，且换算成
+        # 字节（与契约 target_part_offset 同单位）。
+        _off=$(dev_offset_sectors "$_d" 2>/dev/null)
+        if [ -z "$_off" ]; then
+            _off_sec=$(blkid -s PART_ENTRY_OFFSET -o value "$_d" 2>/dev/null)
+            [ -n "$_off_sec" ] && _off=$((_off_sec * 512))
+        fi
+        # 空值一律显式化（n/a + 原因）：清点屏不许出现 `?` 或空白（beta.13 测试台）。
+        if [ -n "$_sz" ]; then _szd="${_sz}s"; else _szd="n/a(no-sysfs-size)"; fi
+        if [ -n "$_off" ]; then _offd="$_off"; else _offd="n/a(no-sysfs-start,no-blkid-offset)"; fi
         _rem=""; is_removable "$(basename "$_d")" && _rem="1"
+        # ── GUID 取值（用户 2026-11-08 批准：GUID 优先）──────────────────
+        # 来源优先级：blkid(PART_ENTRY_UUID) → GPT 表项直读 → 都没有（降级到序列号）。
+        # 每个分区只算一次，主匹配与 fallback 共用同一个 _guid_val（两条路径都生效）。
+        # 11-08 真机 blkid 返回空（日志原样 n/a(no-blkid-uuid)），GUID 优先判据等于
+        # 不存在，只能退回序列号；序列号两侧长度都不同 → 正确目标被拒。GPT 直读就是
+        # 补这个缺口；读表失败只降级、不拒绝。
+        _szb=""; [ -n "$_sz" ] && _szb=$((_sz * 512))
+        _disk=$(gpt_disk_name "$_d")   # 整盘名：GPT 头/表项与序列号都从整盘取
+        _guid_val=""; _guid_src="none"; _guid_why=""
+        _hb=$(guid_norm "$(blkid -s PART_ENTRY_UUID -o value "$_d" 2>>"$GPT_ERR")")
+        if [ -n "$_hb" ]; then
+            _guid_val=$_hb; _guid_src=blkid
+        else
+            if [ -n "$_disk" ]; then
+                _gr=$(gpt_part_guid "/dev/$_disk" "$_off" "$_szb")
+                case "$_gr" in
+                    ok\ *) _guid_val=${_gr#ok }; _guid_src=gpt-table ;;
+                    *) _guid_why=${_gr#fail}; [ -n "$_guid_why" ] || _guid_why="gpt-unavailable" ;;
+                esac
+            else
+                _guid_why="no-parent-disk"
+            fi
+        fi
+        logonly "guid: dev=$_d src=$_guid_src value=${_guid_val:-n/a}${_guid_why:+ why=$_guid_why}"
         mkdir -p "$ZJ_M"
         if mnt_dev "$_d" "$ZJ_M"; then
             _hit=""
             for _f in "$ZJ_M"/_zjresy*.log; do
                 [ -f "$_f" ] || continue
                 _hit=1
+                _task_seen=1
                 _want=$(grep '^target_part_offset=' "$_f" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r')
                 _want_sz=$(grep '^target_part_size=' "$_f" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r')
                 _have=$(dev_offset_sectors "$_d")
@@ -339,57 +588,197 @@ scan_for_log(){
                 # M5（1.0）：光比 offset/size 还不够 —— 多盘机的首分区都在 1MiB，
                 # 且 sd 字母本来就会变。这里再核对磁盘序列号（契约 log）与分区
                 # GUID（restore-task.conf）；双方都有值时才强制相等。
-                _want_serial=$(grep '^target_disk_serial=' "$_f" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r')
-                _disk=$(basename "$(dirname "$(readlink -f "/sys/class/block/$(basename "$_d")" 2>/dev/null)" 2>/dev/null)" 2>/dev/null)
+                # P0-1（2026-11-08 真机）：序列号两侧归一化后再比。
+                # Windows 侧报 `VMware NVME_0000`（带空格、小写 w），Linux sysfs 报
+                # `VMWareNVME_0000`（无空格、大写 W）→ 裸比必然不等，VMware NVMe 上
+                # 每次都会把正确目标判成"身份不符"而退到 fallback。这里只放宽
+                # 空白与大小写两类书写差异；offset/size/GUID 仍然强制相等。
+                _want_serial=$(grep '^target_disk_serial=' "$_f" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r' | tr -d '[:space:]' | tr 'A-Z' 'a-z')
                 _have_serial=""
-                [ -n "$_disk" ] && _have_serial=$(cat "/sys/class/block/$_disk/device/serial" 2>/dev/null | tr -d '[:space:]')
-                _serial_ok=1
-                if [ -n "$_want_serial" ] && [ -n "$_have_serial" ] && \
-                   [ "$_want_serial" != "$_have_serial" ]; then
-                    _serial_ok=0
-                fi
-                _want_guid=$(grep '^target_guid=' "$ZJ_M/restore-task.conf" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r')
-                _have_guid=$(blkid -s PART_ENTRY_UUID -o value "$_d" 2>/dev/null)
-                _guid_ok=1
-                if [ -n "$_want_guid" ] && [ -n "$_have_guid" ] && \
-                   [ "$_want_guid" != "$_have_guid" ]; then
-                    _guid_ok=0
-                fi
+                [ -n "$_disk" ] && _have_serial=$(cat "/sys/class/block/$_disk/device/serial" 2>/dev/null | tr -d '[:space:]' | tr 'A-Z' 'a-z')
+                # P0-1 同款归一化（用户 2026-11-08 要求"两边同一套"）：guid_norm。
+                _want_guid=$(guid_norm "$(grep '^target_guid=' "$ZJ_M/restore-task.conf" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r')")
+                # 候选侧 GUID：mount 前已按 blkid → GPT 表项直读 取过（见上面 _guid_val），
+                # 两条路径（主匹配 / fallback）共用；取不到时为空 → 判据降级到序列号。
+                _have_guid=$_guid_val
+                # 身份判据（用户 2026-11-08 批准，GUID 优先）：
+                #   offset+size 是位置闸门；位置对上后判身份：
+                #   ①GUID 双方都可取 → GUID 相等即认；序列号不一致**只记警告**
+                #     （序列号两侧呈现方式不受我们控制，实测长度都不同，不能当判据）。
+                #   ②GUID 取不到 → 退回序列号 + offset + size，序列号不一致则拒绝。
+                #   ③GUID/序列号都取不到 → 身份不可核对：按位置接受，日志明写，
+                #     绝不伪装成"校验通过"。
+                _guid_usable=0
+                if [ -n "$_want_guid" ] && [ -n "$_have_guid" ]; then _guid_usable=1; fi
+                _serial_usable=0
+                if [ -n "$_want_serial" ] && [ -n "$_have_serial" ]; then _serial_usable=1; fi
+                _id_ok=0; _id_weak=0; _id_why=""
+                # 判据收敛到 identity_verdict()（与 fallback 同一套，测试台可直接喂四象限）。
+                # 主匹配分支保留旧语义：任务带了身份但候选侧一项都取不到
+                # （unverifiable-cand）仍按位置弱接受，只在日志里记"身份不可核对"。
+                case "$(identity_verdict "$_want_serial" "$_have_serial" "$_want_guid" "$_have_guid")" in
+                    ok-guid|ok-guid-serial-diff|ok-serial) _id_ok=1 ;;
+                    reject-guid) _id_why="guid-mismatch" ;;
+                    reject-serial) _id_why="serial-mismatch" ;;
+                    *) _id_weak=1; _id_why="identity-unverifiable" ;;
+                esac
                 # offset 匹配 +（双方都有 size 时）size 也要匹配：多盘首分区都在
                 # 1MiB，且 Linux 的 sd 字母会变（2026-10-06 实测），只比 offset
                 # 会把别的盘误判成目标（PIT-128）。
+                _pos_ok=0
                 if [ -n "$_want" ] && [ -n "$_have" ] && [ "$_want" = "$_have" ] && \
-                   { [ -z "$_want_sz" ] || [ -z "$_have_sz" ] || [ "$_want_sz" = "$_have_sz" ]; } && \
-                   [ "$_serial_ok" = "1" ] && [ "$_guid_ok" = "1" ]; then
-                    cp "$_f" /tmp/ 2>/dev/null
-                    found_log="$_f"; TARGET_DEV="$_d"
-                    say "found log: $_f (dev=$_d rem=${_rem:-0}, offset match $_want size ${_have_sz:-?})"
-                    [ -f "$ZJ_M/restore-task.conf" ] && cp "$ZJ_M/restore-task.conf" /tmp/ 2>/dev/null
-                    break
-                elif [ -n "$_want" ] && [ "$_want" = "$_have" ]; then
-                    say "ERROR: candidate $_d offset matches but identity differs (serial=${_have_serial:-?} guid=${_have_guid:-?}) -> skip"
+                   { [ -z "$_want_sz" ] || [ -z "$_have_sz" ] || [ "$_want_sz" = "$_have_sz" ]; }; then
+                    _pos_ok=1
                 fi
-                [ -z "$_fb_log" ] && { _fb_log="$_f"; _fb_dev="$_d"; }
+                if [ "$_pos_ok" = "1" ] && { [ "$_id_ok" = "1" ] || [ "$_id_weak" = "1" ]; }; then
+                    # GUID 命中但序列号不同：按新判据只记警告（不参与判定）。
+                    if [ "$_id_ok" = "1" ] && [ "$_guid_usable" = "1" ] && \
+                       [ "$_serial_usable" = "1" ] && [ "$_want_serial" != "$_have_serial" ]; then
+                        say "WARN: serial differs but guid matched (serial is not a criterion; dev=$_d want=$_want_serial have=$_have_serial)"
+                    fi
+                    if [ "$_id_weak" = "1" ]; then
+                        say "WARN: identity unverifiable (no guid/serial comparable); accepting by offset+size (dev=$_d)"
+                        logonly "identity unverifiable (身份不可核对): accepted by offset=$_want size=${_have_sz:-n/a} dev=$_d"
+                    fi
+                    # P0-2（2026-11-08 真机）：cp 必须在**分区仍挂载时**做，且只有 cp
+                    # 真成功才算 found。旧写法只 cp 不校验，found_log 记的是原路径 ——
+                    # 循环结束 umount 之后这个路径已失效，/tmp 里既没日志也没 conf，
+                    # 下游 lite 只能 `no log and no conf, abort`。
+                    if cp "$_f" /tmp/ 2>/dev/null && [ -s "/tmp/$(basename "$_f")" ]; then
+                        found_log="/tmp/$(basename "$_f")"; TARGET_DEV="$_d"
+                        say "found log: $_f (dev=$_d rem=${_rem:-0}, offset match $_want size ${_have_sz:-n/a(no-sysfs-size)} guid-src=$_guid_src)"
+                        # 契约与日志同目录（task.cpp WriteRestoreLog）→ 一并带进 /tmp，
+                        # 只带日志会让 lite 以 STEP=no-contract fail-closed。
+                        copy_task_conf "$ZJ_M/restore-task.conf" "$_have" "$_have_sz" "$_have_guid"
+                        break
+                    else
+                        say "WARN: log copy failed: $_f (dev=$_d) -> keep scanning"
+                    fi
+                elif [ -n "$_want" ] && [ "$_want" = "$_have" ]; then
+                    say "ERROR: candidate $_d offset matches but identity differs ($_id_why: serial want=${_want_serial:-n/a} have=${_have_serial:-n/a(no-sysfs-serial)}; guid want=${_want_guid:-n/a} have=${_have_guid:-n/a(src=$_guid_src${_guid_why:+,$_guid_why})}) -> skip"
+                fi
+                # P0-2：fallback 候选也必须在挂载期内立刻拷贝；拷不进来就丢掉这个候选，
+                # 让后面的分区再试（循环结束后已 umount，再 cp 必然失败）。
+                # 用户 2026-11-08：fallback 不许"先到先得"，必须先过身份校验，
+                # 判据与主匹配分支同一套（GUID 优先 + 序列号降级 + 不可核对降级）：
+                #  GUID 可核对 → 相等才认（序列号不一致只记警告）。
+                #  GUID 取不到 → 序列号 + 位置；序列号不一致拒绝。
+                #  两项都不可核对 → 只按位置（offset/size/分区号），日志明写
+                #  "身份不可核对"，不伪装成校验通过。
+                # 拒绝即按"任务读不到"收场（不是失败菜单、不是 triage）。
+                # 归一化与主匹配分支同一套：去空白 + 转小写（见 P0-1）。
+                if [ -z "$_fb_log" ]; then
+                    _fb_gu=0
+                    if [ -n "$_want_guid" ] && [ -n "$_have_guid" ]; then _fb_gu=1; fi
+                    _fb_su=0
+                    if [ -n "$_want_serial" ] && [ -n "$_have_serial" ]; then _fb_su=1; fi
+                    _fb_id_ok=0; _fb_weak=0; _fb_why=""
+                    # 判据与主匹配分支同一个纯函数（GUID 优先 + 序列号降级）。
+                    # 差异只在 unverifiable-cand：任务带了身份、候选侧一项都取不到 →
+                    # 一项也没核对上 → 拒绝（主分支的弱接受不放宽到这里）。
+                    case "$(identity_verdict "$_want_serial" "$_have_serial" "$_want_guid" "$_have_guid")" in
+                        ok-guid|ok-guid-serial-diff|ok-serial) _fb_id_ok=1 ;;
+                        reject-guid) _fb_why="guid-mismatch" ;;
+                        reject-serial) _fb_why="serial-mismatch" ;;
+                        unverifiable)
+                            # 任务文件两项都空（真机确实取不到）→ 只能按位置，记"身份不可核对"
+                            _fb_weak=1; _fb_why="identity-unverifiable" ;;
+                        *) _fb_why="identity-unverifiable(candidate-side)" ;;
+                    esac
+                    # 日志要能回答"是哪一项不符"：逐项把 want/have 写出来。
+                    _fb_bad=""
+                    if [ -n "$_want_serial" ] && \
+                       { [ -z "$_have_serial" ] || [ "$_want_serial" != "$_have_serial" ]; }; then
+                        _fb_bad="$_fb_bad serial(w=${_want_serial},h=${_have_serial:-n/a(no-sysfs-serial)})"
+                    fi
+                    if [ -n "$_want_guid" ] && \
+                       { [ -z "$_have_guid" ] || [ "$_want_guid" != "$_have_guid" ]; }; then
+                        _fb_bad="$_fb_bad guid(w=${_want_guid},h=${_have_guid:-n/a(src=$_guid_src${_guid_why:+,$_guid_why})})"
+                    fi
+                    _fb_mis=""
+                    if [ -n "$_want" ] && [ -n "$_have" ] && [ "$_want" != "$_have" ]; then
+                        _fb_mis="$_fb_mis offset(w=${_want},h=${_have})"
+                    fi
+                    if [ -n "$_want_sz" ] && [ -n "$_have_sz" ] && [ "$_want_sz" != "$_have_sz" ]; then
+                        _fb_mis="$_fb_mis size(w=${_want_sz},h=${_have_sz})"
+                    fi
+                    # 分区号：现有契约（_zjresy / restore-task.conf）都没有这个键，
+                    # docs/40 A5 还明确禁止往 conf 加 target_part，所以这里不读也不比；
+                    # 日志里显式记 n/a(no-key-in-contract)，不伪装成"三项都核对过"。
+                    _fb_ok=0
+                    if [ "$_fb_id_ok" = "1" ] && [ -z "$_fb_mis" ]; then
+                        _fb_ok=1
+                    elif [ "$_fb_weak" = "1" ] && [ -z "$_fb_mis" ] && \
+                         { { [ -n "$_want" ] && [ -n "$_have" ]; } || \
+                           { [ -n "$_want_sz" ] && [ -n "$_have_sz" ]; }; }; then
+                        # 身份不可核对：至少有一项位置证据，不能全盲。
+                        _fb_ok=1
+                    elif [ "$_fb_weak" = "1" ] && [ -z "$_fb_mis" ]; then
+                        _fb_why="identity-unverifiable,nothing-comparable"
+                    fi
+                    if [ -n "$_fb_mis" ]; then
+                        if [ -n "$_fb_why" ]; then _fb_why="$_fb_why locator-mismatch"; else _fb_why="locator-mismatch"; fi
+                    fi
+                    if [ "$_fb_ok" = "1" ]; then
+                        if cp "$_f" /tmp/ 2>/dev/null && [ -s "/tmp/$(basename "$_f")" ]; then
+                            _fb_log="$_f"; _fb_dev="$_d"
+                            copy_task_conf "$ZJ_M/restore-task.conf" "$_have" "$_have_sz" "$_have_guid"
+                            if [ "$_fb_weak" = "1" ]; then
+                                say "WARN: fallback accepts $_d by weak identity (no serial/guid comparable)"
+                                logonly "fallback: 身份不可核对 (identity unverifiable): no guid/serial comparable; accepted by offset=${_want:-n/a(no-offset)} size=${_want_sz:-n/a(no-size)} pnum=n/a(no-key-in-contract) (have offset=${_have:-n/a} size=${_have_sz:-n/a})"
+                            elif [ "$_fb_gu" = "1" ]; then
+                                say "WARN: fallback accepts $_d by guid match (guid-src=$_guid_src; serial=${_have_serial:-n/a(no-sysfs-serial)} not a criterion)"
+                                if [ "$_fb_su" = "1" ] && [ "$_want_serial" != "$_have_serial" ]; then
+                                    logonly "fallback: guid matched, serial differs (ignored): want=$_want_serial have=$_have_serial dev=$_d"
+                                fi
+                            else
+                                say "WARN: fallback accepts $_d by serial match (guid unavailable: src=$_guid_src${_guid_why:+,$_guid_why})"
+                                logonly "fallback: accepted by serial after guid unavailable:$_fb_bad"
+                            fi
+                        else
+                            say "WARN: fallback log copy failed: $_f (dev=$_d) -> try next candidate"
+                        fi
+                    else
+                        _fb_rejects=$((_fb_rejects + 1))
+                        logonly "fallback candidate rejected: $_fb_why;$_fb_bad$_fb_mis (dev=$_d log=$_f)"
+                        say "ERROR: fallback candidate $_d rejected ($_fb_why) -> skip; task unreadable"
+                    fi
+                fi
             done
             _root=$(ls -A "$ZJ_M" 2>/dev/null | head -n 8 | tr '\n' ',')
-            probe "dev=$_d size=${_sz}s off=${_off:-?} fs=$(cat /tmp/zjmnt.fs 2>/dev/null) rem=${_rem:-0} mount=ok root=[$_root] log=$([ -n "$_hit" ] && echo yes || echo no)"
+            # PIT-238：分区根目录的文件名可能含任意汉字（用户数据）→ 屏上只保留
+            # 可渲染部分（无字形字符 → `.`），原文落日志。
+            if [ -n "$_root" ]; then
+                _rootd="[$(zj_ascii "$_root")]"
+                logonly "root listing $_d: [$_root]"
+            else
+                _rootd="n/a(empty-dir)"
+            fi
+            _fsd=$(cat /tmp/zjmnt.fs 2>/dev/null)
+            [ -n "$_fsd" ] || _fsd="n/a(no-signature)"
+            probe "dev=$_d size=$_szd off=$_offd fs=$_fsd rem=${_rem:-0} mount=ok root=$_rootd log=$([ -n "$_hit" ] && echo yes || echo no)"
             [ -z "$_hit" ] && say "mounted $_d (no log)"
             umount "$ZJ_M" 2>/dev/null
             [ -n "$found_log" ] && break
         else
             _fsnow=$(cat /tmp/zjmnt.fs 2>/dev/null)
             if [ -z "$_fsnow" ]; then
-                probe "dev=$_d size=${_sz}s off=${_off:-?} fs= rem=${_rem:-0} mount=FAIL err=no filesystem"
+                probe "dev=$_d size=$_szd off=$_offd fs=n/a(no-signature) rem=${_rem:-0} mount=FAIL err=no-filesystem"
                 say "skip $_d (no filesystem)"
             else
-                probe "dev=$_d size=${_sz}s off=${_off:-?} fs=$_fsnow rem=${_rem:-0} mount=FAIL err=$(cat /tmp/zjmnt.err 2>/dev/null | tr '\n' ' ' | head -c 150)"
-                say "mount FAILED $_d (fs=$_fsnow): $(cat /tmp/zjmnt.err 2>/dev/null | tr '\n' ' ' | head -c 200)"
+                _errd=$(cat /tmp/zjmnt.err 2>/dev/null | tr '\n' ' ' | head -c 150)
+                [ -n "$_errd" ] || _errd="n/a(no-stderr)"
+                probe "dev=$_d size=$_szd off=$_offd fs=$_fsnow rem=${_rem:-0} mount=FAIL err=$_errd"
+                _errs=$(cat /tmp/zjmnt.err 2>/dev/null | tr '\n' ' ' | head -c 200)
+                [ -n "$_errs" ] || _errs="n/a(no-stderr)"
+                say "mount FAILED $_d (fs=$_fsnow): $_errs"
             fi
         fi
     done
-    if [ -z "$found_log" ] && [ -n "$_fb_log" ]; then
-        cp "$_fb_log" /tmp/ 2>/dev/null
-        found_log="$_fb_log"; TARGET_DEV="$_fb_dev"
+    # P0-2：候选已在挂载期内拷贝成功，这里只做认定，不再 cp（循环结束时对应
+    # 分区早已 umount，cp 必然失败 —— 之前的"假 found"就是这一步来的）。
+    if [ -z "$found_log" ] && [ -n "$_fb_log" ] && [ -s "/tmp/$(basename "$_fb_log")" ]; then
+        found_log="/tmp/$(basename "$_fb_log")"; TARGET_DEV="$_fb_dev"
         say "WARN: no offset-matching _zjresy, fallback to first candidate (dev=$TARGET_DEV)"
     fi
     [ -n "$found_log" ] || say "no _zjresy*.log found"
@@ -414,6 +803,22 @@ conf_is_credible(){
         _ok_src=1
     fi
     [ "$(basename "$_cfd")" = "ZJRESTORE" ] && _ok_src=1
+    # P0-3（2026-11-08 真机）：写者（task.cpp WriteRestoreLog）会把 conf 与
+    # _zjresy*.log 一起写在**目标分区根**。旧规则只认"exe 旁边 / ZJRESTORE"，
+    # 把这份合法契约当成陈旧副本拒收（真机日志：`ignored 2 conf candidate(s)`，
+    # 其中一份就是目标根、与日志同目录的活契约）。同目录有任务日志、且
+    # target_offset 与 conf 一致 → 合法锚点；陈旧副本要么没有日志、要么 offset 对不上。
+    if [ "$_ok_src" = "0" ]; then
+        for _cl in "$_cfd"/_zjresy*.log; do
+            [ -f "$_cl" ] || continue
+            _clo=$(grep -m1 '^target_part_offset=' "$_cl" 2>/dev/null | cut -d= -f2- | tr -d '\r ')
+            _cco=$(grep -m1 '^target_offset=' "$_cfp" 2>/dev/null | cut -d= -f2- | tr -d '\r ')
+            if [ -n "$_clo" ] && [ -n "$_cco" ] && [ "$_clo" = "$_cco" ]; then
+                _ok_src=1
+                break
+            fi
+        done
+    fi
     [ "$_ok_src" = "1" ] || return 1
     _cact=$(grep -m1 '^action=' "$_cfp" | cut -d= -f2- | tr -d '\r ')
     case "$_cact" in restore|returnold) ;; *) return 1 ;; esac
@@ -422,9 +827,9 @@ conf_is_credible(){
         _lk="/tmp/$(basename "$found_log")"
         if [ -f "$_lk" ]; then
             _lo=$(grep -m1 '^target_part_offset=' "$_lk" | cut -d= -f2- | tr -d '\r ')
-            _lg=$(grep -m1 '^target_guid=' "$_lk" | cut -d= -f2- | tr -d '\r ')
+            _lg=$(guid_norm "$(grep -m1 '^target_guid=' "$_lk" | cut -d= -f2- | tr -d '\r ')")
             _co=$(grep -m1 '^target_offset=' "$_cfp" | cut -d= -f2- | tr -d '\r ')
-            _cg=$(grep -m1 '^target_guid=' "$_cfp" | cut -d= -f2- | tr -d '\r ')
+            _cg=$(guid_norm "$(grep -m1 '^target_guid=' "$_cfp" | cut -d= -f2- | tr -d '\r ')")
             [ -n "$_lo" ] && [ -n "$_co" ] && [ "$_lo" != "$_co" ] && return 1
             [ -n "$_lg" ] && [ -n "$_cg" ] && [ "$_lg" != "$_cg" ] && return 1
         fi
@@ -443,7 +848,13 @@ if [ ! -f /tmp/restore-task.conf ]; then
             find "$ZJ_M" -maxdepth 4 -name restore-task.conf > /tmp/zj-conf-cands
             while IFS= read -r _c; do
                 [ -f "$_c" ] || continue
-                conf_is_credible "$_c" || continue
+                _conf_seen=1
+                if ! conf_is_credible "$_c"; then
+                    # 观测缺口（2026-11-08 真机）：旧日志只有"ignored 2 个"，没有路径，
+                    # 无法判断到底拒了哪两份。候选路径一律进日志（屏上不刷）。
+                    logonly "ignored conf candidate (not credible): $_c"
+                    continue
+                fi
                 # 只有 cp 真成功才说 found（否则"found conf"会骗人：/tmp 里其实
                 # 没有、下游还要白找一轮）—— cp 失败必须留下 WARN（PIT-147）
                 if cp "$_c" /tmp/restore-task.conf; then
@@ -455,7 +866,7 @@ if [ ! -f /tmp/restore-task.conf ]; then
             done < /tmp/zj-conf-cands
             _nc=$(wc -l < /tmp/zj-conf-cands)
             [ "$_nc" -gt 0 ] && [ ! -f /tmp/restore-task.conf ] && \
-                say "ignored $_nc conf candidate(s): none anchored to software dir (stale copy?)"
+                say "ignored $_nc conf candidate(s): none anchored to software dir or copy failed (stale copy?; paths in log)"
             rm -f /tmp/zj-conf-cands
             umount "$ZJ_M" 2>/dev/null
             [ -f /tmp/restore-task.conf ] && break
@@ -710,7 +1121,9 @@ find_our_entry_hex(){
 # N21（2026-11-07）：Secure Boot/grub 下的一次性项指向 shimx64.efi，
 # 变量内容里**没有** zjtemp 文件名 —— 旧实现 grep zjtemp 永远不匹配，
 # disarm 静默失败 → BootOrder 不还原 → 反复进救援。现改为按描述
-# "SysRecover Temporary Restore" 或路径中的 ZJRESTORE 识别。
+# "NineRestore Temporary Restore" 或路径中的 ZJRESTORE 识别。
+# PIT-246（2026-11-08）：描述已从旧的 "SysRecover Temporary Restore" 改为
+# "NineRestore Temporary Restore"；旧名字（LEGACY）保留匹配以兼容升级残留。
 is_our_temp_entry(){
     _it_hex=$1
     case "$_it_hex" in
@@ -723,7 +1136,10 @@ is_our_temp_entry(){
     # 不可靠；用 od 打成无空格十六进制串再匹配（ASCII/UTF-16LE 两种都认）。
     _it_hx=$(od -An -tx1 -v "$_it_v" 2>>/tmp/zj_n20.err | tr -d ' \n')
     case "$_it_hx" in
-        # "SysRecover Temporary Restore"（UTF-16LE / ASCII）
+        # "NineRestore Temporary"（UTF-16LE / ASCII）—— 当前一次性项
+        *4e0069006e00650052006500730074006f00720065002000540065006d0070006f00720061*) return 0 ;;
+        *4e696e65526573746f72652054656d706f72617279*) return 0 ;;
+        # LEGACY "SysRecover Temporary Restore"（UTF-16LE / ASCII）
         *5300790073005200650063006f007600650072*) return 0 ;;
         *5379735265636f766572*) return 0 ;;
         # 路径里的 ZJRESTORE（UTF-16LE / ASCII）
@@ -827,13 +1243,13 @@ hand_back_bootorder(){
             say "WARN: cannot mount $_dd to hand back boot order"
         fi
     done
-    [ "$_hb_any" -gt 0 ] || say "boot hand-back: nothing staged on ESP (already handed back)"
+    [ "$_hb_any" -gt 0 ] || say "boot hand-back: nothing staged (already handed back)"
     return "$_hb_bad"
 }
 
 # N20 ③：用户拍板的求助渠道（救援层首屏 + GUI 失败提示 + docs/33 三处一致）。
 show_support(){
-    say "支持:QQ群1128237828 邮箱ms_2@qq.com(请附救援日志)"
+    say2 "支持:QQ群1128237828 邮箱ms_w@qq.com(请附救援日志)" "Support: QQ group 1128237828, mail ms_w@qq.com (attach rescue log)"
 }
 
 # 目标盘上是否还留着旧系统备份 ~old（只有 A 引擎的交换会留下它）。
@@ -854,6 +1270,30 @@ has_old_tree(){
             return 0
         fi
         umount /tmp/zj_old_chk
+    fi
+    return 1
+}
+
+# 目标盘上是否还留着"待交换"的完整暂存 ~new/.zj-done。
+# 用途（PIT-249）：区分"还原成功"与"交换做到一半断了"——成功时 zjswap 会删掉
+# ~new，只有 ~old 留到 Windows 首启清理；中断时 ~new 与 ~old 同时在。
+has_new_tree(){
+    _hn=$1
+    mkdir -p /tmp/zj_new_chk
+    if timeout 30 mount -t ntfs3 "$_hn" /tmp/zj_new_chk 2>>/tmp/zj_n20.err; then
+        if [ -f /tmp/zj_new_chk/~new/.zj-done ]; then
+            umount /tmp/zj_new_chk
+            return 0
+        fi
+        umount /tmp/zj_new_chk
+        return 1
+    fi
+    if timeout 30 ntfs-3g -o force "$_hn" /tmp/zj_new_chk 2>>/tmp/zj_n20.err; then
+        if [ -f /tmp/zj_new_chk/~new/.zj-done ]; then
+            umount /tmp/zj_new_chk
+            return 0
+        fi
+        umount /tmp/zj_new_chk
     fi
     return 1
 }
@@ -936,38 +1376,38 @@ triage_previous(){
     has_old_tree "$_tp_dev" || return 0
     _tp_denied=0
     while :; do
-        say "==== SysRecover 上次任务未确认 ===="
-        say "旧备份 ~old 仍在:上次还原未完成"
-        say "[1] 回滚到旧系统(推荐,丢弃新系统)"
-        say "[2] 重试新系统"
-        say "[3] 仅重启"
+        say2 "==== NineRestore 上次任务未确认 ====" "==== NineRestore: previous task not confirmed ===="
+        say2 "旧备份 ~old 仍在:上次还原未完成" "Old backup ~old still present: last restore did not finish"
+        say2 "[1] 回滚到旧系统(推荐,丢弃新系统)" "[1] Roll back to the old system (recommended; discards the new one)"
+        say2 "[2] 重试新系统" "[2] Retry the new system"
+        say2 "[3] 仅重启" "[3] Reboot only"
         show_support
         if [ "$_tp_has" = "1" ]; then
-            say "请选择? 120秒无输入自动选[2](无人值守不做回滚)"
+            say2 "请选择? 120秒无输入自动选[2](无人值守不做回滚)" "Select? no input in 120s -> auto [2] (unattended never rolls back)"
         else
-            say "请选择? 120秒无输入自动选[3](无人值守不做回滚)"
+            say2 "请选择? 120秒无输入自动选[3](无人值守不做回滚)" "Select? no input in 120s -> auto [3] (unattended never rolls back)"
         fi
         _ch=
         read -t 120 -r _ch || _ch=
         if [ -z "$_ch" ]; then
             if [ "$_tp_has" = "1" ]; then _ch=2; else _ch=3; fi
-            say "自动:120秒无输入,已选 $_ch (回滚必须手工输入YES)"
+            say2 "自动:120秒无输入,已选 $_ch (回滚必须手工输入YES)" "Auto: no input in 120s, chose $_ch (rollback needs typed YES)"
         fi
         case "$_ch" in
             1)
-                say "回滚会丢弃新系统;60秒内输入大写YES确认:"
+                say2 "回滚会丢弃新系统;60秒内输入大写YES确认:" "Rollback discards the new system; type YES within 60s to confirm:"
                 _cf=
                 read -t 60 -r _cf || _cf=
                 if [ "$_cf" != "YES" ]; then
                     _tp_denied=$((_tp_denied + 1))
-                    say "ERROR: 回滚未确认 ($_tp_denied/2),目标未改动"
+                    say2 "ERROR: 回滚未确认 ($_tp_denied/2),目标未改动" "ERROR: rollback not confirmed ($_tp_denied/2), target untouched"
                     if [ "$_tp_denied" -ge 2 ]; then
-                        say "ERROR: 两次确认失败,放弃回滚;不再循环菜单"
+                        say2 "ERROR: 两次确认失败,放弃回滚;不再循环菜单" "ERROR: confirmation failed twice; rollback abandoned, menu loop stopped"
                         return 0
                     fi
                     continue
                 fi
-                say "开始回滚:~old -> 根;新系统目录将被丢弃"
+                say2 "开始回滚:~old -> 根;新系统目录将被丢弃" "Starting rollback: ~old -> root; the new system tree will be discarded"
                 _urc=1
                 if [ -f /zjswap-undo.sh ]; then
                     sh /zjswap-undo.sh "$_tp_dev" /tmp/zj_n20_undo
@@ -979,24 +1419,24 @@ triage_previous(){
                     0)
                         clear_stale_task "$_tp_dev"
                         mark_pending_task "$_tp_dev"
-                        say "回滚成功:旧系统已回到根;正在重启"
+                        say2 "回滚成功:旧系统已回到根;正在重启" "Rollback OK: old system back at root; rebooting"
                         sync
                         sleep 3
                         reboot_now
                         break
                         ;;
-                    2) say "回滚未执行:~old 不可用(备份不完整);目标未改动" ;;
-                    3) say "回滚未执行:根上仍有上次中断的~new;请重试或联系支持" ;;
-                    *) say "回滚失败 (rc=$_urc);目标交换可能不完整;请把日志发给我们" ;;
+                    2) say2 "回滚未执行:~old 不可用(备份不完整);目标未改动" "Rollback not run: ~old unusable (incomplete backup); target untouched" ;;
+                    3) say2 "回滚未执行:根上仍有上次中断的~new;请重试或联系支持" "Rollback not run: interrupted ~new still at root; retry or contact support" ;;
+                    *) say2 "回滚失败 (rc=$_urc);目标交换可能不完整;请把日志发给我们" "Rollback FAILED (rc=$_urc); swap may be incomplete; send us the log" ;;
                 esac
                 show_support
                 ;;
             2)
                 if [ "$_tp_has" = "1" ]; then
-                    say "继续上次未完成的任务"
+                    say2 "继续上次未完成的任务" "Continue the unfinished task"
                     return 0
                 fi
-                say "无未完成任务;按重试新系统重启"
+                say2 "无未完成任务;按重试新系统重启" "No unfinished task; rebooting to retry the new system"
                 sync
                 sleep 2
                 reboot_now
@@ -1008,17 +1448,17 @@ triage_previous(){
                 reboot_now
                 break
                 ;;
-            *) say "无效选择:$_ch (1=回滚,2=重试,3=重启)" ;;
+            *) say2 "无效选择:$_ch (1=回滚,2=重试,3=重启)" "Invalid choice: $_ch (1=rollback 2=retry 3=reboot)" ;;
         esac
     done
     return 0
 }
 
 reboot_now(){
-    say "AUTO-RECOVER: 正在重启(下次进Windows后打开SysRecover看报告)"
+    say2 "AUTO-RECOVER: 正在重启(下次进Windows后打开NineRestore看报告)" "AUTO-RECOVER: rebooting (open NineRestore in Windows later for the report)"
     # N20：启动顺序已在进救援时归还；这里再兜一次（幂等，失败不阻塞重启）
     hand_back_bootorder || {
-        say "ERROR: 启动顺序归还再次失败;请在BIOS中修正启动顺序"
+        say2 "ERROR: 启动顺序归还再次失败;请在BIOS中修正启动顺序" "ERROR: boot order hand-back failed again; fix boot order in BIOS"
         show_support
     }
     sync
@@ -1028,7 +1468,7 @@ reboot_now(){
     reboot -f
     # P1（beta.6）：reboot -f 两次仍返回 = 重启没生效。这里必须**终止**，
     # 否则调用方的菜单循环会再次自动选择、再次重启，形成无人值守死循环。
-    say "ERROR: 重启未生效;停在此处避免死循环"
+    say2 "ERROR: 重启未生效;停在此处避免死循环" "ERROR: reboot did not take effect; halting to avoid a loop"
     sync
     sleep 5
     poweroff -f
@@ -1048,15 +1488,15 @@ menu_loop(){
     _mi=0
     while :; do
         _mi=$((_mi + 1))
-        say "==== SysRecover 恢复菜单(第$_mi轮) ===="
+        say2 "==== NineRestore 恢复菜单(第$_mi轮) ====" "==== NineRestore recovery menu (round $_mi) ===="
         _rc_m=$(sed -n 's/.*restore script returned (rc=\([0-9]*\)).*/\1/p' /tmp/zjrestore.log 2>/dev/null | tail -n 1)
         _st_m=$(sed -n 's/.*STEP=\([a-zA-Z][a-zA-Z-]*\).*/\1/p' /tmp/zjrestore.log 2>/dev/null | tail -n 1)
-        say "RESULT: 还原失败 (rc=${_rc_m:-?}) STEP=${_st_m:-unknown}"
-        say "[1] 再试一次还原"
-        say "[2] 立即重启"
-        say "[3] 专家命令行"
+        say2 "RESULT: 还原失败 (rc=${_rc_m:-n/a(no-rc)}) STEP=${_st_m:-n/a(no-step)}" "RESULT: restore FAILED (rc=${_rc_m:-n/a(no-rc)}) STEP=${_st_m:-n/a(no-step)}"
+        say2 "[1] 再试一次还原" "[1] Retry the restore"
+        say2 "[2] 立即重启" "[2] Reboot now"
+        say2 "[3] 专家命令行" "[3] Expert command line"
         show_support
-        say "请选择? 120秒无输入自动选[2]"
+        say2 "请选择? 120秒无输入自动选[2]" "Select? no input in 120s -> auto [2]"
         _ch=
         read -t 120 -r _ch || _ch=
         [ -z "$_ch" ] && _ch=2
@@ -1071,10 +1511,10 @@ menu_loop(){
                 ;;
             2) reboot_now; break ;;
             3) break ;;
-            *) say "无效选择:$_ch (1=重试,2=重启,3=命令行)" ;;
+            *) say2 "无效选择:$_ch (1=重试,2=重启,3=命令行)" "Invalid choice: $_ch (1=retry 2=reboot 3=shell)" ;;
         esac
     done
-    say "进入救援命令行"
+    say2 "进入救援命令行" "Entering rescue command line"
     exec /bin/sh
 }
 
@@ -1084,20 +1524,40 @@ menu_loop(){
 #   retry = 原地重跑整个脚本（B 引擎重格式化重 apply；returnold 按 phase 续做）
 #   reboot = 目标上现成系统可引导（未动目标 或 bootfix 已验证），回 Windows 收报告
 #   menu   = 引导状态不确定 → 引导菜单，不再给裸 #
+# P1（2026-11-08 真机）：_ran 只认 **/tmp 里真实存在的任务文件**。
+# 旧写法认 found_log 这个字符串：候选日志 cp 失败后它仍非空 → blackbox 把本次
+# 记成 interrupted（"上次任务未确认"的语义）；若盘上恰好有 ~old，triage 还会弹
+# 三选一 —— 但这次连一份可读任务都没有。候选"见过但读不到"单独记 task-unreadable。
+_tmp_task_log=""
+for _f in /tmp/_zjresy*.log; do
+    [ -f "$_f" ] && { _tmp_task_log="$_f"; break; }
+done
 _ran=0
-if [ -x /zjrestore-lite.sh ] && { [ -n "$found_log" ] || [ -f /tmp/restore-task.conf ]; }; then _ran=1; fi
+if [ -x /zjrestore-lite.sh ] && { [ -n "$_tmp_task_log" ] || [ -f /tmp/restore-task.conf ]; }; then _ran=1; fi
+# 用户 2026-11-08：fallback 候选被身份校验拒绝（如 serial/guid 不符）→ 即使
+# 后面 conf 扫描又把同一分区的契约捡回 /tmp，也不许以 "conf-only" 把这份任务跑
+# 起来（那样等于绕过了刚加的校验）。统一按"任务读不到"收场。
+_task_rejected=0
+if [ "${_fb_rejects:-0}" -gt 0 ] && [ -z "$_tmp_task_log" ]; then
+    _task_rejected=1
+    _ran=0
+fi
+_task_unreadable=0
+if [ "$_ran" = "0" ] && { [ "$_task_seen" = "1" ] || [ "$_conf_seen" = "1" ]; }; then
+    _task_unreadable=1
+fi
 _rc=0
 _rt=0
 if [ "$_ran" = "1" ]; then
-    # N20：契约/日志已可读（上面已按 found_log / conf 判定），且还没写目标盘。
+    # N20：契约/日志已可读（_ran 只认 /tmp 里真实存在的文件），且还没写目标盘。
     # 先把启动顺序还给 Windows；写 NVRAM 失败 → 中止，不带着"用户可能被困"继续。
     if ! hand_back_bootorder; then
-        say "ERROR: 无法把启动顺序交还Windows(NVRAM只读或已满)"
-        say "ERROR: 不会写入目标盘,你不会被困在救援层"
+        say2 "ERROR: 无法把启动顺序交还Windows(NVRAM只读或已满)" "ERROR: cannot hand boot order back to Windows (NVRAM read-only or full)"
+        say2 "ERROR: 不会写入目标盘,你不会被困在救援层" "ERROR: target disk not written; you are not trapped in the rescue layer"
         show_support
         /bin/sh /zjrestore-lite.sh zz-blackbox nvram-handback
         sync
-        say "5秒后关机;按F12/Esc进启动菜单(或在BIOS中修改启动顺序)"
+        say2 "5秒后关机;按F12/Esc进启动菜单(或在BIOS中修改启动顺序)" "Shutdown in 5s; press F12/Esc for the boot menu (or fix boot order in BIOS)"
         sleep 5
         poweroff -f
         reboot -f
@@ -1141,25 +1601,74 @@ fi
 # 黑匣子兜底：脚本没跑（找不到任务）、或跑挂了没来得及写盘 → 调脚本的
 # zz-blackbox 模式把日志+探测表+状态写到所有可写面（逻辑单源，不重复实现）。
 # /tmp/zj-bb.done 非空 = 脚本自己已经扫过（失败路径的 EXIT trap），不重复扫。
-# /tmp/zj-bb-final = 脚本的 EXIT trap 已把 result/step 落盘（P3 beta.6）：成功时
-# 尤其不能再用 reason=interrupted 覆盖成 FAILED（测试台实测 returnold 成功后
-# ZJRESTORE-status.txt 仍写 FAILED/interrupted，就是这里二次扫盘造成的）。
+# /tmp/zj-bb-final = 脚本的 EXIT trap 已把 result/step 落盘：成功时不能再用
+# reason=interrupted 覆盖成 FAILED（测试台实测 returnold 成功后仍写 FAILED 就是这里二次扫盘）。
+# PIT-249：中断现场（~old 在 + ~new/.zj-done 在）必须在扫盘**之前**判定，
+# 否则 reason=no-task 会把上一次 FAILED/interrupted 的取证覆盖掉。
+_zb_dev=""
+_zb_hit=0
+if [ "$_ran" = "0" ]; then
+    _zb_dev=$(find_old_part)
+    if [ -n "$_zb_dev" ] && has_new_tree "$_zb_dev"; then _zb_hit=1; fi
+fi
 if [ ! -s /tmp/zj-bb.done ] && [ ! -f /tmp/zj-bb-final ]; then
-    if [ "$_ran" = "1" ]; then _why=interrupted; else _why=no-task; fi
+    if [ "$_task_rejected" = "1" ]; then
+        # 身份校验拒绝的任务不算"上次任务未确认"（interrupted 是"跑到一半断了"
+        # 的语义），单独记 task-unreadable，便于和真中断区分（用户 2026-11-08）。
+        _why=task-unreadable
+    elif [ "$_ran" = "1" ] || [ "$_zb_hit" = "1" ]; then
+        _why=interrupted
+    elif [ "$_task_unreadable" = "1" ]; then
+        _why=task-unreadable
+    else
+        _why=no-task
+    fi
     say "blackbox: sweep by init (reason=$_why)"
     /bin/sh /zjrestore-lite.sh zz-blackbox "$_why"
     [ -s /tmp/zj-bb.done ] || say "WARN: no writable surface found for logs"
 fi
 emit_result
-# 没有任务 = 不是失败：先归还启动顺序；若盘上还留着 ~old（上次没走完），
-# 首屏给三选一（回滚/再试/重启），否则回原系统（10s 给人工断电的机会）。
+# PIT-248（2026-11-08 真机）：没有任务 ≠ 上次任务未确认。
+# 常驻菜单在没有待执行任务时进来，**不再**给"回滚/再试/重启"三选一
+# （旧逻辑只要盘上有 ~old 就 triage，而成功还原后 ~old 会保留到 Windows
+# 首启清理，于是每次都变成"没有还原任务 + 中文 1/2/3"）。这里只给一句人话
+# 并自动返回 Windows；三选一只保留在真正"上次任务未确认"的路径
+# （_ran=1 且存在 ~old，见下方 triage_previous 调用）。
 if [ "$_ran" = "0" ]; then
+    # PIT-249（审查补漏）：成功还原会删掉 ~new、只留 ~old；而交换做到一半断了时
+    # ~new（含 .zj-done）与 ~old 会同时在。后者不能当成"没有任务"直接重启 ——
+    # 根上可能已经半新半旧，~old 是唯一能救回旧系统的备份，必须让用户决策
+    # （进 triage 后 1=回滚、3=重启，与"上次任务未确认"同一套动作）。
+    # 用户 2026-11-08：被身份校验拒绝的任务不许走 triage（三选一里"再试一次"
+    # 没有可执行任务），直接进下面的"任务读不到"文案；半交换现场仅记在日志。
+    if [ "$_zb_hit" = "1" ] && [ "$_task_rejected" = "0" ]; then
+        say "detected incomplete swap (~old + ~new on $_zb_dev), asking user"
+        triage_previous "$_zb_dev" 0 ""
+    fi
+    [ "$_zb_hit" = "1" ] && [ "$_task_rejected" = "1" ] && \
+        logonly "incomplete swap detected (~old + ~new on $_zb_dev) but task was rejected by identity -> no triage"
     hand_back_bootorder || {
         say "WARN: BootOrder hand-back failed (nothing to hand back or NVRAM error)"
     }
-    triage_previous "" 0
-    say "本机没有还原任务 -> 10秒后重启(想留在救援层请现在关机)"
-    sleep 10
+    # P1（2026-11-08 真机）：找到任务文件但一份都没读进 /tmp —— 与"上次任务未确认"
+    # 是两件事：这里**不弹 triage**（不给回滚/重试，因为根本没有可续做的任务），
+    # 也不写 interrupted；用独立标题和文案让用户/支持一眼区分。目标盘未被改动。
+    if [ "$_task_rejected" = "1" ] || { [ "$_task_unreadable" = "1" ] && [ "$_zb_hit" = "0" ]; }; then
+        if [ "$_task_rejected" = "1" ]; then
+            say "task rejected by identity check (see log for the mismatched item); restore never started, target untouched"
+        else
+            say "task files found but none readable into /tmp; restore never started, target untouched"
+        fi
+        say2 "==== NineRestore 任务读不到 ====" "==== NineRestore: TASK UNREADABLE ===="
+        say2 "任务读不到:还原未开始,目标未改动" "Task unreadable: restore never started; target untouched"
+        say2 "请重启Windows后重新执行还原" "Reboot to Windows; please stage the restore again"
+        show_support
+        say2 "10秒后自动重启" "Auto-reboot in 10s"
+        sleep 10
+        reboot_now
+    fi
+    say2 "没有还原任务,正在重启" "No pending restore task; rebooting"
+    sleep 5
     reboot_now
 fi
 # 脚本成功路径自带 reboot -f；万一没走掉，这里兜底

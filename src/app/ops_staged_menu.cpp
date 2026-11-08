@@ -303,10 +303,17 @@ int RetryStagedRestore(std::string& err, bool* needReboot) {
         LogError("retry: conf missing image_path");
         return 2;
     }
-    // ③ 按 offset/size/serial 匹配当前磁盘表（盘符可能变、sdX 字母不可靠）
+    // ③ 按 offset/size + 分区 GUID（GUID 优先）匹配当前磁盘表
+    //    （盘符可能变、sdX 字母不可靠）。序列号两侧的呈现方式不受我们控制：
+    //    同一台机器的另一块盘，Windows 记 `VMWare NVME_0000_00000001.`，Linux
+    //    侧长度都不同 —— 去空白+转小写救不了。故这里与救援层 init 同一套判据：
+    //    位置（offset+size）是闸门；GUID 双方可取 → GUID 相等即认，序列号不一致
+    //    只记警告；GUID 取不到 → 降级为序列号，不一致则跳过；两者都取不到 →
+    //    身份不可核对，按位置接受并在日志明写（不伪装成校验通过）。
     std::string offS = TaskConfGet(text, "target_offset");
     std::string szS = TaskConfGet(text, "target_size");
     std::string serialS = TaskConfGet(text, "target_disk_serial");
+    std::string guidS = TaskConfGet(text, "target_guid");
     unsigned long long off = offS.empty() ? 0 : strtoull(offS.c_str(), nullptr, 10);
     unsigned long long sz = szS.empty() ? 0 : strtoull(szS.c_str(), nullptr, 10);
     if (!off) {
@@ -314,14 +321,55 @@ int RetryStagedRestore(std::string& err, bool* needReboot) {
         LogError("retry: conf missing target_offset");
         return 2;
     }
+    // 归一化口径与 init 侧同一套：去空白 + 去花括号 + 转小写。
+    auto norm = [](const std::string& v) {
+        std::string o;
+        for (char c : v) {
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n' ||
+                c == '{' || c == '}')
+                continue;
+            o.push_back(c >= 'A' && c <= 'Z' ? (char)(c - 'A' + 'a') : c);
+        }
+        return o;
+    };
+    const std::string serN = norm(serialS);
+    const std::string gdN = norm(guidS);
     PartitionInfo target;
     DiskInfo tdisk;
     bool found = false;
     for (const auto& d : EnumerateDisks()) {
-        if (!serialS.empty() && W2U(d.serial) != serialS) continue;
+        const std::string dser = norm(W2U(d.serial));
         for (const auto& p : d.parts) {
             if (p.offsetBytes != off) continue;
             if (sz && p.sizeBytes && p.sizeBytes != sz) continue;
+            const std::string pg = norm(W2U(p.guid));
+            bool ok = false;
+            if (!gdN.empty() && !pg.empty()) {
+                ok = (gdN == pg);
+                if (ok && !serN.empty() && !dser.empty() && dser != serN)
+                    LogWarn("retry: serial differs but guid matched (serial is not a "
+                            "criterion): conf=" + serialS + " disk=" + W2U(d.serial));
+                if (!ok)
+                    LogInfo("retry: candidate disk=" + std::to_string(d.index) +
+                            " part=" + std::to_string(p.partNumber) +
+                            " offset/size matched but guid differs: conf=" + guidS +
+                            " cand=" + W2U(p.guid));
+            } else if (!serN.empty() && !dser.empty()) {
+                ok = (serN == dser);
+                if (!ok)
+                    LogInfo("retry: candidate disk=" + std::to_string(d.index) +
+                            " part=" + std::to_string(p.partNumber) +
+                            " offset/size matched but serial differs (guid unavailable): "
+                            "conf=" + serialS + " disk=" + W2U(d.serial));
+            } else {
+                // 身份不可核对：只按 offset+size 接受，日志明写。
+                ok = true;
+                LogWarn("retry: identity unverifiable (no guid/serial comparable) -> "
+                        "accept by offset+size (part " +
+                        std::to_string(p.partNumber) + " of disk " +
+                        std::to_string(d.index) + ")");
+            }
+            if (!ok) continue;
             target = p;
             tdisk = d;
             found = true;
@@ -332,7 +380,7 @@ int RetryStagedRestore(std::string& err, bool* needReboot) {
     if (!found) {
         err = Tr("重试失败：按契约 offset/size 找不到目标分区（磁盘表已变化？）");
         LogError("retry: target not found offset=" + offS + " size=" + szS +
-                 " serial=" + serialS);
+                 " serial=" + serialS + " guid=" + guidS);
         return 4;
     }
     LogInfo("retry: target disk=" + std::to_string(target.diskIndex) +
@@ -370,6 +418,67 @@ int RetryStagedRestore(std::string& err, bool* needReboot) {
     err = serr.empty() ? Tr("重试失败（详见日志）") : serr;
     LogError("retry: StageRestore rc=" + std::to_string(rc) + " " + err);
     return rc == 4 ? 4 : 1;
+}
+
+// beta.14（PIT-240）：清除常驻菜单时，把"解压并安装"留在目标盘根上的 ~new 一起
+// 删掉（用户真机实测：清完菜单 ~new 还在，白占一个系统大小的空间）。
+// 安全边界：
+//   · 只认我们自己的目录标记（.zj-done / .zj-undo-phase / .zj-universal-failed）；
+//     没有标记 → **保留**并在 keep/log 里明确写出来，绝不猜着删。
+//   · 只删 ~new；~old 是用户回滚用的旧系统备份，任何情况下都不碰。
+//   · 只扫本机磁盘分区（EnumerateDisks），不碰网络盘。
+bool CleanupMenuStaging(std::string& log, std::wstring* keep) {
+    bool allOk = true;
+    std::wstring kept;
+    for (const auto& d : EnumerateDisks()) {
+        for (const auto& q : d.parts) {
+            if (q.letter.empty() || q.letter.size() != 1) continue;
+            std::wstring root = q.letter + L":\\";
+            std::wstring nn = LongPath(root + L"~new");
+            DWORD a = GetFileAttributesW(nn.c_str());
+            if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY))
+                continue;
+            bool ours = false;
+            const wchar_t* marks[] = {L".zj-done", L".zj-undo-phase",
+                                      L".zj-universal-failed"};
+            for (const wchar_t* m : marks) {
+                std::wstring mp =
+                    LongPath(root + L"~new\\" + std::wstring(m));
+                if (GetFileAttributesW(mp.c_str()) != INVALID_FILE_ATTRIBUTES)
+                    ours = true;
+            }
+            if (!ours) {
+                std::string r = "~new kept on " + std::string(1, q.letter[0]) +
+                                ": (no .zj-* marker)";
+                log += r + "\n";
+                LogInfo(r);
+                kept += q.letter;
+                continue;
+            }
+            DeleteTreeRec(root + L"~new");
+            if (GetFileAttributesW(nn.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                allOk = false;
+                std::string r = "~new delete FAILED on " +
+                                std::string(1, q.letter[0]) + ":";
+                log += r + "\n";
+                LogError(r);
+            } else {
+                std::string r = "~new deleted on " + std::string(1, q.letter[0]) +
+                                ":";
+                log += r + "\n";
+                LogInfo(r);
+            }
+        }
+    }
+    if (keep) {
+        keep->clear();
+        if (!kept.empty()) {
+            *keep = Tr(L"启动菜单已清除，但这些盘的 ~new 没有我们写入的 .zj-* 标记，\n"
+                       L"为免误删已保留，请确认后手动删除：") +
+                    kept;
+        }
+    }
+    return allOk;
 }
 
 }  // namespace sysrecover

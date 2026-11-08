@@ -42,6 +42,16 @@ bool InstallBootLayer(const std::wstring& deployDrive,
                       const std::wstring& exeDir, std::string& log,
                       bool temporary = false);
 
+// 升级自愈（beta.14，PIT-239）：已装过旧版菜单的机器，把 menu.lst 标题/内核参数
+// 与 BCD 描述刷新成当前文案。只重写小文本、不重拷载荷；没装过则什么都不做。
+bool RefreshBootLayerNames(const std::wstring& deployDrive,
+                           const std::wstring& exeDir, std::string& log);
+
+// 还原后自愈（beta.14，PIT-243）：救援层把载荷写回新系统根时留
+// <系统盘>\ZJRESTORE\menu-redeploy.txt（bcd=pending）——BIOS 的启动项在
+// \Boot\BCD，Linux 侧改不了。这里在 Windows 启动时补建 BCD 条目。
+bool EnsureMenuAfterRestore(std::string& log);
+
 // ── UEFI（GPT）分支 ──────────────────────────────────────────────
 // 临时给 ESP 分配一个盘符（mountvol X: /s，需管理员）。成功返回 L"X:\\"。
 std::wstring MountEsp(std::string& log);

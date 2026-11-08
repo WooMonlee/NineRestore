@@ -10,7 +10,16 @@ enum class PartitionStyle { Unknown, MBR, GPT };
 
 struct PartitionInfo {
     uint32_t diskIndex = 0;
-    uint32_t partNumber = 0;  // 1-based；0 表示未编号条目
+    uint32_t partNumber = 0;  // 1-based；0 表示未编号条目（GPT = 分区表槽位号）
+    // 物理顺序号（按 StartingOffset 升序，1-based，含 ESP/MSR 等所有条目）。
+    // 注意：GPT 的槽位号（partNumber）**不保证**与物理顺序一致 —— 由 MBR 转换
+    // 来的 GPT 常出现「槽位 1 = 数据盘、槽位 4 = 系统盘」（PIT-245）。UI 只能显示
+    // 这个顺序号；partNumber 仍用于契约/引导定位（按槽位匹配），不要混用。
+    uint32_t ordinal = 0;
+    // UI 列表显示序号（同盘内按「可见行」重排，1-based）。ESP/MSR/恢复分区
+    // 不上列表但占 ordinal，直接显示 ordinal 会跳号（0/3、0/4），故另行编号；
+    // 纯显示，不参与任何契约/操作。0 = 未填充（回退 ordinal/partNumber）。
+    uint32_t displayNo = 0;
     std::wstring guid;        // GPT PartitionId，小写无花括号；MBR 为空
     // 卷名 \\?\Volume{...}\（FindFirstVolume 原样返回）；无卷映射时为空。
     // GPT 下通常与 partition GUID 相同，但刚分区/刚格式化时 mountvol 按
@@ -110,5 +119,23 @@ int VolumeDiskIndex(wchar_t letter);
 // 分区表摘要（**纯 ASCII**：给日志与报错用，避免编码坑 —— 见 docs/15 §7-P4）。
 // 形如：`disk0 GPT Msft Virtual Disk: p1 100MB FAT32 [ESP] ; p2 50GB NTFS C: ...`
 std::wstring DescribePartitions();
+
+// ── 「推荐系统盘」判据（PIT-245，2026-11-08 真机 UEFI）────────────────────
+// 旧实现是"取列表里第一个 isSystem，否则取第 0 行"——PE 里 %SystemRoot% 是 X:\，
+// 所有分区 isSystem 都为假，于是推荐了列表第一行（由 MBR 转换来的 GPT 槽位 1 =
+// 老数据盘 D）。这里改成**按内容判定**，与分区号/槽位/列表顺序无关。
+// 返回分数：0 = 不像系统分区；越大越像。
+//   1000  本次运行的 %SystemRoot% 所在分区（Windows 会话）
+//    900  有 \Windows\System32\winload.exe 或 winload.efi（Windows 引导加载器）
+//    800  有 \Windows\System32\config\SYSTEM（注册表 SYSTEM 蜂巢）
+//    700  有 \Windows\System32\ntoskrnl.exe
+//    600  有 \Boot\BCD（BIOS 启动卷）
+//    500  有 \Windows 目录
+//     +5  卷标像系统盘（SYSTEM / Windows / 系统）
+int WindowsSystemScore(const PartitionInfo& p);
+
+// 最近一次启动痕迹：\Windows\System32\config\SYSTEM 的 LastWriteTime
+// （100ns since 1601）；0 = 取不到。多个分区同分时用它做次级排序（越新越优先）。
+uint64_t WindowsBootStamp(const PartitionInfo& p);
 
 }  // namespace sysrecover

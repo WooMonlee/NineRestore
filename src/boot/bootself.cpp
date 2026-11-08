@@ -90,10 +90,23 @@ bool WriteAll(const std::wstring& path, const void* data, size_t n) {
 bool CopyForce(const std::wstring& src, const std::wstring& dst,
                std::string& log) {
     SetFileAttributesW(dst.c_str(), FILE_ATTRIBUTE_NORMAL);
-    if (CopyFileW(src.c_str(), dst.c_str(), FALSE)) return true;
-    log += "copy FAIL " + W2U(src) + " -> " + W2U(dst) + " (err=" +
-           std::to_string(GetLastError()) + ")\n";
-    return false;
+    if (!CopyFileW(src.c_str(), dst.c_str(), FALSE)) {
+        log += "copy FAIL " + W2U(src) + " -> " + W2U(dst) + " (err=" +
+               std::to_string(GetLastError()) + ")\n";
+        return false;
+    }
+    // PIT-250：CopyFileW 返回 TRUE 不等于落盘字节数对（安全软件过滤驱动会
+    // "放行成功但截断/清空"）。回读目的文件大小，与源文件比对。
+    WIN32_FILE_ATTRIBUTE_DATA sa{}, da{};
+    if (!GetFileAttributesExW(src.c_str(), GetFileExInfoStandard, &sa) ||
+        !GetFileAttributesExW(dst.c_str(), GetFileExInfoStandard, &da) ||
+        sa.nFileSizeLow != da.nFileSizeLow ||
+        sa.nFileSizeHigh != da.nFileSizeHigh) {
+        log += "copy VERIFY FAIL " + W2U(src) + " -> " + W2U(dst) +
+               " (size mismatch after CopyFile)\n";
+        return false;
+    }
+    return true;
 }
 
 bool EnsureDirTree(const std::wstring& dir) {

@@ -631,6 +631,8 @@ std::wstring StatusStepText(const std::string& s) {
         return sysrecover::Tr(L"程序与救援层版本不匹配");
     if (s == "no-task")
         return sysrecover::Tr(L"没有找到还原任务");
+    if (s == "task-unreadable")
+        return sysrecover::Tr(L"还原任务文件读不到");
     if (s == "interrupted")
         return sysrecover::Tr(L"执行中断");
     if (s == "caps-missing")
@@ -1159,9 +1161,19 @@ RescueNotice CheckLastRescueFailure() {
     out.msg = Tr(L"上次系统还原未成功（") + StatusStepText(bestStep) + Tr(L"）\n");
     out.msg += Tr(L"时间 ") + Utf8ToW(bestTime) + Tr(L"，版本 ") +
                Utf8ToW(bestBuild) + L"\n";
-    if (out.retryable) {
+    if (bestStep == "task-unreadable") {
+        // A 类：见过任务文件但一份都没读进内存盘，脚本没跑、目标盘未改动。
+        // 一键重试会按 restore-task.conf 重新暂存并重启（普通重启不会自动重跑），
+        // 所以放进可重试名单；文案只说明现状和下一步，不改还原流程。
+        out.msg += Tr(L"还原没有开始，目标盘没有被改动；重启后重新执行还原即可。");
+    } else if (out.retryable) {
         out.msg += Tr(L"可点「一键重试」重新执行还原任务；或打开日志排查。");
     } else {
+        if (bestStep == "reparse-unsettable" || bestStep == "efs-encrypted") {
+            // 扫描在 mkntfs 之前就拒绝，目标分区未动；下一跳是 A 引擎。
+            out.msg += Tr(L"目标分区没有被改动；可改用「解压并安装」重新做一次。");
+            out.msg += L"\n";
+        }
         out.msg += Tr(L"日志已收集到 logs\\collected，请把它发给技术支持。");
     }
     LogWarn("rescue failure receipt: step=" + bestStep + " time=" + bestTime +

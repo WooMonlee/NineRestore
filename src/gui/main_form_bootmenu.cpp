@@ -91,16 +91,16 @@ void CMainForm::RefreshBootMenuBtn() {
                 // beta.8：VMware 客户机没有"开机按键窗口"，改为电源菜单进固件。
                 if (IsVmwareGuest())
                     swprintf(tip, 512,
-                             Tr(L"已安装：关机，然后用「电源 → 打开电源时进入固件」选「SysRecover」，\n把 %ls（第 %d 个镜像）还原到 %ls。\n要清除请用「更多功能>>」→「清除启动中还原菜单」\n镜像请勿移动或删除，否则该菜单无法还原"),
+                             Tr(L"已安装：关机，然后用「电源 → 打开电源时进入固件」选「NineRestore」，\n把 %ls（第 %d 个镜像）还原到 %ls。\n要清除请用「更多功能>>」→「清除启动中还原菜单」\n镜像请勿移动或删除，否则该菜单无法还原"),
                              boundImg.c_str(), boundIdx, tgt.c_str());
                 else
                     swprintf(tip, 512,
-                             Tr(L"已安装：开机按 %ls 选「SysRecover」，\n把 %ls（第 %d 个镜像）还原到 %ls。\n要清除请用「更多功能>>」→「清除启动中还原菜单」\n镜像请勿移动或删除，否则该菜单无法还原"),
+                             Tr(L"已安装：开机按 %ls 选「NineRestore」，\n把 %ls（第 %d 个镜像）还原到 %ls。\n要清除请用「更多功能>>」→「清除启动中还原菜单」\n镜像请勿移动或删除，否则该菜单无法还原"),
                              BootMenuKeyHint().c_str(), boundImg.c_str(), boundIdx,
                              tgt.c_str());
             } else
                 swprintf(tip, 512,
-                         Tr(L"已安装：开机菜单里选「SysRecover」即可把\n%ls（第 %d 个镜像）还原到 %ls。\n要清除请用「更多功能>>」→「清除启动中还原菜单」\n镜像请勿移动或删除，否则该菜单无法还原"),
+                         Tr(L"已安装：开机时连续按 ↑/↓ 进入选单，选「NineRestore」把\n%ls（第 %d 个镜像）还原到 %ls。\n要清除请用「更多功能>>」→「清除启动中还原菜单」\n镜像请勿移动或删除，否则该菜单无法还原"),
                          boundImg.c_str(), boundIdx, tgt.c_str());
         } else {
             wcscpy_s(tip, Tr(L"已安装启动还原（旧版安装，未绑定镜像）。\n要清除请用「更多功能>>」→「清除启动中还原菜单」"));
@@ -130,7 +130,7 @@ void CMainForm::RefreshBootMenuBtn() {
         p->SetBkColor(0xFFFFFFFF);
         btn->SetTextColor(ui_skin::C_TEXT);
         wcscpy_s(tip, can
-            ? Tr(L"把当前镜像写进开机菜单：重启后选「SysRecover」进恢复环境，\n自动把该镜像还原到第二步选中的目标分区\n镜像请勿移动或删除，否则该菜单无法还原")
+            ? Tr(L"把当前镜像写进开机菜单：BIOS 下重启时连续按 ↑/↓ 进选单，选「NineRestore」\n自动把该镜像还原到第二步选中的目标分区\n镜像请勿移动或删除，否则该菜单无法还原")
             : Tr(L"请先选择镜像与目标分区，再安装到启动"));
     }
     p->SetToolTip(tip);
@@ -160,7 +160,7 @@ void CMainForm::ToggleBootMenu() {
         }
     }
     // ── 安装（用户 2026-09-29 规格）：把**当前镜像 → 第二步选中的目标分区**写成
-    //    常驻任务契约，并装常驻启动项；开机菜单里选「SysRecover」即执行该还原。
+    //    常驻任务契约，并装常驻启动项；开机菜单里选「NineRestore」即执行该还原。
     if (m_wimPath.empty() || m_selPart < 0 ||
         m_selPart >= (int)m_parts.size()) {
         SetStatus(Tr(L"请先选择镜像与目标分区，再安装到启动"));
@@ -186,21 +186,21 @@ void CMainForm::ToggleBootMenu() {
         if (UseUefiBootFor(part)) {
             if (IsVmwareGuest())
                 swprintf(msg, 512,
-                         Tr(L"关机后用「电源 → 打开电源时进入固件」选「SysRecover」还原\n"
+                         Tr(L"关机后用「电源 → 打开电源时进入固件」选「NineRestore」还原\n"
                             L"镜像：%ls（第 %d 个）\n"
                             L"目标：%ls: 盘 —— 选中即格式化该分区"),
                          name.c_str(), m_selImageIndex,
                          part.letter.empty() ? L"?" : part.letter.c_str());
             else
                 swprintf(msg, 512,
-                         Tr(L"重启后按 %ls 选「SysRecover」还原\n"
+                         Tr(L"重启后按 %ls 选「NineRestore」还原\n"
                             L"镜像：%ls（第 %d 个）\n"
                             L"目标：%ls: 盘 —— 选中即格式化该分区"),
                          BootMenuKeyHint().c_str(), name.c_str(), m_selImageIndex,
                          part.letter.empty() ? L"?" : part.letter.c_str());
         } else
             swprintf(msg, 512,
-                     Tr(L"重启后在启动菜单选「SysRecover」还原\n"
+                     Tr(L"重启时连续按 ↑/↓ 进选单，选「NineRestore」还原\n"
                         L"镜像：%ls（第 %d 个）\n"
                         L"目标：%ls: 盘 —— 选中即格式化该分区"),
                      name.c_str(), m_selImageIndex,
@@ -232,11 +232,11 @@ void CMainForm::ToggleBootMenu() {
                 swprintf(cap, 32, L"%.0fK", needGb * 1024.0 * 1024.0);
             wchar_t line[320] = {};
             swprintf(line, 320,
-                     Tr(L"\n「扫描」= 检查镜像条件并安装恢复选项（不另占空间）\n「解压」= 解压到 C:\\~new 并安装恢复选项（占 C 盘 %ls）"),
+                     Tr(L"\n先检查镜像能否直接还原\n不行会提示改用「解压并安装」（占 C 盘 %ls）"),
                      cap);
             full += line;
         } else {
-            full += Tr(L"\n「扫描」= 检查镜像条件并安装恢复选项（不另占空间）\n「解压」= 解压到 C:\\~new 并安装恢复选项（占 C 盘空间）");
+            full += Tr(L"\n先检查镜像能否直接还原\n不行会提示改用「解压并安装」（占 C 盘空间）");
         }
         const int pick = CConfirmDlg::Ask3(
             m_hWnd, Tr(L"安装到启动"), full, Tr(L"扫描后安装"), Tr(L"解压并安装"),
@@ -407,6 +407,9 @@ void CMainForm::MenuToggleAsync(bool install, const RestoreRequest& req) {    //
     } else {
         std::string log;
         bool ok = RemoveBootLayer(log);
+        // beta.14（PIT-240）：清菜单必须连带删掉"解压并安装"留下的 ~new，
+        // 只删带 .zj-* 标记的（~old 永不触碰）；拿不准就保留并提示。
+        if (!CleanupMenuStaging(log, &m_menuKeep)) ok = false;
         // 绑定副契约必须一起删：否则 ReadMenuBinding 仍判"已安装" → 按钮
         // 停在「删除菜单」回不到「安装菜单」（用户 2026-10-05 实测 bug）。
         DeleteMenuBinding();
@@ -441,17 +444,21 @@ void CMainForm::OnMenuDone(int rc, bool install) {
                 wchar_t done[256];
                 if (IsVmwareGuest())
                     swprintf(done, 256,
-                             Tr(L"启动还原菜单已安装：关机后用「电源 → 打开电源时进入固件」选「SysRecover」即可还原该镜像"));
+                             Tr(L"启动还原菜单已安装：关机后用「电源 → 打开电源时进入固件」选「NineRestore」即可还原该镜像"));
                 else
                     swprintf(done, 256,
-                             Tr(L"启动还原菜单已安装：开机按 %ls 选「SysRecover」即可还原该镜像"),
+                             Tr(L"启动还原菜单已安装：开机按 %ls 选「NineRestore」即可还原该镜像"),
                              BootMenuKeyHint().c_str());
                 SetStatus(done);
             } else {
-                SetStatus(Tr(L"启动还原菜单已安装：开机选「SysRecover」即可还原该镜像"));
+                SetStatus(Tr(L"启动还原菜单已安装：开机时连续按 ↑/↓ 进选单，选「NineRestore」即可还原该镜像"));
             }
         } else {
             SetStatus(Tr(L"已删除启动还原"));
+            // ~new 拿不准归属时明确提示（不是所有盘都能确认是我们写的；绝不猜删）
+            if (!m_menuKeep.empty())
+                MessageBoxW(m_hWnd, m_menuKeep.c_str(),
+                            Tr(L"清除启动还原"), MB_OK | MB_ICONINFORMATION);
         }
     } else if (install) {
         // 失败必须看得见（静默模式也弹，fail-safe —— 与 OnTaskComplete 同款）。
@@ -476,6 +483,9 @@ void CMainForm::OnMenuDone(int rc, bool install) {
                     MB_OK | MB_ICONERROR);
     } else {
         SetStatus(Tr(L"删除启动还原未完全成功"));
+        MessageBoxW(m_hWnd,
+                    Tr(L"启动菜单里可能仍有 NineRestore 残留。\n请重启后在固件启动菜单确认；若仍在，请进 BIOS/固件设置手动删除，\n或退出安全软件后重试。详情见日志。"),
+                    Tr(L"清除启动还原"), MB_OK | MB_ICONWARNING);
     }
     RefreshBootMenuBtn();
     UpdateMainAction();
@@ -622,7 +632,7 @@ void CMainForm::ClearBootMenuEntry() {
     if (m_busy) return;
     if (CConfirmDlg::Ask2(
             m_hWnd, Tr(L"清除启动中还原菜单"),
-            Tr(L"将删除开机启动菜单里的 SysRecover 条目，\n"
+            Tr(L"将删除开机启动菜单里的 NineRestore 条目，\n"
                L"并清理目标分区上的救援文件。\n"
                L"确定继续吗？"),
             Tr(L"取消"), Tr(L"清除"),

@@ -159,7 +159,7 @@ void CMainForm::ShowRescueFailureNotice() {
         return;
     // N20 ③：失败提示统一附上求助渠道（救援层首屏、docs/33 三处一致）。
     n.msg += L"\n\n";
-    n.msg += Tr(L"多次失败请把日志发给我们分析：QQ 群 1128237828 / 邮箱 ms_2@qq.com");
+    n.msg += Tr(L"多次失败请把日志发给我们分析：QQ 群 1128237828 / 邮箱 ms_w@qq.com");
     size_t nl = n.msg.find(L'\n');
     SetStatus(nl == std::wstring::npos ? n.msg : n.msg.substr(0, nl));
     int choice;
@@ -216,7 +216,7 @@ void CMainForm::ShowPendingTaskNotice() {
         if (!when.empty()) msg += std::wstring(L"\n") + Tr(L"记录时间：") + when;
     }
     msg += L"\n\n";
-    msg += Tr(L"请确认系统是否正常；如需要分析，请把日志发给我们：QQ 群 1128237828 / 邮箱 ms_2@qq.com");
+    msg += Tr(L"请确认系统是否正常；如需要分析，请把日志发给我们：QQ 群 1128237828 / 邮箱 ms_w@qq.com");
     SetStatus(Tr(L"上次还原任务未完成"));
     MessageBoxW(m_hWnd, msg.c_str(), Tr(L"还原结果"), MB_OK | MB_ICONWARNING);
 }
@@ -236,7 +236,7 @@ void CMainForm::ShowMenuRescueNotice() {
            Tr(L"，之后没有新的救援回执。\n");
     // 2026-11-06 用户确认“确实按了 F10 并选了 SysRecover 仍回到 Windows”，
     // 不能再把“无救援回执”直接归因于没选：固件跳过失效/非首位启动项同样会静默回落。
-    msg += Tr(L"可能原因：选了 SysRecover 但固件跳过了该启动项（BootOrder 前面有失效条目时常见），或救援层没有启动。\n");
+    msg += Tr(L"可能原因：选了 NineRestore 但固件跳过了该启动项（BootOrder 前面有失效条目时常见），或救援层没有启动。\n");
     // 2026-11-06 P0-2：热键原来在本条提示里写死成 F10；本机（Gigabyte/AMI）实际识别到的是 F12，
     // 用户照 F10 按自然没反应。改为运行时取本机识别的键。
     // beta.8：VMware 客户机没有"开机按键窗口"—— 改走电源菜单「打开电源时进入固件」。
@@ -244,19 +244,19 @@ void CMainForm::ShowMenuRescueNotice() {
     // lang/en.lang 里出现 F10 就说明有人又把键写死了（改为 %ls 占位）。
     std::wstring step;
     if (IsVmwareGuest()) {
-        step = Tr(L"正确操作：关机，然后用「电源 → 打开电源时进入固件」选 SysRecover。\n");
+        step = Tr(L"正确操作：关机，然后用「电源 → 打开电源时进入固件」选 NineRestore。\n");
     } else {
         wchar_t stepBuf[512] = {};
         swprintf(stepBuf, 512,
-                 Tr(L"正确操作：开机时按 %ls（该机型也可能是 F12/Esc）→ 选 SysRecover。\n"),
+                 Tr(L"正确操作：开机时按 %ls（该机型也可能是 F12/Esc；BIOS 机器则连续按 ↑/↓）→ 选 NineRestore。\n"),
                  BootMenuKeyHint().c_str());
         step = stepBuf;
     }
     msg += step;
     if (IsVmwareGuest())
-        msg += Tr(L"若启动菜单未出现：关机后「电源 → 打开电源时进入固件」，在 Boot 页把 SysRecover 调到首位再试。\n");
+        msg += Tr(L"若启动菜单未出现：关机后「电源 → 打开电源时进入固件」，在 Boot 页把 NineRestore 调到首位再试。\n");
     else
-        msg += Tr(L"若按该键无反应：重启进入固件设置（Windows 设置→恢复→高级启动→立即重启→疑难解答→UEFI 固件设置），在启动项里直接选 SysRecover。\n");
+        msg += Tr(L"若按该键无反应：重启进入固件设置（Windows 设置→恢复→高级启动→立即重启→疑难解答→UEFI 固件设置），在启动项里直接选 NineRestore。\n");
     msg += Tr(L"若确认已选仍回到 Windows，请把 logs\\collected 发给技术支持；启动项丢失时重新运行本程序安装菜单。");
     MessageBoxW(m_hWnd, msg.c_str(), Tr(L"还原菜单未执行"),
                 MB_OK | MB_ICONWARNING);

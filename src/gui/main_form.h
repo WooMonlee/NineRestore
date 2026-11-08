@@ -308,6 +308,8 @@ private:
     std::string       m_retryErr;
     // 装/删菜单 worker 回传（2026-10-18，同上：成员回传、不传指针）。
     std::string       m_menuErr;
+    // 清除菜单时"~new 无法确认归属、已保留"的提示（beta.14，PIT-240）。
+    std::wstring      m_menuKeep;
     // 「安装到启动」扫描结果（2026-10-28）：能否只靠救援层还原 + 原因计数。
     size_t            m_scanBad = 0;
     size_t            m_scanEnc = 0;

@@ -73,6 +73,10 @@ inline RescueReport DecideRescueReport(const RescueRunTimes& t) {
 //   · unsupported-image   非 Win7+ 系统镜像（Windows 侧 StageRestore 也会拦）
 //   · interrupted         引导/执行中断（脚本没跑完就离开）
 //   · swap-missing        A 引擎找不到 ~new 解压数据（Windows 解压未完成）
+//   · task-unreadable     见过任务文件但一份都没读进内存盘：脚本未执行、
+//                         目标盘未改动（见 init task-unreadable 分支）。重试会按
+//                         restore-task.conf 重新暂存并重启，安全且有效；普通重启
+//                         不会自动重跑，所以需要一键重试。
 // C 类（不提供一键重试）：目标已被 mkntfs/apply 动过或交换进行中 —— 救援层
 //   已自动重试 ×2；再"一键重试"等于在半成品盘上重来，风险不可控，
 //   应引导用户发日志/走人工支持：
@@ -87,7 +91,8 @@ inline bool RescueStepRetryable(const std::string& step) {
     return step == "no-task" || step == "contract-mismatch" ||
            step == "target-not-found" || step == "caps-missing" ||
            step == "image-not-found" || step == "unsupported-image" ||
-           step == "interrupted" || step == "swap-missing";
+           step == "interrupted" || step == "swap-missing" ||
+           step == "task-unreadable";
 }
 
 }  // namespace sysrecover

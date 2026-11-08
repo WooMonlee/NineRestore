@@ -5,10 +5,56 @@
 //   bootmgr，因此没有 bootapp 的 0xc000007b 问题。
 // 条目按固定英文/中文描述识别；可持久（出现在固件启动菜单，Windows 坏了也能进）
 // 也可 BootNext 单次启动。删除即抹掉 Boot#### + BootOrder 里的一项。
+#include <windows.h>
+
+#include <cstring>
 #include <string>
 #include <vector>
 
 namespace sysrecover {
+
+// Boot#### 设备路径里的 HD(...) 节点（短格式；UEFI §3.1.3）。
+// 与 uefi.cpp 的 BuildAndWrite 共用同一结构，保证"写"和"判"布局一致。
+#pragma pack(push, 1)
+struct UefiHdNode {
+    BYTE type;           // 4 = Media
+    BYTE subType;        // 1 = HardDrive
+    WORD length;         // 42
+    DWORD partNumber;
+    unsigned long long partStart;  // 起始 LBA
+    unsigned long long partSize;   // 扇区数
+    GUID signature;                // GPT PartitionId
+    BYTE mbrType;        // 2 = GPT
+    BYTE sigType;        // 2 = GUID
+};
+#pragma pack(pop)
+
+// 一个 Boot#### 的原始数据是否指向"这块 ESP"（起止 LBA + GPT PartitionId 全等）。
+// 安装去重、升级去重、失败回滚共用这一条判据（PIT-251）：只有三者全等才算
+// 同一块 ESP，别的盘/别的 ESP 上的同类条目一律不匹配、不能删。
+// 纯逻辑、不读写 NVRAM，便于单测。
+inline bool UefiEntryTargetsEsp(const std::vector<BYTE>& data,
+                                const GUID& sig, unsigned long long partStart,
+                                unsigned long long partSize) {
+    if (data.size() < 8)
+        return false;
+    size_t off = 6;  // Attributes(4) + FilePathListLength(2) 之后是描述
+    while (off + 2 <= data.size()) {
+        wchar_t c = 0;
+        std::memcpy(&c, &data[off], 2);
+        off += 2;
+        if (c == 0)
+            break;
+    }
+    if (off + sizeof(UefiHdNode) > data.size())
+        return false;
+    UefiHdNode hd{};
+    std::memcpy(&hd, &data[off], sizeof(hd));
+    if (hd.type != 4 || hd.subType != 1)
+        return false;
+    return hd.partStart == partStart && hd.partSize == partSize &&
+           std::memcmp(&hd.signature, &sig, sizeof(GUID)) == 0;
+}
 
 // 部署 UEFI 救援文件到 ESP 并创建固件启动项（幂等：已存在则更新）。
 // espRoot 形如 L"S:\\"（mountvol X: /s 挂上的 ESP 根），exeDir 提供 bootfiles。

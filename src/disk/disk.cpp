@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cwctype>
 #include <vector>
 
 namespace sysrecover {
@@ -328,9 +329,70 @@ std::vector<DiskInfo> EnumerateDisks(bool includeUsb) {
             }
             d.parts.push_back(std::move(p));
         }
+        // PIT-245：IOCTL_DISK_GET_DRIVE_LAYOUT_EX 返回的是**分区表槽位顺序**，
+        // 不是盘上的物理顺序。用户 2026-11-08 真机（GPT，DiskGenius 重建）：
+        // 老数据盘 D 占槽位 1、重建的 C 占槽位 4，于是列表里 D 排在 C 前面。
+        // 列表/UI 一律按 StartingOffset（实际盘上位置）排，再补物理顺序号；
+        // partNumber 保持不变 —— 暂存契约/bootmgr 条目仍按槽位定位。
+        std::stable_sort(d.parts.begin(), d.parts.end(),
+                         [](const PartitionInfo& a, const PartitionInfo& b) {
+                             return a.offsetBytes < b.offsetBytes;
+                         });
+        for (size_t i = 0; i < d.parts.size(); ++i)
+            d.parts[i].ordinal = (uint32_t)(i + 1);
         disks.push_back(std::move(d));
     }
     return disks;
+}
+
+namespace {
+bool FileExistsW(const std::wstring& path) {
+    DWORD a = GetFileAttributesW(path.c_str());
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+bool DirExistsW(const std::wstring& path) {
+    DWORD a = GetFileAttributesW(path.c_str());
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+}
+bool LabelLooksSystem(const std::wstring& label) {
+    std::wstring low = label;
+    for (auto& c : low) c = (wchar_t)towlower(c);
+    // U+7CFB U+7EDF = 中文卷标「系统」；写成转义，避免源码出现未翻译 CJK 字面量
+    return low == L"system" || low == L"windows" ||
+           low.find(L"\u7cfb\u7edf") != std::wstring::npos;
+}
+}  // namespace
+
+int WindowsSystemScore(const PartitionInfo& p) {
+    // 正在运行的 Windows 一定优先（Windows 会话里 %SystemRoot% 唯一）。
+    if (p.isSystem) return 1000;
+    if (p.letter.empty()) return 0;
+    std::wstring root = p.letter + L":\\";
+    int score = 0;
+    if (FileExistsW(root + L"Windows\\System32\\winload.exe") ||
+        FileExistsW(root + L"Windows\\System32\\winload.efi"))
+        score = 900;  // 引导加载器在 (BIOS 用 .exe，UEFI 用 .efi)
+    else if (FileExistsW(root + L"Windows\\System32\\config\\SYSTEM"))
+        score = 800;  // 注册表蜂巢（系统已初始化）
+    else if (FileExistsW(root + L"Windows\\System32\\ntoskrnl.exe"))
+        score = 700;
+    else if (FileExistsW(root + L"Boot\\BCD"))
+        score = 600;  // BIOS 启动卷（GPT 的 BCD 通常在 ESP，不在数据分区）
+    else if (DirExistsW(root + L"Windows"))
+        score = 500;
+    if (score > 0 && LabelLooksSystem(p.label)) score += 5;  // 仅作同分微调
+    return score;
+}
+
+uint64_t WindowsBootStamp(const PartitionInfo& p) {
+    if (p.letter.empty()) return 0;
+    WIN32_FILE_ATTRIBUTE_DATA fad{};
+    if (!GetFileAttributesExW(
+            (p.letter + L":\\Windows\\System32\\config\\SYSTEM").c_str(),
+            GetFileExInfoStandard, &fad))
+        return 0;
+    return ((uint64_t)fad.ftLastWriteTime.dwHighDateTime << 32) |
+           (uint64_t)fad.ftLastWriteTime.dwLowDateTime;
 }
 
 // 是否运行在 WinPE 里（见 disk.h）。标准判据：Control\MiniNT 键存在。

@@ -138,6 +138,9 @@ int RetryStagedRestore(std::string& err, bool* needReboot = nullptr);
 int StageRestoreMenu(const RestoreRequest& req, std::string& err,
                      ProgressFn progress = nullptr, ErrAdvice* adv = nullptr);
 
+// 清除常驻菜单时一并清掉 ~new（只删带 .zj-* 标记的；keep 回传"保留原因"）。
+bool CleanupMenuStaging(std::string& log, std::wstring* keep = nullptr);
+
 // ── 返回旧系统（PIT-139，2026-10-13，方案 C）─────────────────────────
 // A 引擎 keepOld 备返的撤销。**必须重启进 Linux 救援层完成目录反向交换** ——
 // 在 Windows 里改名正在运行的系统树（根 -> ~new、~old -> 根）不可回滚，

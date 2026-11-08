@@ -38,7 +38,8 @@ T="${1:?target dev}"; M="${2:?mount point}"
 # 控制台 SWAPUNDO: 前缀（断言契约）不变，文件行带前缀时间戳追加到 $LOG
 # （由调用方 export，见 zjrestore-lite.sh 顶部；未导出时兜底路径相同）。
 ZJPREFIX=SWAPUNDO
-. /zjlog.sh
+# 日志单源可替换（测试用 stub，与 zjswap.sh 的 ZJ_LOG_SH 同名约定）。
+. "${ZJ_LOG_SH:-/zjlog.sh}"
 # rm/mv 的错误以前被 2>/dev/null 吞掉（只剩 "failed"，没有为什么）——现在取回原因。
 runerr(){ _r=$("$@" 2>&1); _rc=$?; [ $_rc -ne 0 ] && say "  cmd err(rc=$_rc): $(echo "$_r" | head -c 300)"; return $_rc; }
 
@@ -76,17 +77,18 @@ mkdir -p "$M"
 # 实现收敛到 /zjlog.sh::mnt_ntfs（P0-B/PIT-145）：同一顺序 + 每步 timeout 60
 # + 错误落 /tmp/zjmnt.err（PIT-112 挂死纪律，不再被 2>/dev/null 静默吞掉）。
 mnt_undo(){ mnt_ntfs "$T" "$M" fuse; }
+zj_umount(){ umount "$M" 2>/dev/null; return 0; }
 mnt_undo || { say "mount FAILED ($T): $(head -1 /tmp/zjmnt.err 2>/dev/null)"; exit 1; }
 
 # ── L2：旧系统必须完整可用（fail-closed，绝不碰盘）──
 if [ ! -d "$M/~old" ]; then
     say "ERROR: ~old absent -> nothing to return; target untouched"
-    umount "$M" 2>/dev/null
+    zj_umount
     exit 2
 fi
 if [ ! -d "$M/~old/Windows" ]; then
     say "ERROR: ~old has no Windows -> not a usable old system; target untouched"
-    umount "$M" 2>/dev/null
+    zj_umount
     exit 2
 fi
 
@@ -99,9 +101,24 @@ if [ -e "$M/~new" ]; then
         [ -n "$PHASE" ] || PHASE=1
         case "$PHASE" in ''|*[!0-9]*) PHASE=1;; esac
         say "resume: ~/.new/.zj-undo-phase phase=$PHASE"
+    elif [ -f "$M/~new/.zj-done" ] && [ ! -d "$M/Windows" ]; then
+        # PIT-249（审查补漏）：正向交换 zjswap.sh 做到一半断电。此时 ~new 是**待换入
+        # 的新树**（带 .zj-done、没有 .zj-undo-phase），而根上已没有 Windows ——
+        # 说明 Windows 已被搬进 ~old（L2 已确认 ~old/Windows 在）。这不是「暂存后
+        # 重启」，不能按 L3 的 exit 3 把唯一回滚路堵死：跳过 L5（根下如果有条目，
+        # 只可能是还没搬走的新树或旧树残余，搬进 ~new 会与待换入的同名条目冲突），
+        # 直接走 L6 把 ~old 搬回根、L7 删掉 ~new。写 phase=2 供 L6 中途再断电续做。
+        if printf 'phase=2\n' > "$M/~new/.zj-undo-phase" 2>/dev/null; then
+            PHASE=2
+            say "resume: forward swap interrupted (root has no Windows); restoring ~old"
+        else
+            say "ERROR: cannot write resume marker; target untouched (exit 3)"
+            zj_umount
+            exit 3
+        fi
     else
         say "ERROR: leftover ~new present (no phase marker) -> handle it on Windows start first (exit 3)"
-        umount "$M" 2>/dev/null
+        zj_umount
         exit 3
     fi
 fi
@@ -109,7 +126,7 @@ fi
 # ── L4：建暂存目录 + 写阶段标记（中断后据此自动续做）──
 if ! mkdir -p "$M/~new"; then
     say "ERROR: mkdir ~new FAILED; target untouched"
-    umount "$M" 2>/dev/null
+    zj_umount
     exit 1
 fi
 if [ "$PHASE" -lt 2 ]; then
@@ -198,25 +215,27 @@ rm_rf_retry(){
             if ! mnt_undo; then
                 say "WARN: remount for rm retry failed"; return 1
             fi
-            say "rm $(basename "$1") remounted for retry"
+            say "rm $(zj_ascii "$(basename "$1")") remounted for retry"
         fi
-        say "rm $(basename "$1") retry $_n (sync+2s)"
+        say "rm $(zj_ascii "$(basename "$1")") retry $_n (sync+2s)"
         sync; sleep 2
     done
     for _e in "$1"/*; do
         [ -e "$_e" ] || continue
         rm -rf "$_e" 2>/tmp/zj-rmerr && continue
-        say "  stuck: $(basename "$_e") err=$(head -1 /tmp/zj-rmerr 2>/dev/null)"
+        say "  stuck: $(zj_ascii "$(basename "$_e")") err=$(head -1 /tmp/zj-rmerr 2>/dev/null)"
     done
     if rmdir "$1" 2>/tmp/zj-rmerr; then return 0; fi
-    say "  rmdir $(basename "$1"): $(head -1 /tmp/zj-rmerr 2>/dev/null)"
+    say "  rmdir $(zj_ascii "$(basename "$1")"): $(head -1 /tmp/zj-rmerr 2>/dev/null)"
     say "  ls -a count=$(ls -a "$1" 2>/dev/null | wc -l)"
     return 1
 }
 rm_rf_retry "$M/~new" || say "WARN: rm ~/.new failed after retries (leftover below)"
 if [ -e "$M/~new" ]; then
     say "WARN: ~/.new still present after rm (L8 will fail) # the 2026-10-13 case"
-    say "  leftover: $(ls "$M/~new" 2>/dev/null | head -8 | tr '\n' ' ')"
+    _lo=$(ls "$M/~new" 2>/dev/null | head -8 | tr '\n' ' ')
+    say "  leftover: $(zj_ascii "$_lo")"
+    logonly "  leftover raw: $_lo"
 fi
 rm_rf_retry "$M/~old" || say "WARN: rm ~/.old failed"
 [ -e "$M/~old" ] && say "WARN: ~/.old still present after rm"
@@ -235,12 +254,12 @@ _bad=""
 if [ -n "$_bad" ]; then
     say "ERROR: post-check failed: $_bad (old tree may be incomplete)"
     sync
-    umount "$M" 2>/dev/null
+    zj_umount
     exit 1
 fi
 say "post-check ok: old system at root, ~/.new and ~/.old gone"
 
 sync
-umount "$M" 2>/dev/null
+zj_umount
 say "return-old done (old tree at root; new tree discarded)"
 exit 0

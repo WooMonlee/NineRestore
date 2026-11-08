@@ -23,6 +23,17 @@ ZJPREFIX=ZJ
 PROBE=/tmp/zj-probe.txt
 [ -f "$PROBE" ] || : > "$PROBE" 2>/dev/null
 probe(){ echo "$(date '+%F %T') $*" >> "$PROBE" 2>/dev/null; say "PROBE $*"; }
+
+# ── 设备路径归一化（beta.13，PIT-237；与 init 同规则）────────────────────
+# 约定：**设备对外一律用完整路径 /dev/<name>**；裸名/带前缀/误拼 /dev/dev/* 都在
+# 这里归一。禁止各处再手拼 "/dev/$x"（beta.12 清点屏 `/dev/dev/sdb1` 的教训）。
+zj_devname(){ _zdn="${1:-}"; _zdn=${_zdn#/dev/}; _zdn=${_zdn#/dev/}; printf '%s' "${_zdn##*/}"; }
+zj_dev(){ _zdv=$(zj_devname "$1"); [ -n "$_zdv" ] && printf '/dev/%s' "$_zdv"; return 0; }
+# 空值显式化（beta.13）：清点/探测行不许留空白或 `?`，一律 n/a + 原因。
+zj_errval(){ # $1 = 截断列数（默认 150）
+    _ze=$(cat /tmp/zjmnt.err 2>/dev/null | tr '\n' ' ' | head -c "${1:-150}")
+    [ -n "$_ze" ] && printf '%s' "$_ze" || printf 'n/a(no-stderr)'
+}
 # 结果状态（写进 ZJRESTORE-status.txt 回执）：关键步骤更新；失败退出前 FAILED；
 # 成功置 OK。init 用 /tmp/zj-bb.done 判断"脚本是否已经扫过"，避免重复全扫。
 RESULT=UNKNOWN
@@ -46,7 +57,9 @@ ZZ_BLACKBOX=0
 [ "${1:-}" = "zz-blackbox" ] && ZZ_BLACKBOX=1
 # 失败排查用：把内核环形缓冲最近 80 行打进日志（坏盘 I/O、驱动报错都在里面）
 say_dmesg(){
-    dmesg 2>/dev/null | tail -n 80 | while IFS= read -r _l; do say "  |$_l"; done
+    # beta.14（PIT-242）：内核明细**只进日志**，不再刷屏（用户真机："一大串英文
+    # 内核日志"是噪音也是恐吓）。支持人员仍能在日志/黑匣子里拿到这 80 行。
+    dmesg 2>/dev/null | tail -n 80 | while IFS= read -r _l; do logonly "  |$_l"; done
 }
 # 控制台文本转储（/dev/vcs*；用户 2026-10-05 规格）：把"屏幕内容"也存进日志。
 # 内核/救援的输出都在 VT；vcs 是字符矩阵（每格 1 字节），粗折行即可。
@@ -82,6 +95,7 @@ save_diag(){
     cp "$LOG" "$1/zjrestore-debug.log" 2>/dev/null || return 1
     cp /tmp/apply_io.log "$1/zjrestore-io.log" 2>/dev/null
     cp /tmp/apply.out "$1/zjrestore-apply.out" 2>/dev/null
+    cp /tmp/apply.progress.log "$1/zjrestore-progress.log" 2>/dev/null
     return 0
 }
 
@@ -107,7 +121,16 @@ if [ "$ZZ_BLACKBOX" != "1" ] && [ ! -f "$TASK_CONF" ]; then
     fi
     exit 1
 fi
-[ -n "$TARGET_LOG" ] || say "warn: no _zjresy log, using conf only"
+# P2（2026-11-08 真机）：只有日志缺席才提示 "using conf only"；黑匣子模式下
+# 日志和契约可能**同时**缺席，旧措辞会让排障误以为 conf 存在（真机日志里就
+# 出现过 "using conf only" 紧跟 offset=/size= 全空）。
+if [ -z "$TARGET_LOG" ]; then
+    if [ -f "$TASK_CONF" ]; then
+        say "warn: no _zjresy log, using conf only"
+    else
+        say "warn: no _zjresy log and no conf (blackbox diagnostics only)"
+    fi
+fi
 
 # 取值为防呆都去掉尾部 \r：契约正常是 LF（task.cpp 用 \n），但若有人用记事本
 # 编辑过/别处生成的 CRLF 版本，路径/数字会带 \r 导致静默失配（如 image not found）。
@@ -192,7 +215,13 @@ else
     KEEP_OLD_RAW=1   # 黑匣子不执行 swap/apply
 fi
 say "offset=$TARGET_OFFSET size=$TARGET_SIZE pt=$PT_TYPE index=$IMAGE_INDEX repair=$REPAIR_BOOT"
-say "image=$IMAGE_PATH"
+# PIT-238（重做）：屏幕不渲染用户文件名（汉字超出字库覆盖 → 白底方块）。
+# 只给"类型 + 盘符"，完整路径落日志；选择镜像由 Windows 侧列表完成
+#（序号/大小/类型/盘符，Unicode 由 GUI 渲染）。
+_ztyp=$(printf '%s' "$IMAGE_PATH" | sed 's/.*\.//' | tr 'a-z' 'A-Z')
+_zdrv=$(printf '%s' "$IMAGE_PATH" | cut -d: -f1)
+say "image: type=${_ztyp:-n/a(no-ext)} drive=${_zdrv:-n/a(no-drive)}: (filename in log)"
+logonly "image path: $IMAGE_PATH"
 [ -n "$ESP_INDEX" ] && say "esp subimage: index=$ESP_INDEX (restore to ESP after main apply)"
 # A 引擎（0.7）：engine=swap 时目标分区已由 Windows 侧解压出 ~new（含 .zj-done），
 # Linux 侧只做改名交换，不做 mkntfs / wimlib apply。缺省 block = 产线 B 引擎。
@@ -214,26 +243,27 @@ list_parts(){
     for _p in /sys/class/block/*; do
         [ -f "$_p/partition" ] || continue
         _b=$(basename "$_p")
-        if ! is_removable "$_b"; then echo "/dev/$_b"; _n=$((_n + 1)); fi
+        if ! is_removable "$_b"; then echo "$(zj_dev "$_b")"; _n=$((_n + 1)); fi
     done
     for _p in /sys/class/block/*; do
         [ -f "$_p/partition" ] || continue
         _b=$(basename "$_p")
-        if is_removable "$_b"; then echo "/dev/$_b"; _n=$((_n + 1)); fi
+        if is_removable "$_b"; then echo "$(zj_dev "$_b")"; _n=$((_n + 1)); fi
     done
     for _p in /sys/class/block/*; do
         [ -f "$_p/partition" ] && continue
         _b=$(basename "$_p")
         case "$_b" in loop*|ram*|dm-*) continue ;; esac
-        if is_removable "$_b"; then echo "/dev/$_b"; _n=$((_n + 1)); fi
+        if is_removable "$_b"; then echo "$(zj_dev "$_b")"; _n=$((_n + 1)); fi
     done
     if [ "$_n" -eq 0 ] && [ -r /proc/partitions ]; then
+        # /proc/partitions 第 4 列是裸名（sda1）→ 这里输出仍是完整路径 /dev/sda1
         awk 'NR>2 && $4 != "" {print "/dev/" $4}' /proc/partitions
     fi
 }
 
 mnt_dev(){
-    _dev="$1"; _mnt="$2"
+    _dev=$(zj_dev "${1:-}"); _mnt="$2"
     # 屏幕级"进行中"标记（2026-10-05）：挂死时最后一屏就是卡住的设备
     say "  mnt $_dev"
     : > /tmp/zjmnt.err
@@ -338,7 +368,7 @@ find_soft_dir(){
             probe "softscan dev=$_d mount=ok dir=no"
             umount /tmp/zj_soft 2>/dev/null
         else
-            probe "softscan dev=$_d mount=FAIL err=$(cat /tmp/zjmnt.err 2>/dev/null | tr '\n' ' ' | head -c 150)"
+            probe "softscan dev=$_d mount=FAIL err=$(zj_errval 150)"
         fi
     done
     return 1
@@ -420,6 +450,8 @@ bb_status_text(){
     echo "entry=${ZJENTRY:-$(cat /tmp/zj-entry-kind)}"
     echo "bootfix=${BOOTFIX_OK:-}"
     echo "esp=${ESP_OK:-}"
+    # PIT-243：启动菜单自愈结果（payload-ok/no-payload/payload-failed）
+    echo "menu=${MENU_REDEPLOY:-}"
     echo "target=${TARGET_DEV:-}"
     echo "image=${IMAGE_PATH:-}"
 }
@@ -478,9 +510,9 @@ bb_mount(){
         *) timeout 20 mount "$1" /tmp/zj_bb 2>/tmp/zjbb.err && return 0 ;;
     esac
     if [ -s /tmp/zjbb.err ]; then
-        say "bb_mount failed: $1 (fs=${_fs:-?}) $(head -n 2 /tmp/zjbb.err | tr '\n' ' ')"
+        say "bb_mount failed: $1 (fs=${_fs:-n/a(no-signature)}) $(head -n 2 /tmp/zjbb.err | tr '\n' ' ')"
     else
-        say "bb_mount failed: $1 (fs=${_fs:-?})"
+        say "bb_mount failed: $1 (fs=${_fs:-n/a(no-signature)})"
     fi
     return 1
 }
@@ -540,9 +572,18 @@ bb_esp_drop(){
 #   ④ 同类按容量降序；容量相同按设备名升序（sort 固定顺序）。
 # 结论：落到"内置盘中最大的那个可用分区"；同一台机器每次开机落点一致。
 # Windows 侧收集器遍历 C..Z（CollectDeployArtifacts），不依赖固定盘符。
+# 分区字节数（sysfs size 单位=512B 扇区；GPT/MBR/EBR 逻辑盘全通用）。
+# 用途：offset 匹配的**第二判据**（多盘首分区都在 1MiB，只比 offset 会选错盘）；
+# 兜底日志窝选盘（pick_bb_home_devs）也用它判容量。
+# beta.11：定义必须在 zz-blackbox 分支（下方 672 行）之前 —— 该分支在脚本后半段
+# 的函数定义执行前就 exit，定义放后面会报 `dev_size: not found`、挑不到日志窝。
+dev_size(){
+    _sz=$(cat "/sys/class/block/$(zj_devname "$1")/size" 2>/dev/null)
+    [ -n "$_sz" ] && echo $((_sz * 512))
+}
 is_part_dev(){ [ -b "$1" ]; }   # 便于回归脚本 stub（beta.8）
 bb_part_removable(){ # 1=可移动 0=内置/未知
-    _n=$(basename "$1")
+    _n=$(zj_devname "$1")
     case "$_n" in
         nvme*|mmcblk*) _dk=$(echo "$_n" | sed 's/p[0-9][0-9]*$//') ;;
         *) _dk=$(echo "$_n" | sed 's/[0-9][0-9]*$//') ;;
@@ -698,15 +739,15 @@ dev_offset(){
     # 全都准确，且不依赖 blkid 行为（复刻测试实证：GPT 盘上 blkid 的
     # PART_ENTRY_OFFSET 可能为空，而 MBR 兜底对 GPT 只能读到保护性 MBR → 0，
     # 会把**正确的目标**误判成 stale log 拒掉）。
-    _st=$(cat "/sys/class/block/$(basename "$1")/start" 2>/dev/null)
+    _st=$(cat "/sys/class/block/$(zj_devname "$1")/start" 2>/dev/null)
     if [ -n "$_st" ]; then echo $((_st * 512)); return 0; fi
     _sec=$(timeout 30 blkid -s PART_ENTRY_OFFSET -o value "$1" 2>/dev/null)
     if [ -n "$_sec" ]; then echo $((_sec * 512)); return 0; fi
     # 兜底：blkid 没给出时读 MBR 分区表（先验扇区 0 的 55aa；整盘名用 sysfs 父目录）。
     # 每个外部命令都套 timeout：读软驱/坏块设备上的裸 dd 会在 TCG 里阻塞几十秒
     # 而上层毫无输出（PIT-142：returnold 演练卡在本函数，日志停在 match by offset）。
-    _name=$(basename "$1")
-    _disk="/dev/$(basename "$(dirname "$(readlink -f "/sys/class/block/$_name")")")"
+    _name=$(zj_devname "$1")
+    _disk=$(zj_dev "$(basename "$(dirname "$(readlink -f "/sys/class/block/$_name")")")")
     _sig=$(timeout 10 dd if="$_disk" bs=1 skip=510 count=2 2>/dev/null | od -A n -t x1 | tr -d ' \n')
     _num=$(echo "$_name" | grep -oE '[0-9]+$')
     [ "$_sig" = "55aa" ] && [ -n "$_num" ] && [ -b "$_disk" ] || return 1
@@ -714,18 +755,13 @@ dev_offset(){
     [ -n "$_lba" ] || return 1
     echo $((_lba * 512))
 }
-# 分区字节数（sysfs size 单位=512B 扇区；GPT/MBR/EBR 逻辑盘全通用）。
-# 用途：offset 匹配的**第二判据**（多盘首分区都在 1MiB，只比 offset 会选错盘）。
-dev_size(){
-    _sz=$(cat "/sys/class/block/$(basename "$1")/size" 2>/dev/null)
-    [ -n "$_sz" ] && echo $((_sz * 512))
-}
 target_by_offset(){
     TARGET_DEV=""
     # 先把候选设备打出来：这一段是"日志缺失/被拒后"的唯一路径，一旦卡住或
     # 空转，没有这行就只能看到上一条 say（PIT-142 现场：日志停在 "match by
     # offset" 之后零输出，无从判断是扫到 fd0 卡住还是 list_parts 为空）。
-    say "  target_by_offset: scanning (parts=$(list_parts 2>/dev/null | tr '\n' ' '))"
+    _parts_scan=$(list_parts 2>/dev/null | tr '\n' ' ')
+    say "  target_by_offset: scanning (parts=${_parts_scan:-n/a(no-partitions)})"
     for _d in $(list_parts); do
         [ -b "$_d" ] || continue
         # sr/loop/cdrom 之外补 fd/floppy：QEMU 模拟软驱 /dev/fd0 上的裸 dd 会
@@ -736,7 +772,7 @@ target_by_offset(){
             say "  (skip $_d: no offset)"
         else
             _sz=$(dev_size "$_d")
-            say "  probe $_d off=$_off size=${_sz:-?} (want $TARGET_OFFSET/${TARGET_SIZE:-?})"
+            say "  probe $_d off=$_off size=${_sz:-n/a(no-sysfs-size)} (want $TARGET_OFFSET/${TARGET_SIZE:-n/a(no-contract-size)})"
             if [ "$_off" = "$TARGET_OFFSET" ]; then
                 if [ -n "$TARGET_SIZE" ] && [ -n "$_sz" ] && [ "$_sz" != "$TARGET_SIZE" ]; then
                     # 同 offset 但 size 不符 = 不是目标（2026-10-06 实测教训：两块盘
@@ -752,7 +788,7 @@ target_by_offset(){
     done
     return 1
 }
-TARGET_DEV="${1:-}"
+TARGET_DEV=$(zj_dev "${1:-}")
 if [ -n "$TARGET_DEV" ] && [ -b "$TARGET_DEV" ] && [ -n "$TARGET_OFFSET" ]; then
     _doff=$(dev_offset "$TARGET_DEV")
     _dsz=$(dev_size "$TARGET_DEV")
@@ -1068,7 +1104,7 @@ scan_image(){
             if [ -f "$_mp/$IMG_REL" ]; then
                 IMG_FILE="$_mp/$IMG_REL"
                 probe "image-scan dev=$_d rem=${_rem:-0} mount=ok(already) found=yes"
-                say "found image: $IMG_FILE (dev=$_d rem=${_rem:-0})"
+                say_img "$IMG_FILE" "$_d" "${_rem:-0}"
                 return 0
             fi
             probe "image-scan dev=$_d rem=${_rem:-0} mount=ok(already) found=no"
@@ -1080,7 +1116,7 @@ scan_image(){
             if [ -f "$SRC_M/$IMG_REL" ]; then
                 IMG_FILE="$SRC_M/$IMG_REL"
                 probe "image-scan dev=$_d type=${_typ:-none} rem=${_rem:-0} mount=ok found=yes"
-                say "found image: $IMG_FILE (dev=$_d rem=${_rem:-0})"
+                say_img "$IMG_FILE" "$_d" "${_rem:-0}"
                 return 0
             fi
             probe "image-scan dev=$_d type=${_typ:-none} rem=${_rem:-0} mount=ok found=no"
@@ -1089,11 +1125,11 @@ scan_image(){
         else
             echo "$_d" >> /tmp/zj_img.fail
             if [ -z "$_typ" ]; then
-                probe "image-scan dev=$_d type=none rem=${_rem:-0} mount=FAIL err=no filesystem"
+                probe "image-scan dev=$_d type=none rem=${_rem:-0} mount=FAIL err=no-filesystem"
                 say "skip $_d (no filesystem)"
             else
-                probe "image-scan dev=$_d type=$_typ rem=${_rem:-0} mount=FAIL err=$(cat /tmp/zjmnt.err 2>/dev/null | tr '\n' ' ' | head -c 150)"
-                say "mount FAILED $_d (type=$_typ; $(cat /tmp/zjmnt.err 2>/dev/null | tr '\n' ' ' | head -c 200))"
+                probe "image-scan dev=$_d type=$_typ rem=${_rem:-0} mount=FAIL err=$(zj_errval 150)"
+                say "mount FAILED $_d (type=$_typ; $(zj_errval 200))"
             fi
         fi
     done
@@ -1220,7 +1256,15 @@ if [ -z "$IMG_FILE" ] && [ -s /tmp/zj_img.fail ]; then
     sleep 10
     scan_image
 fi
-[ -n "$IMG_FILE" ] || { RESULT=FAILED; STEP=image-not-found; say "ERROR: image not found: $IMAGE_PATH"; exit 1; }
+[ -n "$IMG_FILE" ] || {
+    RESULT=FAILED; STEP=image-not-found
+    # PIT-238：失败屏同样不渲染用户路径（汉字超出字库覆盖）。
+    _ntyp=$(printf '%s' "$IMAGE_PATH" | sed 's/.*\.//' | tr 'a-z' 'A-Z')
+    _ndrv=$(printf '%s' "$IMAGE_PATH" | cut -d: -f1)
+    say "ERROR: image not found (type=${_ntyp:-n/a} drive=${_ndrv:-n/a}:); full path in log"
+    logonly "image path: $IMAGE_PATH"
+    exit 1
+}
 unlock_image
 STEP=image-found
 persist_log
@@ -1286,10 +1330,11 @@ if [ "$(get_task reparse_scan)" = "0" ] && [ "$(get_task efs_scan)" = "0" ]; the
         _rs_cert=1
         say "reparse precheck: certified clean by staging side (size=$_fp matches)"
     elif [ -n "$_fp" ]; then
-        say "reparse precheck: recorded size $_fp != current ${_cur:-?} -> full scan"
+        say "reparse precheck: recorded size $_fp != current ${_cur:-n/a(no-stat-size)} -> full scan"
     fi
 fi
 if [ "$_rs_cert" = "0" ]; then
+    say2 "正在读盘(180秒内),不必停,目标盘未动" "reading disk metadata (up to 180s); no need to stop; target untouched"
     say "reparse precheck: scanning image metadata (may take a while) ..."
     ( timeout 180 "$WIMLIB" dir "$IMG_FILE" "$IMAGE_INDEX" --detailed; echo "DIRRC=$?" >&2 ) \
         2> /tmp/zj_rep.err | awk '
@@ -1311,6 +1356,7 @@ END { printf "RES SEEN=%d BAD=%d ENC=%d\n", seen, bad, enc }' > /tmp/zj_rep.res
         say "ERROR: image contains reparse point(s) the Linux rescue cannot write:"
         sed -n 's/^BADTAG /  bad tag /p' /tmp/zj_rep.res
         say "ERROR: use 'restore then reboot' (Windows-side extract) or in-place restore from PE"
+        say2 "此系统不能在此还原,盘未动,请回Windows看报告再选" "cannot restore this system here; target untouched - reboot to Windows, then choose Extract + Install"
         persist_log
         exit 1
     fi
@@ -1319,14 +1365,16 @@ END { printf "RES SEEN=%d BAD=%d ENC=%d\n", seen, bad, enc }' > /tmp/zj_rep.res
         say "ERROR: image contains EFS-encrypted content the Linux rescue cannot restore:"
         say "  encrypted entries: $_enc (they would be restored EMPTY)"
         say "ERROR: use 'restore then reboot' (Windows-side extract) or in-place restore from PE"
+        say2 "此系统不能在此还原,盘未动,请回Windows看报告再选" "cannot restore this system here; target untouched - reboot to Windows, then choose Extract + Install"
         persist_log
         exit 1
     fi
     if [ "$_rc" != "0" ] || [ -z "$_seen" ] || [ "$_seen" = "0" ]; then
         RESULT=FAILED; STEP=reparse-unsettable
-        say "ERROR: reparse precheck could not complete (dir rc=${_rc:-?} entries=${_seen:-?})"
+        say "ERROR: reparse precheck could not complete (dir rc=${_rc:-n/a(no-rc)} entries=${_seen:-n/a(no-count)})"
         say "  (probe out: $(tail -c 200 /tmp/zj_rep.err | tr '\n' ' '))"
         say "ERROR: cannot certify image is safe for Linux apply - aborted BEFORE touching the target"
+        say2 "此系统不能在此还原,盘未动,请回Windows看报告再选" "cannot restore this system here; target untouched - reboot to Windows, then choose Extract + Install"
         persist_log
         exit 1
     fi
@@ -1364,6 +1412,93 @@ fi
 # ESP 分区（所以镜像分区 umount 要挪到那之后，见下方 apply done 处）。
 # 没有 esp_index 时整段不跑（绝大多数任务不带），完全不受影响。
 
+# ── 启动菜单自愈（PIT-243）─────────────────────────────────────────────
+# 还原会把镜像内容**盖到目标盘根**：我们铺在 C:\ 的 ZJRESTORE\、grldr、
+# grldr.mbr、menu.lst，连同 \Boot\BCD 里那条启动项一起被新系统覆盖。用户实测
+# 后果：连续两次开机静默回落 Windows，进不了救援、且屏幕没有任何提示。
+# 处置：擦盘/交换**之前**把载荷收进 RAM；还原成功后写回新系统根。BCD 条目
+# Linux 侧改不了 → 落 menu-redeploy.txt，Windows 侧启动时自动重装（见
+# ops_staged_menu.cpp EnsureMenuAfterRestore）。
+BOOT_STASH=/tmp/zj_bootstash
+MENU_REDEPLOY=skip          # skip|stashed|payload-ok|payload-failed|no-payload
+
+zj_boot_stash(){ # $1 = 已挂载的目标根（**擦盘前**调用：此刻载荷还在）
+    if [ ! -d "$1/ZJRESTORE" ]; then
+        say "MENU: no payload on target root; nothing to stash"
+        MENU_REDEPLOY=no-payload
+        return 0
+    fi
+    _need=$(du -sk "$1/ZJRESTORE" 2>/dev/null | awk '{print $1}')
+    _free=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null)
+    # 需要：载荷大小 + 64MB 余量（RAM 盘本身就是内存，写回时还要再占一份）
+    if [ -n "$_need" ] && [ -n "$_free" ] && \
+       [ $((_need * 1024 + 67108864)) -gt "$_free" ]; then
+        say "MENU: WARN not enough RAM to stash payload (need ${_need}KB, avail ${_free}KB)"
+        MENU_REDEPLOY=payload-failed
+        return 0
+    fi
+    rm -rf "$BOOT_STASH"
+    mkdir -p "$BOOT_STASH" || { MENU_REDEPLOY=payload-failed; return 0; }
+    if cp -a "$1/ZJRESTORE" "$BOOT_STASH/" 2>/tmp/zjstash.err; then
+        for _bf in grldr grldr.mbr menu.lst; do
+            [ -f "$1/$_bf" ] && cp "$1/$_bf" "$BOOT_STASH/" 2>>/tmp/zjstash.err
+        done
+        say "MENU: payload stashed in RAM (size=${_need:-n/a}KB; grldr/menu.lst included)"
+        MENU_REDEPLOY=stashed
+    else
+        say "MENU: ERROR stash failed: $(head -1 /tmp/zjstash.err 2>/dev/null)"
+        MENU_REDEPLOY=payload-failed
+    fi
+    return 0
+}
+
+zj_boot_redeploy(){ # $1 = 已挂载的新系统根（bootfix 段挂载后调用）
+    _t="$1"
+    _st=no-payload
+    if [ -f "$_t/grldr.mbr" ] && [ -f "$_t/menu.lst" ] && [ -d "$_t/ZJRESTORE" ]; then
+        # 载荷铺在非目标盘（数据盘）→ 还原没动它，无需再拷
+        say "MENU: payload survived on another volume; skip copy"
+        _st=payload-ok
+    elif [ -d "$BOOT_STASH/ZJRESTORE" ]; then
+        mkdir -p "$_t/ZJRESTORE" 2>/dev/null
+        cp -a "$BOOT_STASH/ZJRESTORE/." "$_t/ZJRESTORE/" 2>/tmp/zjrd.err
+        for _bf in grldr grldr.mbr menu.lst; do
+            [ -f "$BOOT_STASH/$_bf" ] && cp "$BOOT_STASH/$_bf" "$_t" 2>>/tmp/zjrd.err
+        done
+        sync
+        if [ -f "$_t/grldr.mbr" ] && [ -f "$_t/menu.lst" ] && \
+           [ -f "$_t/ZJRESTORE/boot/vmlinuz-zjrestore" ]; then
+            say "MENU: payload restored to new root (ZJRESTORE + grldr/mbr/menu.lst)"
+            _st=payload-ok
+        else
+            say "MENU: ERROR payload restore incomplete: $(head -1 /tmp/zjrd.err 2>/dev/null)"
+            _st=payload-failed
+        fi
+    else
+        say "MENU: no stashed payload; boot menu files stay missing"
+    fi
+    # BCD 条目（bootmgr → \grldr.mbr）随 \Boot\BCD 一起被镜像覆盖。Linux 侧改
+    # 不了 BCD → 落标记，Windows 侧启动时重装；失败也**留痕**（state= 字段）。
+    if [ "$_st" = "no-payload" ]; then
+        say "MENU: no payload involved; skip BCD marker"
+        MENU_REDEPLOY=no-payload
+        return 0
+    fi
+    mkdir -p "$_t/ZJRESTORE" 2>/dev/null
+    if {
+        printf 'state=%s\r\n' "$_st"
+        printf 'bcd=pending\r\n'
+        printf 'build=%s\r\n' "$(cat /zjrescue-version 2>/dev/null)"
+        printf 'time=%s\r\n' "$(date '+%F %T')"
+    } > "$_t/ZJRESTORE/menu-redeploy.txt" 2>/tmp/zjrd.err; then
+        say "MENU: BCD entry pending (auto-reinstall on next Windows start)"
+    else
+        say "MENU: ERROR cannot write menu-redeploy.txt (BCD entry stays missing)"
+        [ "$_st" = "payload-ok" ] && _st=payload-failed
+    fi
+    MENU_REDEPLOY=$_st
+}
+
 # ── A 引擎：改名交换（engine=swap）──
 # Windows 侧已把镜像解压到目标分区的 ~new\（含完成标记 .zj-done）；Linux 侧
 # 只需调用 zjswap.sh：旧顶层项 → ~old\、~new 顶层项 → 原位。不 mkntfs、不
@@ -1388,6 +1523,16 @@ if [ "$ENGINE" = "swap" ]; then
         ZJ_KEEP_OLD="$KEEP_OLD_RAW"
         say "keep_old=$ZJ_KEEP_OLD (0=delete old system after swap)"
     _s0=$(date +%s)
+    # PIT-243：交换后旧根进 ~old（keep_old=0 直接删）→ 载荷必须**先**收进 RAM
+    mkdir -p /tmp/zj_pre
+    if timeout 60 mount -t ntfs3 -o ro "$TARGET_DEV" /tmp/zj_pre 2>/dev/null \
+       || mnt_dev "$TARGET_DEV" /tmp/zj_pre; then
+        zj_boot_stash /tmp/zj_pre
+        umount /tmp/zj_pre 2>/dev/null
+    else
+        say "MENU: WARN cannot mount target before swap (payload will be lost)"
+        MENU_REDEPLOY=payload-failed
+    fi
     ZJ_KEEP_OLD="$ZJ_KEEP_OLD" sh "$ZJSWAP" "$TARGET_DEV" /tmp/zj_swap_mnt
     swap_rc=$?
     _s1=$(date +%s)
@@ -1421,7 +1566,7 @@ else
 # 分区，屏幕正确显示 "BOOTMGR is missing" —— 证明 mkntfs 布局完全可用。
 # 见 tools/vmtest/README 的 PBR 探针测试。
 TARGET_FS=$(timeout 30 blkid -s TYPE -o value "$TARGET_DEV" 2>/dev/null)
-say "target fs = ${TARGET_FS:-unknown}"
+say "target fs = ${TARGET_FS:-n/a(no-signature)}"
 # 目标分区准备方式：
 #   format = mkntfs 快速格式化（默认）。2026-09-18 QEMU 实测确认可引导：
 #            mkntfs 分区 + 完整微软引导区（扇区0代码 + 扇区1..8）→ 引导代码
@@ -1436,10 +1581,20 @@ say "target prepare mode = $TARGET_MODE"
 # 大字横幅：控制台只能用内核内置字体（ASCII），中文字形不在里面、会显示成方框，
 # 所以**屏上提示一律用英文**（中文细节全部写进日志文件）。
 say "======================================================"
-say "   SysRecover  -  SYSTEM RESTORE IN PROGRESS"
+say "   NineRestore  -  SYSTEM RESTORE IN PROGRESS"
 say "   DO NOT TURN OFF OR REBOOT THE COMPUTER"
 say "======================================================"
 KEPT_FS=0
+# PIT-243：擦盘/格式化之前先把启动载荷收进 RAM（mkntfs/清空之后就没了）
+mkdir -p /tmp/zj_pre
+if timeout 60 mount -t ntfs3 -o ro "$TARGET_DEV" /tmp/zj_pre 2>/dev/null \
+   || mnt_dev "$TARGET_DEV" /tmp/zj_pre; then
+    zj_boot_stash /tmp/zj_pre
+    umount /tmp/zj_pre 2>/dev/null
+else
+    say "MENU: WARN target not mountable before wipe (no payload stash)"
+    MENU_REDEPLOY=payload-failed
+fi
 if [ "$TARGET_MODE" = "keep" ] && [ "$TARGET_FS" = "ntfs" ]; then
     say "keep existing NTFS, wipe files (no reformat)"
     umount "$TARGET_DEV" 2>/dev/null
@@ -1462,7 +1617,9 @@ if [ "$TARGET_MODE" = "keep" ] && [ "$TARGET_FS" = "ntfs" ]; then
     # → 必须用 ntfs-3g 再清一遍。否则残留文件会让 wimlib 的 NTFS 卷模式报
     # "File exists" → rc=46 (WIMLIB_ERR_NTFS_3G)。
     if [ "$_wiped" = "0" ] || [ -n "$_left" ]; then
-        say "wipe: ntfs3 incomplete (mounted=$_wiped left=[$_left]) -> ntfs-3g pass"
+        # PIT-238：_left 是**用户残留文件名**（可能含库外汉字）→ 屏上过占位符
+        say "wipe: ntfs3 incomplete (mounted=$_wiped left=[$(zj_ascii "$_left")]) -> ntfs-3g pass"
+        logonly "wipe: ntfs3 leftover raw (<=20): $(printf '%s' "$_left" | head -c 300)"
         if timeout 60 ntfs-3g -o force "$TARGET_DEV" /tmp/zj_wipe 2>>/tmp/zjwipe.err \
            || mnt_dev "$TARGET_DEV" /tmp/zj_wipe; then
             cp "$LOG" /tmp/zj_wipe/zjrestore-debug.log 2>/dev/null
@@ -1475,14 +1632,17 @@ if [ "$TARGET_MODE" = "keep" ] && [ "$TARGET_FS" = "ntfs" ]; then
         fi
     fi
     if [ "$_wiped" = "1" ]; then
-        say "wiped target; remaining root: [$_left] (elapsed $(($(date +%s) - _w0))s)"
+        say "wiped target; remaining root: [$(zj_ascii "$_left")] (elapsed $(($(date +%s) - _w0))s)"
+        [ -n "$_left" ] && logonly "wiped target: leftover raw: $_left"
         # M2（1.0）：keep 模式下根目录不干净 = wimlib NTFS 卷模式必失败（rc=46）。
         # 0.9.96 只 WARN 然后继续 apply：旧系统已清空、apply 必失败，目标盘变成
         # "没有系统"的中间态。这里在**任何写入之前**中止，局面停在"目标盘已清空
         # 但未写坏"，用户可回到菜单换模式重试。
         if [ -n "$_left" ]; then
             say "ERROR: target root NOT empty after wipe -> abort before apply"
-            say "left(<=20): $(ls -A /tmp/zj_wipe 2>/dev/null | head -n 20 | tr '\n' ' ')"
+            _zlraw=$(ls -A /tmp/zj_wipe 2>/dev/null | head -n 20 | tr '\n' ' ')
+            say "left(<=20): $(zj_ascii "$_zlraw")"
+            logonly "left raw(<=20): $_zlraw"
             RESULT=FAILED
             STEP=wipe-incomplete
             exit 1
@@ -1590,7 +1750,7 @@ if [ "$APPLY_MODE" = "dir" ]; then
         APPLY_TGT=/tmp/zj_apply
         APPLY_MNT=/tmp/zj_apply
         _mfs=$(awk -v m=/tmp/zj_apply '$2==m{print $3}' /proc/mounts 2>/dev/null)
-        say "apply target: /tmp/zj_apply (dir write TEST override, fs=${_mfs:-unknown})"
+        say "apply target: /tmp/zj_apply (dir write TEST override, fs=${_mfs:-n/a(no-signature)})"
     else
         say "dir mount failed (fs=$APPLY_FS; $(cat /tmp/zjapply.err 2>/dev/null | tr '\n' ' ')) -> block mode"
         APPLY_MODE=block
@@ -1629,36 +1789,77 @@ BLK=$(basename "$TARGET_DEV")
 ) &
 _SMPID=$!
 
-# wimlib 输出重排：把进度行（含 "(NN%)"）渲染成单行进度条，用 \r 原地刷新；
-# 其它行原样输出。只按百分比解析，不依赖 wimlib 的单位/语言。
-wim_progress(){
-    awk '
-    function bar(p,   s, i) {
+# 进度渲染（beta.11，PIT-234）。旧实现的问题（真机可复现）：
+#   · 把 wimlib 原始进度行整段拼在进度条后面 —— "Extracting file data:
+#     12.3 MiB of 129.4 MiB (9%) done" 本身就有 50+ 列，加 "ZJ: " + 20 格
+#     进度条后常到 85~90 列；80 列控制台一折行，"\r" 只能回到**折行后最后一行**
+#     的行首，上方折行残段留在屏上 → 每个百分比各占一行、逐行下滚；
+#   · 行尾不清空：文字变短时留下半行残影。
+# 现在的口径：
+#   · 屏幕只渲染**一行**，固定补空格到 76 列（≤78 列上限，永不折行），
+#     用 "\r" 原地覆写；补空格等于“清到尾”，不依赖 \033[K（串口也安全）。
+#   · 原始行一律进 /tmp/apply.out（取证用）；每个进度级别另记
+#     /tmp/apply.progress.log 与主日志 $LOG（一行一级，不被覆写吃掉）。
+#   · 仅当"stderr 是 tty 且 /dev/console 指向本地 VT（tty0..ttyN）"才原地刷新；
+#     **降级条件**：串口（ttyS*/ttyUSB*）、非 tty（重定向/管道）、
+#     /sys/class/tty/console/active 为空 → 每 10% 打一行，绝不逐级刷屏。
+#   · 进度行保持英文（用户确认，不做中文化）。
+_prog_inplace=0
+if [ -t 2 ]; then
+    case "$(cat /sys/class/tty/console/active 2>/dev/null)" in
+        *ttyS*|*ttyUSB*|'') ;;
+        *tty[0-9]*) _prog_inplace=1 ;;
+    esac
+fi
+
+progress_render(){
+    awk -v stage="$1" -v inplace="$_prog_inplace" -v logf="$LOG" '
+    function bar(p,   s, i, n) {
         s = ""
         n = int(p / 5)
         for (i = 0; i < 20; i++) s = s (i < n ? "#" : "-")
         return "[" s "] " p "%"
     }
+    function linepad(s) {
+        while (length(s) < 76) s = s " "
+        return s
+    }
     {
         line = $0
         if (line == "") next
+        print line >> "/tmp/apply.out"
         if (match(line, /\([0-9]+%\)/)) {
-            p = substr(line, RSTART + 1, RLENGTH - 3) + 0
-            printf "\rZJ: %s  %s", bar(p), line
-            fflush()
+            pct = substr(line, RSTART + 1, RLENGTH - 3) + 0
+            print "ZJ: progress pct=" pct " stage=" stage >> "/tmp/apply.progress.log"
+            print "ZJ: progress pct=" pct " stage=" stage >> logf
+            if (inplace == "1") {
+                printf "\r%s", linepad("ZJ: " bar(pct) " " stage) > "/dev/stderr"
+                fflush()
+            } else if (pct >= sparse_next) {
+                print "ZJ: " bar(pct) " " stage > "/dev/stderr"
+                fflush()
+                sparse_next = pct - (pct % 10) + 10
+            }
         } else {
-            printf "\nZJ:  %s\n", line
+            printf "\nZJ:  %s\n", line > "/dev/stderr"
+            fflush()
         }
     }
-    END { printf "\n" }'
+    BEGIN { sparse_next = 10 }
+    END {
+        if (inplace == "1") printf "\n" > "/dev/stderr"
+        fflush()
+    }'
 }
-# 进度实时透传控制台（\r 原地刷新），同时存盘；退出码单独写文件
-# （管道里 $? 是 tee 的，取不到 wimlib 的）。
-# 注意：rc 必须写文件传出去 —— 函数的 stdout 是进度条，$(...) 会把它一起捕获。
+# 进度实时透传控制台（单行原地刷新），同时存盘；退出码单独写文件
+# （管道里 $? 是渲染器的，取不到 wimlib 的）。
+# 注意：rc 必须写文件传出去 —— 控制台/日志写在 stderr，$(...) 不会捕获。
 run_apply(){
     : > /tmp/apply.rc
+    : > /tmp/apply.out
+    : > /tmp/apply.progress.log
     { "$WIMLIB" apply "$IMG_FILE" "$IMAGE_INDEX" "$1" 2>&1; echo "RC=$?" > /tmp/apply.rc; } \
-        | tr '\r' '\n' | wim_progress | tee /tmp/apply.out
+        | tr '\r' '\n' | progress_render "apply"
     _rc=$(sed -n 's/^RC=//p' /tmp/apply.rc 2>/dev/null)
     [ -n "$_rc" ] || _rc=1
     echo "$_rc" > /tmp/apply.exit
@@ -1675,10 +1876,11 @@ apply_exit=$(cat /tmp/apply.exit 2>/dev/null)
 [ -n "$apply_exit" ] || apply_exit=1
 if [ "$apply_exit" != "0" ]; then
     say "apply FAILED rc=$apply_exit $(rc_name "$apply_exit"); wimlib output head:"
-    head -n 5 /tmp/apply.out 2>/dev/null | while IFS= read -r _l; do say "  |$_l"; done
+    # PIT-238：wimlib 输出里含**镜像内的用户文件名**（可能含库外汉字）→ 过占位符
+    head -n 5 /tmp/apply.out 2>/dev/null | while IFS= read -r _l; do say "  |$(zj_ascii "$_l")"; done
     # wimlib 的 [ERROR] 行在输出**末尾**（进度行在前面），必须 tail
     say "apply FAILED wimlib output tail:"
-    tail -n 20 /tmp/apply.out 2>/dev/null | while IFS= read -r _l; do say "  |$_l"; done
+    tail -n 20 /tmp/apply.out 2>/dev/null | while IFS= read -r _l; do say "  |$(zj_ascii "$_l")"; done
     if [ "$apply_exit" = "46" ]; then
         say "rc=46 (libntfs-3g) -> ntfsfix + retry once"
         command -v ntfsfix >/dev/null 2>&1 && timeout 60 ntfsfix -d "$TARGET_DEV" >> "$LOG" 2>&1
@@ -1700,7 +1902,7 @@ say "io gaps>=10s: $(awk 'NR>1{d=$1-p; if(d>=10) printf "%d..%d(%ds) ", p, $1, d
 say "io first/last: $(head -1 /tmp/apply_io.log 2>/dev/null) | $(tail -1 /tmp/apply_io.log 2>/dev/null)"
 say "--- dmesg (warn/err/blk) ---"
 dmesg 2>/dev/null | grep -iE 'error|fail|warn|blocked|timeout|reset|I/O|ntfs|nvme|ata[0-9]|scsi' | tail -n 30 \
-    | while IFS= read -r line; do say "  $line"; done
+    | while IFS= read -r line; do say "  $(zj_ascii "$line")"; done
 # 镜像分区（$SRC_M）**先不卸载**：下面 ESP 子镜像（方案 C）还要直接用 $IMG_FILE
 # apply，统一挪到 ESP 段之后再 umount。
 if [ "$apply_exit" != "0" ]; then
@@ -1792,6 +1994,8 @@ if [ -f /tmp/bootfix/bootmgr ]; then
             say "ERROR: bootfix BCD/bootmgr NOT on target after copy"
         fi
         _n=$(ls "$BFM" 2>/dev/null | tr '\n' ' ')
+        # PIT-243：新系统根已挂载且 boot 文件已补齐 → 把我们的启动载荷铺回去
+        zj_boot_redeploy "$BFM"
         umount "$BFM" 2>/dev/null
         if [ $bf_rc -eq 0 ]; then
             say "bootfix installed; target root: $_n"
@@ -2311,6 +2515,12 @@ say "========================================="
 say "RESTORE DONE: $TARGET_DEV (index $IMAGE_INDEX)"
 say "time: $(date '+%F %T')"
 say "========================================="
+# PIT-243：启动菜单状态必须让用户看见（以前是静默回落 Windows）
+case "$MENU_REDEPLOY" in
+    payload-ok)  say "MENU: boot files restored; boot entry reinstalls on next NineRestore start" ;;
+    no-payload)  say "MENU: no payload on target root; if a boot menu was installed, click 'Install to boot'" ;;
+    *)           say "MENU: WARN boot menu NOT restored - open NineRestore and click 'Install to boot'" ;;
+esac
 
 # ── 还原成功后清理本次留下的文件（用户要求：还原完不留痕）──
 # 目标分区（C:）不再写任何日志；其它分区上的还原环境（ZJRESTORE/grldr/

@@ -11,6 +11,9 @@
 //   主版本.次版本 由人指定（当前 1.0）；
 //   测试版：beta 号放**第四段**，每发一版 +1，第三位固定 0；
 //           `1.0 beta.N` / 内部 `1.0.0.N` / 文件 `九转大还原1.0-beta.N.exe`
+//   RC 版（2026-11-08 用户定）：`SYSRECOVER_RC` 非 0 即 RC 渠道；对外
+//           `1.0 RC1` / 文件 `九转大还原1.0-rc.1.exe`，**内部四段继续递增**
+//           （第四段沿用 beta 计数器，不回退）；RC 只换名称、不改内部号。
 //   正式版：beta 归零，`1.0.0` / 内部 `1.0.0.0` / 文件 `九转大还原1.0.0.exe`
 //   正式版之后修 bug：第三位递增，`1.0.1` / 内部 `1.0.1.0` / `九转大还原1.0.1.exe`
 //
@@ -20,12 +23,13 @@
 #define SYSRECOVER_MAJOR 1
 #define SYSRECOVER_MINOR 0
 #define SYSRECOVER_PATCH 0  // 第三位：正式版之后修 bug 递增（beta 期间固定 0）
-#define SYSRECOVER_BETA 10   // 第四位：beta 号；0 = 正式版
+#define SYSRECOVER_BETA 17   // 第四位：发布计数器（beta / RC 内部号）；0 = 正式版
+#define SYSRECOVER_RC 3      // RC 渠道号（0 = 不是 RC）；对外 1.0 RC3
 
 // 内部四段串（日志 / version.json / 救援载荷构建戳）：beta 1.0.0.2，正式 1.0.0.0
-#define SYSRECOVER_VERSION "1.0.0.10"
+#define SYSRECOVER_VERSION "1.0.0.17"
 // 界面显示串（也用于文件名，文件名不带空格）：beta `1.0 beta.2`，正式 `1.0.0`
-#define SYSRECOVER_DISPLAY "1.0 beta.10"
+#define SYSRECOVER_DISPLAY "1.0 RC3"
 
 // 宽串形态：把窄串字面量加上 L 前缀（两级宏，避免 ## 阻止展开）。
 #define SYSRECOVER_WIDEN2(x) L##x

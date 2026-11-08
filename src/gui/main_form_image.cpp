@@ -52,8 +52,14 @@ void CMainForm::PopulatePartitions(const std::vector<DiskInfo>& disks) {
     m_parts.clear();
     m_partStyles.clear();
     m_selPart = -1;
-    int selDefault = -1;
+    // PIT-245：推荐判据按**内容**（见 disk.h::WindowsSystemScore），不看分区号/
+    // 列表顺序。同分时取"最近启动过"（config\SYSTEM 的 LastWriteTime），再退
+    // 物理顺序（ordinal 升序）。一个都不像时退回第一行（物理最前），与旧行为一致。
+    int bestPick = -1;
+    int bestScore = 0;
+    uint64_t bestStamp = 0;
     for (const auto& disk : disks) {
+        uint32_t shownNo = 0;      // 可见行序号：跳过 ESP/MSR 后不跳号（纯显示）
         for (const auto& part : disk.parts) {
             // M12：默认隐藏可移动盘；仅当用户勾选「显示 USB 设备」时保留 USB 盘。
             if (part.isEsp || part.isMsr || part.isRecovery ||
@@ -61,13 +67,17 @@ void CMainForm::PopulatePartitions(const std::vector<DiskInfo>& disks) {
                 continue;
             if (part.sizeBytes < 2ULL * 1024 * 1024 * 1024)
                 continue;
+            ++shownNo;
             m_parts.push_back(part);
+            m_parts.back().displayNo = shownNo;
             m_partStyles.push_back(disk.style);
             // 分区行四列自绘（对齐老项目 PartitionRow.cs，见 ui_skin.cpp::PaintRow）
             CPartItemUI* item = new CPartItemUI;
             item->SetFixedHeight(43);
             wchar_t partNo[32];
-            swprintf(partNo, 32, L"%u/%u", disk.index, part.partNumber);
+            // 显示"盘号/可见行序号"；GPT 槽位号 partNumber 只用于日志/契约，
+            // 物理序号 ordinal 只用于推荐同分时的稳定排序，均不上屏。
+            swprintf(partNo, 32, L"%u/%u", disk.index, shownNo);
             uint64_t used = part.sizeBytes > part.freeBytes
                             ? part.sizeBytes - part.freeBytes : 0;
             std::wstring cap  = FormatGb(used) + L" / " + FormatGb(part.sizeBytes);
@@ -88,13 +98,22 @@ void CMainForm::PopulatePartitions(const std::vector<DiskInfo>& disks) {
                           part.label.c_str(), partNo,
                           cap.c_str(), freeTxt.c_str(), pct);
             pCombo->Add(item);
-            if (part.isSystem && selDefault < 0)
-                selDefault = (int)m_parts.size() - 1;
+            const int score = WindowsSystemScore(part);
+            const int idx = (int)m_parts.size() - 1;
+            const uint64_t stamp = score > 0 ? WindowsBootStamp(part) : 0;
+            if (score > bestScore ||
+                (score > 0 && score == bestScore && stamp > bestStamp)) {
+                bestScore = score;
+                bestStamp = stamp;
+                bestPick = idx;
+            }
         }
     }
+    if (bestPick < 0 && pCombo->GetCount() > 0)
+        bestPick = 0;  // 一个都不像系统分区：退回物理最前一行的旧行为
     if (pCombo->GetCount() > 0)
-        pCombo->SelectItem(selDefault >= 0 ? selDefault : 0);
-    m_selPart = selDefault >= 0 ? selDefault : (pCombo->GetCount() > 0 ? 0 : -1);
+        pCombo->SelectItem(bestPick);
+    m_selPart = pCombo->GetCount() > 0 ? bestPick : -1;
     // 空列表：收起框显示提示；点击时（CPartitionComboUI::DoEvent）直接打开分区向导。
     pCombo->SetEmptyHint(Tr(L"点击此处为新硬盘创建分区…"));
     CControlUI* pLoad = m_PaintManager.FindControl(_T("PartLoadingText"));
