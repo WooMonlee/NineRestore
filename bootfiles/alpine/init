@@ -8,7 +8,8 @@
 #   * devtmpfs 由内核自动挂载，无需 mdev。
 #   * 自写 /init，无 rcS/inittab 交互脚本，启动无任何选择提示。
 #
-# 消息全 ASCII（部分控制台无中文字库）。
+# 界面提示为中文：字模 /zjfont.psf（16 点阵）+ /zjzhmap.sed 随镜像下发，
+# 早期用 setfont 装进本地控制台；纯串口控制台自动退回原文（见 zjlog.sh）。
 
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 
@@ -31,13 +32,17 @@ LOG=/tmp/zjrestore.log
 # say 单源实现收进 /zjlog.sh（P0-B/PIT-145）；SR: 前缀是断言/录像取证契约。
 ZJPREFIX=SR
 . /zjlog.sh
+# 中文字库必须在第一句中文提示之前装好（串口控制台没有 tty0，这里会跳过）
+if ! zj_font_load; then
+    say "WARN: console CJK font not loaded (serial console or missing /zjfont.psf)"
+fi
 # 黑匣子探测表（与 zjrestore-lite.sh 共用同一文件）：每个分区的 mount 结果都
 # 记下来，失败时随日志写到所有可写面 —— "为什么找不到任务/镜像"有据可查。
 PROBE=/tmp/zj-probe.txt
 : > "$PROBE" 2>/dev/null
 probe(){ echo "$(date '+%F %T') $*" >> "$PROBE" 2>/dev/null; say "PROBE $*"; }
 
-say "SysRecover rescue (kernel $(uname -r))"
+say "SysRecover 救援层 (内核 $(uname -r))"
 # 救援层构建版本（PIT-103）：日志一眼可判"跑的是哪一版救援层"（防版本混淆）
 [ -f /zjrescue-version ] && say "rescue build $(cat /zjrescue-version 2>/dev/null)"
 
@@ -828,7 +833,7 @@ hand_back_bootorder(){
 
 # N20 ③：用户拍板的求助渠道（救援层首屏 + GUI 失败提示 + docs/33 三处一致）。
 show_support(){
-    say "Support: QQ group 1128237828 / email ms_2@qq.com (please attach the rescue log)"
+    say "支持:QQ群1128237828 邮箱ms_2@qq.com(请附救援日志)"
 }
 
 # 目标盘上是否还留着旧系统备份 ~old（只有 A 引擎的交换会留下它）。
@@ -931,38 +936,38 @@ triage_previous(){
     has_old_tree "$_tp_dev" || return 0
     _tp_denied=0
     while :; do
-        say "==== SysRecover: previous task NOT confirmed ===="
-        say "old system backup (~old) still exists: last restore never reached 'new system OK'"
-        say "[1] roll back to old system (recommended; discards the new system)"
-        say "[2] retry the new system"
-        say "[3] reboot only"
+        say "==== SysRecover 上次任务未确认 ===="
+        say "旧备份 ~old 仍在:上次还原未完成"
+        say "[1] 回滚到旧系统(推荐,丢弃新系统)"
+        say "[2] 重试新系统"
+        say "[3] 仅重启"
         show_support
         if [ "$_tp_has" = "1" ]; then
-            say "choice? auto-[2] in 120s (unattended: never auto-rollback)"
+            say "请选择? 120秒无输入自动选[2](无人值守不做回滚)"
         else
-            say "choice? auto-[3] in 120s (unattended: never auto-rollback)"
+            say "请选择? 120秒无输入自动选[3](无人值守不做回滚)"
         fi
         _ch=
         read -t 120 -r _ch || _ch=
         if [ -z "$_ch" ]; then
             if [ "$_tp_has" = "1" ]; then _ch=2; else _ch=3; fi
-            say "AUTO: no input in 120s -> choice $_ch (rollback requires manual YES)"
+            say "自动:120秒无输入,已选 $_ch (回滚必须手工输入YES)"
         fi
         case "$_ch" in
             1)
-                say "Rollback discards the new system. Type uppercase YES within 60s:"
+                say "回滚会丢弃新系统;60秒内输入大写YES确认:"
                 _cf=
                 read -t 60 -r _cf || _cf=
                 if [ "$_cf" != "YES" ]; then
                     _tp_denied=$((_tp_denied + 1))
-                    say "ERROR: rollback NOT confirmed ($_tp_denied/2), target untouched"
+                    say "ERROR: 回滚未确认 ($_tp_denied/2),目标未改动"
                     if [ "$_tp_denied" -ge 2 ]; then
-                        say "ERROR: giving up rollback after 2 failed confirmations; no menu loop"
+                        say "ERROR: 两次确认失败,放弃回滚;不再循环菜单"
                         return 0
                     fi
                     continue
                 fi
-                say "starting rollback: ~old -> root; the new system tree is discarded"
+                say "开始回滚:~old -> 根;新系统目录将被丢弃"
                 _urc=1
                 if [ -f /zjswap-undo.sh ]; then
                     sh /zjswap-undo.sh "$_tp_dev" /tmp/zj_n20_undo
@@ -974,24 +979,24 @@ triage_previous(){
                     0)
                         clear_stale_task "$_tp_dev"
                         mark_pending_task "$_tp_dev"
-                        say "rollback OK: old system is back at the root; rebooting"
+                        say "回滚成功:旧系统已回到根;正在重启"
                         sync
                         sleep 3
                         reboot_now
                         break
                         ;;
-                    2) say "rollback NOT run: no usable ~old (backup incomplete); target untouched" ;;
-                    3) say "rollback NOT run: root still has ~new from an interrupted run; retry or contact support" ;;
-                    *) say "rollback FAILED (rc=$_urc); target swap may be incomplete; please send us the log" ;;
+                    2) say "回滚未执行:~old 不可用(备份不完整);目标未改动" ;;
+                    3) say "回滚未执行:根上仍有上次中断的~new;请重试或联系支持" ;;
+                    *) say "回滚失败 (rc=$_urc);目标交换可能不完整;请把日志发给我们" ;;
                 esac
                 show_support
                 ;;
             2)
                 if [ "$_tp_has" = "1" ]; then
-                    say "continuing the previous unfinished task"
+                    say "继续上次未完成的任务"
                     return 0
                 fi
-                say "no resumable task; rebooting as 'retry new system'"
+                say "无未完成任务;按重试新系统重启"
                 sync
                 sleep 2
                 reboot_now
@@ -1003,17 +1008,17 @@ triage_previous(){
                 reboot_now
                 break
                 ;;
-            *) say "invalid choice: $_ch (1=rollback, 2=retry, 3=reboot)" ;;
+            *) say "无效选择:$_ch (1=回滚,2=重试,3=重启)" ;;
         esac
     done
     return 0
 }
 
 reboot_now(){
-    say "AUTO-RECOVER: rebooting now (open SysRecover on next Windows start for the report)"
+    say "AUTO-RECOVER: 正在重启(下次进Windows后打开SysRecover看报告)"
     # N20：启动顺序已在进救援时归还；这里再兜一次（幂等，失败不阻塞重启）
     hand_back_bootorder || {
-        say "ERROR: BootOrder hand-back failed again; please fix boot order in BIOS"
+        say "ERROR: 启动顺序归还再次失败;请在BIOS中修正启动顺序"
         show_support
     }
     sync
@@ -1023,7 +1028,7 @@ reboot_now(){
     reboot -f
     # P1（beta.6）：reboot -f 两次仍返回 = 重启没生效。这里必须**终止**，
     # 否则调用方的菜单循环会再次自动选择、再次重启，形成无人值守死循环。
-    say "ERROR: reboot did not take effect; stopping here to avoid a loop"
+    say "ERROR: 重启未生效;停在此处避免死循环"
     sync
     sleep 5
     poweroff -f
@@ -1043,15 +1048,15 @@ menu_loop(){
     _mi=0
     while :; do
         _mi=$((_mi + 1))
-        say "==== SysRecover recovery menu (round $_mi) ===="
+        say "==== SysRecover 恢复菜单(第$_mi轮) ===="
         _rc_m=$(sed -n 's/.*restore script returned (rc=\([0-9]*\)).*/\1/p' /tmp/zjrestore.log 2>/dev/null | tail -n 1)
         _st_m=$(sed -n 's/.*STEP=\([a-zA-Z][a-zA-Z-]*\).*/\1/p' /tmp/zjrestore.log 2>/dev/null | tail -n 1)
-        say "RESULT: restore FAILED (rc=${_rc_m:-?}) STEP=${_st_m:-unknown}"
-        say "[1] Retry restore once more"
-        say "[2] Reboot now"
-        say "[3] Expert shell"
+        say "RESULT: 还原失败 (rc=${_rc_m:-?}) STEP=${_st_m:-unknown}"
+        say "[1] 再试一次还原"
+        say "[2] 立即重启"
+        say "[3] 专家命令行"
         show_support
-        say "choice? auto-[2] in 120s"
+        say "请选择? 120秒无输入自动选[2]"
         _ch=
         read -t 120 -r _ch || _ch=
         [ -z "$_ch" ] && _ch=2
@@ -1066,10 +1071,10 @@ menu_loop(){
                 ;;
             2) reboot_now; break ;;
             3) break ;;
-            *) say "invalid choice: $_ch (1=retry, 2=reboot, 3=shell)" ;;
+            *) say "无效选择:$_ch (1=重试,2=重启,3=命令行)" ;;
         esac
     done
-    say "entering rescue shell"
+    say "进入救援命令行"
     exec /bin/sh
 }
 
@@ -1087,12 +1092,12 @@ if [ "$_ran" = "1" ]; then
     # N20：契约/日志已可读（上面已按 found_log / conf 判定），且还没写目标盘。
     # 先把启动顺序还给 Windows；写 NVRAM 失败 → 中止，不带着"用户可能被困"继续。
     if ! hand_back_bootorder; then
-        say "ERROR: cannot hand the boot order back to Windows (NVRAM read-only or full)."
-        say "ERROR: nothing will be written to the target, so you are not trapped in rescue."
+        say "ERROR: 无法把启动顺序交还Windows(NVRAM只读或已满)"
+        say "ERROR: 不会写入目标盘,你不会被困在救援层"
         show_support
         /bin/sh /zjrestore-lite.sh zz-blackbox nvram-handback
         sync
-        say "Powering off in 5s; press F12/Esc for the boot menu (or change boot order in BIOS)."
+        say "5秒后关机;按F12/Esc进启动菜单(或在BIOS中修改启动顺序)"
         sleep 5
         poweroff -f
         reboot -f
@@ -1153,7 +1158,7 @@ if [ "$_ran" = "0" ]; then
         say "WARN: BootOrder hand-back failed (nothing to hand back or NVRAM error)"
     }
     triage_previous "" 0
-    say "no restore task on this machine -> reboot in 10s (power off now to stay)"
+    say "本机没有还原任务 -> 10秒后重启(想留在救援层请现在关机)"
     sleep 10
     reboot_now
 fi

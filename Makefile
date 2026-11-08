@@ -354,7 +354,8 @@ RESCUE_SRC = src/common/version.h $(wildcard bootfiles/alpine/*) \
              bootfiles/zjrestore-lite.sh bootfiles/zjswap.sh \
              bootfiles/zjswap-undo.sh bootfiles/setup-swap.sh \
              bootfiles/zjlog.sh bootfiles/ntfs-boot-code.bin \
-             bootfiles/ntfs-boot-cont.bin bootfiles/zj-restore-boot.exe
+             bootfiles/ntfs-boot-cont.bin bootfiles/zj-restore-boot.exe \
+             bootfiles/zjfont.psf bootfiles/zjzhmap.sed
 
 rescue-payload: $(RESCUE_CPIO)
 

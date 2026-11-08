@@ -89,9 +89,12 @@ INITRAMFS_MEMBERS = {
     "ntfs-boot-code.bin": "bootfiles/ntfs-boot-code.bin",
     "ntfs-boot-cont.bin": "bootfiles/ntfs-boot-cont.bin",
     "zj-restore-boot.exe": "bootfiles/zj-restore-boot.exe",
+    # 中文字模与"汉字 -> 半字码位"映射（取模嵌入；见 tools/gen-rescue-font.py）
+    "zjfont.psf": "bootfiles/zjfont.psf",
+    "zjzhmap.sed": "bootfiles/zjzhmap.sed",
 }
 BINARY_MEMBERS = {"ntfs-boot-code.bin", "ntfs-boot-cont.bin",
-                  "zj-restore-boot.exe"}
+                  "zj-restore-boot.exe", "zjfont.psf", "zjzhmap.sed"}
 
 # C6：这些源文件只要比 initramfs 新，就说明载荷已过期（必须先重建）
 # （vmlinuz 是同一构建的产物，不列入；alpine/ 下全部文件都算源）
@@ -99,6 +102,8 @@ PAYLOAD_SOURCES = PRODUCT + [
     "bootfiles/ntfs-boot-code.bin",
     "bootfiles/ntfs-boot-cont.bin",
     "bootfiles/zj-restore-boot.exe",
+    "bootfiles/zjfont.psf",
+    "bootfiles/zjzhmap.sed",
 ]
 
 # C7：initramfs 里自带的构建版本戳必须与 version.h 同源
@@ -160,25 +165,103 @@ def deny_violations(rel):
     return out
 
 
-# C8（beta.6，P2 测试台实测）：救援控制台没有 CJK 字库 —— say 里的中文会变成
-# 方块/问号，首屏只剩 [1][2][3]。控制台消息必须是纯 ASCII（文件日志可写中文，
-# 但这里只查屏幕输出 say）。注释里的中文不受影响。
+# C8（取模中文化后反转）：控制台提示允许中文，但必须落在字模覆盖范围内，
+# 且一条提示只占一行（80 列控制台、中文 2 列、上限 78 列）。内核的双宽折行
+# 在 8px 字格下会把汉字挤扁/错位，所以宁可拆成多条 say，也不让内核折行。
+# 纯 ASCII 的 say 不动（诊断行；QEMU 断言 grep 它们）。注释里的中文不受影响。
 CJK_RE = re.compile('[\u4e00-\u9fff]')
+FULLWIDTH_RE = re.compile('[\u3000-\u303f\uff00-\uffef]')
 SAY_RE = re.compile(r'\bsay\s+"([^"]*)"')
+ZH_MAP = "bootfiles/zjzhmap.sed"
+ZH_FONT = "bootfiles/zjfont.psf"
+CONSOLE_COLS = 78     # 80 列控制台，留 2 列余量
+PREFIX_COLS = 4       # "SR: " / "ZJ: "
+
+
+def _char_cols(ch):
+    return 2 if CJK_RE.match(ch) else 1
+
+
+def _load_zh_map():
+    """读 zjzhmap.sed：汉字 -> 两个半字码位（PUA）。"""
+    path = os.path.join(ROOT, ZH_MAP)
+    if not os.path.isfile(path):
+        return None
+    out = {}
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            m = re.match("s/(.)/(..)/g$", line.rstrip("\n"))
+            if m:
+                out[m.group(1)] = m.group(2)
+    return out
+
+
+def _font_pua_set():
+    """读 PSF1 的 unicode 表，返回字模实际提供的中文码位集合。"""
+    path = os.path.join(ROOT, ZH_FONT)
+    if not os.path.isfile(path):
+        return None
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    if len(raw) < 4 or raw[0] != 0x36 or raw[1] != 0x04:
+        return None
+    mode, charsize = raw[2], raw[3]
+    count = 512 if (mode & 0x01) else 256
+    off = 4 + count * charsize
+    vals = set()
+    while off + 2 <= len(raw):
+        v = raw[off] | (raw[off + 1] << 8)
+        off += 2
+        if v != 0xFFFF:
+            vals.add(v)
+    return vals
 
 
 def console_ascii_violations():
+    """C8：控制台提示的字符必须都在字模里，且一行放得下。
+
+    规则：
+      · 纯 ASCII 的 say 照旧（诊断行，日志断言依赖它们）。
+      · 出现汉字 = 中文界面句，必须满足：
+          - 每个汉字都在 bootfiles/zjzhmap.sed 里（字模覆盖，不相干的字会显示成 ?）
+          - 不许全角标点（字模没有，而且宽度会超过 2 列）
+          - 一行 ≤ 78 列（中文 2 列、ASCII 1 列；不许靠内核折行，双宽折行会错位）
+          - 不接受"半中半英但英文不在 ASCII 区"的怪字符
+    """
     out = []
+    cmap = _load_zh_map()
+    pua = _font_pua_set()
+    if cmap is None:
+        out.append("缺少 %s（取模中文化必须先跑 tools/gen-rescue-font.py）" % ZH_MAP)
+    if pua is None:
+        out.append("缺少 %s（取模中文化必须先跑 tools/gen-rescue-font.py）" % ZH_FONT)
+    if cmap is None or pua is None:
+        return out
+    if set(ord(c) for pair in cmap.values() for c in pair) - pua:
+        out.append("%s 与 %s 不同步：映射里的码位在字模里找不到" % (ZH_MAP, ZH_FONT))
     for rel in PRODUCT:
         for i, line in enumerate(read_lines(rel), 1):
             if is_comment(line):
                 continue
             m = SAY_RE.search(line)
-            if m and CJK_RE.search(m.group(1)):
-                out.append(
-                    "%s:%d: console say() contains CJK (no CJK font in rescue, "
-                    "use ASCII): %s" % (rel, i, m.group(1)[:60])
-                )
+            if not m:
+                continue
+            msg = m.group(1)
+            if not CJK_RE.search(msg):
+                if any(not (0x20 <= ord(c) <= 0x7E) for c in msg):
+                    out.append("%s:%d: 非 ASCII 但也不含汉字: %r" % (rel, i, msg[:40]))
+                continue
+            cols = PREFIX_COLS + sum(_char_cols(c) for c in msg)
+            if cols > CONSOLE_COLS:
+                out.append("%s:%d: 控制台提示 %d 列 > %d 列，必须拆成多行独立 say: %s"
+                           % (rel, i, cols, CONSOLE_COLS, msg[:50]))
+            for c in msg:
+                if FULLWIDTH_RE.match(c):
+                    out.append("%s:%d: 全角标点 %r 不在字模里，请换半角: %s"
+                               % (rel, i, c, msg[:40]))
+                elif CJK_RE.match(c) and c not in cmap:
+                    out.append("%s:%d: 汉字 %r 未被字模覆盖（先跑 tools/gen-rescue-font.py）"
+                               % (rel, i, c))
     return out
 
 

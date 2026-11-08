@@ -25,9 +25,51 @@
 
 : "${ZJPREFIX:=ZJ}"
 
+# ── 救援层中文字库（16 点阵，取模嵌入）────────────────────────────────
+# 控制台是 Linux VT（vgacon/fbcon）：内核一行只认 8 像素宽的字符格，
+# 一个汉字占两格，所以字库里每个汉字都存成"左半 8px + 右半 8px"两块，
+# 各映射到一个私用区码位（U+E000 起），运行时用 sed 把汉字换成这两个
+# 半字码位 —— 双宽/折行/错位都不经过内核的双宽逻辑（那是按 16px 整字
+# 画第一格、第二格留空，8px 字格下会把汉字挤扁）。
+# 只在本地 VT 上启用：串口控制台没有字库，转码只会把日志变成乱码。
+zj_font_load(){
+    [ -f /zjfont.psf ] || return 1
+    [ -w /dev/tty0 ] || return 1
+    if setfont -C /dev/tty0 /zjfont.psf 2>>/tmp/zjlog.err; then
+        : > /tmp/zj-cjk-font.ok
+        return 0
+    fi
+    return 1
+}
+
+zj_console_cjk(){
+    [ -f /tmp/zj-cjk-font.ok ] || return 1
+    [ -f /zjzhmap.sed ] || return 1
+    [ -r /sys/class/tty/console/active ] || return 1
+    case "$(cat /sys/class/tty/console/active)" in
+        *tty[0-9]*) return 0 ;;
+    esac
+    return 1
+}
+
 say(){
-    echo "$ZJPREFIX: $*" 1>&2
-    echo "$(date '+%F %T') $ZJPREFIX: $*" >> "${LOG:-/tmp/zjrestore.log}" 2>/dev/null
+    _zj_line="$ZJPREFIX: $*"
+    case "$*" in
+        *[!\ -~]*)
+            # 含非 ASCII（中文界面句）：控制台拆成半字码位，落盘保持原文。
+            # 模式写成 [!\ -~] 是实测过的：busybox ash 认它，[! -~] 带裸空格
+            # 会在解析期报 "unexpected word"，[:print:] 在 ash 里把 UTF-8 当可打印。
+            if zj_console_cjk; then
+                printf '%s\n' "$_zj_line" | sed -f /zjzhmap.sed 1>&2
+            else
+                printf '%s\n' "$_zj_line" 1>&2
+            fi
+            ;;
+        *)
+            printf '%s\n' "$_zj_line" 1>&2
+            ;;
+    esac
+    echo "$(date '+%F %T') $_zj_line" >> "${LOG:-/tmp/zjrestore.log}" 2>/dev/null
     return 0
 }
 

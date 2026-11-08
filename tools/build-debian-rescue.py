@@ -350,7 +350,11 @@ def main():
                        ('ntfs-boot-cont.bin', 0o644),
                        # B 引擎首启清理器：rescue 层投放到目标 Windows 的
                        # ProgramData + Startup，登录时自动清临时引导项。
-                       ('zj-restore-boot.exe', 0o644)):
+                       ('zj-restore-boot.exe', 0o644),
+                       # 控制台 16 点阵中文字模 + "汉字 -> 半字码位" 映射
+                       # （由 tools/gen-rescue-font.py 生成，C8 会校验两者同步）
+                       ('zjfont.psf', 0o644),
+                       ('zjzhmap.sed', 0o644)):
         s = os.path.join(zj.BOOT, name if name != 'init'
                          else os.path.join('alpine', 'init'))
         if os.path.exists(s):
@@ -362,6 +366,11 @@ def main():
     # 这类静默降级正是本项目反复踩的坑，fail-fast 拦在构建期（同 PIT-079 纪律）。
     if not os.path.exists(os.path.join(zj.STG, 'zjlog.sh')):
         raise RuntimeError('zjlog: bootfiles/zjlog.sh missing (not packed)')
+    for asset in ('zjfont.psf', 'zjzhmap.sed'):
+        if not os.path.exists(os.path.join(zj.STG, asset)):
+            raise RuntimeError(
+                'i18n: %s missing (run tools/gen-rescue-font.py, then repack)'
+                % asset)
     for consumer in ('init', 'zjrestore-lite.sh', 'zjswap.sh',
                      'zjswap-undo.sh', 'setup-swap.sh'):
         cp = os.path.join(zj.STG, consumer)
