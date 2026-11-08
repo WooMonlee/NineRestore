@@ -17,11 +17,21 @@ r"""把 dist/ 打包成单文件（PIT-201 / PIT-213）。
   否则输出若被外部做成硬链接（例如 share\b3.exe → dist\SysRecover-Portable.exe），
   一次重建就会把共享端的历史原件一起改掉（1.0.0.3 已因此丢失）。
 """
+import importlib.util
 import json
 import os
 import shutil
 import subprocess
 import sys
+
+
+def _load_hygiene():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        'check-pack-hygiene.py')
+    spec = importlib.util.spec_from_file_location('check_pack_hygiene', path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def _atomic_copy(src, dst):
@@ -50,6 +60,16 @@ def main():
         exe = os.path.join(dist, 'SysRecover.exe')  # 32 位入口（无 x64 子目录时）
     if not os.path.exists(exe):
         print('portable-pack: SysRecover.exe not found under %s' % dist)
+        return 1
+
+    # beta.9（测试台第三）：运行产物不许进包。dist 里的 restore-task.conf /
+    # _zjresy*.log / ZJRESTORE-status.txt / logs 都说明打包输入被运行过。
+    bad = _load_hygiene().scan(dist)
+    if bad:
+        print('portable-pack: REFUSE: runtime artifact(s) in %s' % dist)
+        for x in bad:
+            print('  - ' + x)
+        print('  hint: python tools/check-pack-hygiene.py --clean %s' % dist)
         return 1
 
     out_abs = os.path.abspath(out)

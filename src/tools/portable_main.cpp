@@ -237,6 +237,34 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             RemoveTree(stale);
         }
     }
+    // beta.9（测试台第三）：换版本解包时清掉上一版在同一 AppDir 里留下的运行产物。
+    // 真实载荷清单里没有这些文件（beta.8 已逐条核对 74 条），测试台看到的
+    // 08:36 restore-task.conf 是旧版在此目录运行后的残留 —— 解包只覆盖同名条目，
+    // 不清理目录，所以必须显式删。logs\ 是用户自己的历史日志，不动。
+    {
+        const wchar_t* kStale[] = {
+            L"restore-task.conf", L"restore-task.json",
+            L"ZJRESTORE-status.txt", L"ZJRESTORE-last.log",
+            L"ZJRESTORE-probe.txt", L"pending-restore.txt",
+        };
+        for (const wchar_t* n : kStale) {
+            const std::wstring p = dest + L"\\" + n;
+            SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_NORMAL);
+            DeleteFileW(p.c_str());
+        }
+        WIN32_FIND_DATAW fd = {};
+        HANDLE hf = FindFirstFileW((dest + L"\\_zjresy*.log").c_str(), &fd);
+        if (hf != INVALID_HANDLE_VALUE) {
+            do {
+                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                    const std::wstring p = dest + L"\\" + fd.cFileName;
+                    SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_NORMAL);
+                    DeleteFileW(p.c_str());
+                }
+            } while (FindNextFileW(hf, &fd));
+            FindClose(hf);
+        }
+    }
     // 顺序解析条目并落盘（覆盖写；同名同大小则跳过以加快二次启动）
     pos.QuadPart = (LONGLONG)payload;
     SetFilePointerEx(h, pos, nullptr, FILE_BEGIN);

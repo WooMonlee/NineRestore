@@ -446,12 +446,19 @@ write_success_receipt(){
     _rcpt=0
     if [ -n "$SOFT_MNT" ] && [ -d "$SOFT_MNT/$SD_REL" ]; then
         mkdir -p "$SOFT_MNT/$SD_REL/logs" 2>/dev/null
-        bb_status_text > "$SOFT_MNT/$SD_REL/logs/ZJRESTORE-status.txt" 2>/dev/null && _rcpt=1
+        if bb_status_text > "$SOFT_MNT/$SD_REL/logs/ZJRESTORE-status.txt" 2>/dev/null; then
+            _rcpt=$((_rcpt + 1))
+            say "receipt: soft-dir logs/ZJRESTORE-status.txt ($SOFT_MNT/$SD_REL)"
+        fi
     fi
     if [ -n "$BB_HOME" ]; then
-        bb_status_text > "$BB_HOME/ZJRESTORE-status.txt" 2>/dev/null && _rcpt=1
+        if bb_status_text > "$BB_HOME/ZJRESTORE-status.txt" 2>/dev/null; then
+            _rcpt=$((_rcpt + 1))
+            say "receipt: fallback ZJRESTORE-logs/ZJRESTORE-status.txt ($BB_HOME)"
+        fi
     fi
-    [ "$_rcpt" = 1 ] || say "WARN: status receipt NOT written (soft-dir & bb-home both failed)"
+    # beta.9（A1）：两处回执都应存在；只写一处要明确说出来（别让测试台再猜）。
+    [ "$_rcpt" -ge 2 ] || say "WARN: status receipt $_rcpt/2 written (BB_HOME='${BB_HOME}', SOFT_MNT='${SOFT_MNT}')"
     return 0
 }
 # 黑匣子专用挂载：短超时、少回退（失败路径上别被坏盘拖死）
@@ -777,35 +784,75 @@ STEP=target-found
 
 # 兜底日志窝（用户 2026-10-04 规格 3）：尽早认领一个非目标可写分区并**保持挂载**，
 # 让日志从此刻起持续镜像到那里 —— 就算之后中途断电/被杀，也有可收集的日志。
-# 软件目录能找到时不用它（日志照旧进软件目录）。收集（日志按钮）后会被清掉。
+# beta.9 起：**软件目录可用时也照样认领**（规格要求"软件目录 + 兜底窝"两处回执
+# 都真实存在）；两者同卷不同路径是允许的，只有同卷同路径才去重。
+# 收集（日志按钮）后会被清掉。
+# 兜底窝认领（beta.9，A1）：$1=挂载点。抽成独立函数便于回归脚本 stub。
+# 规格允许"同一卷不同路径"的两处回执；只有**同一卷同一路径**才去重并记日志。
+bb_home_claim_on(){
+    [ -n "$BB_HOME" ] && return 0
+    _hp="$1/ZJRESTORE-logs"
+    # 去重口径：兜底窝路径与软件目录本身相同（例如 software_dir 就叫
+    # ZJRESTORE-logs）→ 不再重复认领。软件目录回执在 <soft>/logs/，与兜底窝
+    # 的 <vol>/ZJRESTORE-logs 结构上不同名，正常情况不会命中。
+    if [ -n "$SOFT_MNT" ] && [ -n "$SD_REL" ] &&
+       [ "$SOFT_MNT/$SD_REL" = "$_hp" ]; then
+        say "fallback log home: skipped (same volume+path as software dir: $_hp)"
+        return 0
+    fi
+    mkdir -p "$_hp" || return 1
+    BB_HOME="$_hp"
+    save_diag "$BB_HOME"
+    if [ -n "$SOFT_MNT" ] && [ "$SOFT_MNT" = "$1" ]; then
+        say "fallback log home: $1 -> ZJRESTORE-logs/ (same volume as software dir, different path)"
+    elif [ -n "$SOFT_MNT" ]; then
+        say "fallback log home: $1 -> ZJRESTORE-logs/ (separate volume from software dir)"
+    else
+        say "fallback log home: $1 -> ZJRESTORE-logs/ (software dir not found)"
+    fi
+    return 0
+}
 claim_bb_home(){
     [ -n "$BB_HOME" ] && return 0
     if find_soft_dir; then
         start_log_mirror
-        return 0
     fi
-    # beta.8（问题 2）：确定性候选顺序（内置优先 → 容量≥2GiB → 容量降序 → 设备名），
-    # 不再按 list_parts 枚举顺序碰运气；pick_bb_home_devs 内部跳过目标/已挂载。
+    # beta.9（A1，测试台）：软件目录可用时**也要**认领兜底窝。上一版一旦
+    # find_soft_dir 成功就 return 0，BB_HOME 恒为空 → 规格写的"两处回执"
+    # 实际只写一处（returnold 实测：软件目录有、D:\ZJRESTORE-logs 不存在）。
+    # beta.8（问题 2）：确定性候选顺序（内置优先 → 容量≥2GiB → 容量降序 →
+    # 设备名），不再按 list_parts 枚举顺序碰运气；picker 内部跳过目标/已挂载。
     for _d in $(pick_bb_home_devs); do
         mkdir -p /tmp/zj_home
         if mnt_dev "$_d" /tmp/zj_home; then
-            # 这个分区也许就是软件目录所在（之前瞬时打不开）→ 直接当软件目录用
-            if [ -n "$SD_REL" ] && [ -d "/tmp/zj_home/$SD_REL" ]; then
+            # 这个分区也许就是软件目录所在（之前瞬时打不开）→ 顺手补软件目录，
+            # 但不因此跳过兜底窝（同卷不同路径是允许的）。
+            if [ -z "$SOFT_MNT" ] && [ -n "$SD_REL" ] &&
+               [ -d "/tmp/zj_home/$SD_REL" ]; then
                 SOFT_MNT=/tmp/zj_home
                 say "log home: software dir found late on $_d"
+            fi
+            if bb_home_claim_on /tmp/zj_home; then
                 start_log_mirror
                 return 0
             fi
-            if mkdir -p /tmp/zj_home/ZJRESTORE-logs 2>/dev/null; then
-                BB_HOME=/tmp/zj_home/ZJRESTORE-logs
-                save_diag "$BB_HOME" 2>/dev/null
-                say "fallback log home: $_d -> ZJRESTORE-logs/ (software dir not found)"
-                start_log_mirror
-                return 0
+            if [ -n "$SOFT_MNT" ] && [ "$SOFT_MNT" = "/tmp/zj_home" ]; then
+                :   # 软件目录就用这个挂载点，别卸
+            else
+                umount /tmp/zj_home
             fi
-            umount /tmp/zj_home 2>/dev/null
         fi
     done
+    # 没有第二个可用卷（单盘/整盘为目标）：退到软件目录同卷、不同路径的
+    # ZJRESTORE-logs，仍保证两处回执；两者同路径时 bb_home_claim_on 去重。
+    if [ -n "$SOFT_MNT" ] && bb_home_claim_on "$SOFT_MNT"; then
+        start_log_mirror
+        return 0
+    fi
+    if [ -n "$SOFT_MNT" ] || [ -n "$BB_HOME" ]; then
+        say "WARN: fallback log home unavailable (no eligible volume besides software dir)"
+        return 0
+    fi
     say "WARN: no fallback log home found (all non-target mounts failed)"
     return 1
 }

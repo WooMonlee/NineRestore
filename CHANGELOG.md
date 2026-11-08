@@ -3,6 +3,52 @@
 > 版本号唯一来源是 `src/common/version.h`；发布时 `version.h` / git tag / `dist/version.json` 三处同源。
 > 命名规则见 `docs/37-版本命名规范.md`（测试版 `1.0 beta.N` / 内部 `1.0.0.N` / 文件 `九转大还原1.0-beta.N.exe`）。
 
+## 1.0 beta.9（2026-11-08，内部 `1.0.0.9`）
+
+> 测试版（Beta）。beta.8 复验 A2/A3/A4 通过、A1 失败、A5 缺条件；本版修 A1 的结构性
+> 问题，清掉语言文件里的 F10 字面量，并补一条"运行产物不许进包"的门禁。
+
+### 1. "两处回执"在现有结构下不可能发生（高，A1）
+
+- 现场：returnold 后软件目录 `F:\ZJ8\logs\ZJRESTORE-status.txt` 有，兜底
+  `D:\ZJRESTORE-logs\` 完全不存在，救援日志也没有 `fallback log home` 行。
+- 根因：`claim_bb_home` 一旦 `find_soft_dir` 成功就 `return 0`，`BB_HOME` 恒为空；
+  `write_success_receipt` 因此只能写软件目录一处 —— 与 beta.8 修的问题 1 互补后可见，
+  两处回执从来没有同时存在过。
+- 修复：`claim_bb_home` 在软件目录可用时**继续**认领兜底窝（规则仍走
+  `pick_bb_home_devs`，A2 小盘排除、A3 落点稳定性不变）；抽 `bb_home_claim_on()`
+  便于回归，只有**同卷同路径**才显式去重并记
+  `fallback log home: skipped (same volume+path as software dir: …)`。
+  没有第二个可用卷时退到软件目录同卷、不同路径的 `ZJRESTORE-logs`，仍写两处。
+  日志新增 `fallback log home: … (separate volume/same volume…)` 与
+  `receipt: …` 两行；只写一处会报 `WARN: status receipt N/2 written`。
+- 回归：`tests/test_dual_receipt.sh` 6 条（双卷、同卷不同路径、同卷同路径去重、
+  软件目录缺失、两处写入静态断言、不再提前 return）。
+
+### 2. `lang/en.lang` 残留 F10 字面量（低）
+
+- 虚拟机分支运行时不引用该串，但英文词典里仍有 `F10`，属"有人又把键写死"的隐患。
+- 修复：热键串改为运行时占位 `%ls`（`swprintf` 填 `BootMenuKeyHint()`），
+  中英文同步；`check-i18n` 新增 **C6**——UI 文案出现 `F10` 直接失败。
+
+### 3. 打包卫生：运行产物混进交付目录（中）
+
+- 现场：beta.8 解包目录里有 08:36 的陈旧 `restore-task.conf`。
+- 核查：beta.8 载荷清单逐条 74 项，**没有** `restore-task.conf`；该文件来自
+  `%LOCALAPPDATA%\SysRecover\app` 上一次运行残留（解包只覆盖同名条目，不清理目录）。
+  同时 `dist\x64\logs`（11-04 的 `ZJRESTORE-status.txt`）确实会被打进包。
+- 修复：新增 `tools/check-pack-hygiene.py`（`restore-task.conf/json`、`_zjresy*.log`、
+  `ZJRESTORE-*.txt/log`、`pending-restore.txt`、任意层级 `logs/`、`*.tmp`、`*.dmp`）：
+  `make package` 结束前 `--clean`；`portable-pack.py` 打包前扫描，命中即
+  `REFUSE`；`check-dist.py` 复用同一规则。单文件换版本解包时清掉 AppDir 里的
+  旧运行产物（`logs\` 是用户日志，不动）。
+- 回归：`tests/test_pack_hygiene.sh` 6 条。
+
+### 4. 门禁与包
+
+- `make check` 全绿（含新增 `test_dual_receipt` 6 + `test_pack_hygiene` 6）。
+- 版本三元 `1.0.0.9` / `1.0 beta.9` / `九转大还原1.0-beta.9.exe`；历史包 beta.1–beta.8 未动。
+
 ## 1.0 beta.8（2026-11-08，内部 `1.0.0.8`）
 
 > 测试版（Beta）。beta.7 的 4 项复验全通过；本版处理测试台提的两条"用户会碰到"的

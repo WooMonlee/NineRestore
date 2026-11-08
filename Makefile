@@ -375,7 +375,7 @@ check: $(TEST_BIN) $(CLI_OUT) $(GUI_OUT) $(CHECK_OUT)
 	$(PYTHON) tools/check-i18n.py
 	$(PYTHON) tools/check-widths.py
 	$(PYTHON) tools/check-shell.py
-	# 救援层字模：覆盖/列宽（C8 之外的独立口径；不写文件，不需要 freetype）
+# 救援层字模：覆盖/列宽（C8 之外的独立口径；不写文件，不需要 freetype）
 	$(PYTHON) tools/gen-rescue-font.py --check
 	$(PYTHON) tools/check-config.py
 	$(PYTHON) tools/check-layers.py
@@ -388,6 +388,8 @@ check: $(TEST_BIN) $(CLI_OUT) $(GUI_OUT) $(CHECK_OUT)
 	@bash tests/test_conf_credible.sh
 	@bash tests/test_success_receipt.sh
 	@bash tests/test_log_home_rule.sh
+	@bash tests/test_dual_receipt.sh
+	@bash tests/test_pack_hygiene.sh "$(PYTHON)"
 
 # ---- ★ 发布包：根目录 = x64 总入口 + x86 兼容入口；x64/ = x64 真程序；共享资源放根目录 ----
 # 需要**两套工具链**：x64 走 PATH 上的 g++（请先把 mingw64\bin 加到 PATH），x86 走绝对路径。
@@ -428,9 +430,11 @@ package: ea-apply boot-cleanup launchers build/portable_stub.exe build/portable_
 # 异机还原：随包放一个 Drivers\ 说明（用户把启动驱动放这里；无 .inf 时仅内置）
 	@if not exist dist\Drivers mkdir dist\Drivers
 	@copy /Y bootfiles\Drivers-README.txt dist\Drivers\README.txt >nul
-# 交付目录不留运行期垃圾：从 dist 直接运行过 exe 时会在 dist\logs 落日志/诊断包
-# （LogBaseDir 的"程序目录"分支）——打包时清掉，避免把测试残留当交付物分发。
-	@if exist dist\logs rmdir /S /Q dist\logs
+# 交付目录不留运行期垃圾（beta.9，测试台第三）：从 dist 直接运行过 exe 时会在
+# dist\logs / dist\x64\logs 落日志，契约副件 restore-task.conf 也可能留在 dist 根。
+# 打包前统一按 tools/check-pack-hygiene.py 的同一套规则清掉；打包端还会再扫一遍，
+# 残留就直接拒绝出包（不再靠"记得手工删"）。
+	@$(PYTHON) tools/check-pack-hygiene.py --clean dist
 	@if not exist dist\bootfiles\sb mkdir dist\bootfiles\sb
 # package 只增不删 → 换链时旧资产会残留（grub-ubuntu.efi 曾与 grubx64.efi 并存）。
 # 注意：这里必须用 make 的 `#` 注释；命令行注释 `::` 在「单独一条 cmd /c」下不是合法命令。
@@ -499,13 +503,17 @@ $(PORTABLE_STUB_GUI): src/tools/portable_main.cpp src/common/xpress.h $(PORTABLE
 # （用户 2026-11 明确要求）。这不是"产物写错盘"，别再改回 dist/ 或加盘根守门。
 portable: package $(PORTABLE_STUB) $(PORTABLE_STUB_GUI)
 	@echo === portable: single-file pack (GUI=no console flash) ===
+# beta.9：`pack-self` 自己与 check-config 都会跑 dist 里的 exe，会重新生成 dist\logs。
+# 每次打包前用同一套规则清一次，打包端还会再扫；CLI 段结束后再清一次交给 dist-check。
+	@$(PYTHON) tools/check-pack-hygiene.py --clean dist
 	$(PYTHON) tools/portable-pack.py "$(PORTABLE_STUB_GUI)" "$(PORTABLE_OUT)" dist D:/
 	@echo === portable: single-file pack (CLI=exit codes) ===
+	@$(PYTHON) tools/check-pack-hygiene.py --clean dist
 	$(PYTHON) tools/portable-pack.py "$(PORTABLE_STUB)" "$(PORTABLE_CLI)" dist
+	@$(PYTHON) tools/check-pack-hygiene.py --clean dist
 
 # ---- 制品/CLI 冒烟（需先 package/all；不碰磁盘）----
 dist-check:
-	@if exist dist\logs rmdir /S /Q dist\logs
 	$(PYTHON) tools/check-dist.py dist
 smoke-cli:
 	$(PYTHON) tools/smoke-cli.py $(subst /,\,$(DISTDIR))\SysRecover.exe $(subst /,\,$(DISTDIR))\$(CHECK_NAME)

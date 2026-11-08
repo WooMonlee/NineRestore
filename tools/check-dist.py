@@ -146,8 +146,18 @@ def main() -> int:
                            % (stamp.strip(), want))
         except Exception as e:
             bad.append("initramfs zjrescue-version 读取失败: %s" % e)
-    if (dist / "logs").exists():
-        bad.append("runtime directory present: logs/")
+    # beta.9（测试台第三）：运行产物门禁 —— 与打包端同源（check-pack-hygiene.py），
+    # 防止 restore-task.conf / _zjresy*.log / ZJRESTORE-status.txt / logs 进包。
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "check_pack_hygiene", str(ROOT / "tools" / "check-pack-hygiene.py"))
+        hyg = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hyg)
+        for x in hyg.scan(dist):
+            bad.append("pack hygiene: " + x)
+    except Exception as e:
+        bad.append("pack hygiene 校验异常: %s" % e)
     # 版本资源（用户 2026-11-06）：每个**会被分发**的 exe 都要能在资源管理器
     # 「属性 → 详细信息」里读到 产品名/版本/公司/版权；单文件最外层 exe 也一样
     # （用户右键看到的就是 stub 这一层，内层 PE 运行时才暴露）。
@@ -170,9 +180,6 @@ def main() -> int:
                 bad += vi.check([dist / rel])
     except Exception as e:  # 导入失败也要算失败，不能静默跳过
         bad.append("VersionInfo 校验异常: %s" % e)
-    for p in dist.rglob("*"):
-        if p.is_file() and (p.name.endswith(".tmp") or p.suffix.lower() == ".dmp"):
-            bad.append("runtime artifact: " + str(p.relative_to(dist)))
     sums = dist / "SHA256SUMS.txt"
     if sums.is_file():
         for line in sums.read_text(encoding="utf-8").splitlines():

@@ -2416,6 +2416,45 @@
     `main_form_notice.cpp` "还原菜单未执行"正确操作 + 失败兜底。
   · 回归：`tests/unit_tests.cpp` `vmware_guest_detect`（7 组 SMBIOS 串）。
 
+### PIT-230
+
+- PIT-230 **软件目录可用时兜底窝被跳过，"两处回执"结构上不可能成立**（2026-11-08，beta.9，测试台 A1）
+  · 现场：returnold 后 `F:\ZJ8\logs\ZJRESTORE-status.txt` 有，`D:\ZJRESTORE-logs\` 不存在，
+    日志无 `fallback log home` 行。
+  · 根因：`claim_bb_home` 在 `find_soft_dir` 成功后立即 `return 0`，`BB_HOME` 恒为空；
+    `write_success_receipt` 的"兜底"分支永远走不到。beta.8 修的是软件目录落点，
+    两版互补后暴露出这条更早的结构缺口。
+  · 处置：软件目录可用时**继续**认领兜底窝；抽 `bb_home_claim_on()`（可回归）；
+    同卷同路径显式去重并记 `skipped (same volume+path as software dir: …)`；
+    只有软件卷可用时退到同卷不同路径 `ZJRESTORE-logs`，两处回执仍然写。
+  · 不变式：A2（<2GiB 不认领）与 A3（落点确定性）的 `pick_bb_home_devs` 规则未改。
+  · 回归：`tests/test_dual_receipt.sh` 6 条。
+
+### PIT-231
+
+- PIT-231 **UI 词典残留 F10 字面量**（2026-11-08，beta.9，测试台）
+  · 现象：`dist\lang\en.lang:630` 含 `F10`；VM 分支运行时不引用，但一旦有人改回
+    "直接取该串"就会在 VM 上重新显示不可用的按键。
+  · 处置：热键串改 `%ls` 运行时占位，`swprintf` 填 `BootMenuKeyHint()`（物理机仍是
+    本机实测键）；中英文同步。`tools/check-i18n.py` 新增 **C6**：lang 键/值出现
+    `F10` 即失败。
+  · 注意：代码注释里仍可能提到历史 F10 事故，门禁只扫 UI 文案（lang）。
+
+### PIT-232
+
+- PIT-232 **运行产物混入交付目录 / 解包目录**（2026-11-08，beta.9，测试台）
+  · 现场：beta.8 解包内有 08:36 的 `restore-task.conf`。
+  · 核查：beta.8 载荷清单 74 项里**没有**该文件 —— 它来自
+    `%LOCALAPPDATA%\SysRecover\app` 上一次运行残留（解包只覆盖同名条目，不清目录）。
+    另确认真实存在的漏洞：`dist\x64\logs`（11-04）会被打进包（`make package` 原来
+    只清 `dist\logs`）。
+  · 处置：`tools/check-pack-hygiene.py` 单一口径（`restore-task.conf/json`、
+    `_zjresy*.log`、`ZJRESTORE-*.txt/log`、`pending-restore.txt`、任意层级 `logs/`、
+    `*.tmp`、`*.dmp`）：`package` 结束前 `--clean`；`portable-pack.py` 打包前扫描，
+    命中直接 `REFUSE`；`check-dist.py` 复用。`portable_main.cpp` 换版本解包时删
+    AppDir 里旧版的契约副件/状态文件（`logs\` 保留给用户）。
+  · 回归：`tests/test_pack_hygiene.sh` 6 条；`check-dist` 在 dist 有残留时直接失败。
+
 
 
 

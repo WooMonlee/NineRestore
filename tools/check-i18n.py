@@ -208,6 +208,15 @@ def main():
                         f"({len(diffs)} entry(ies); run: "
                         f"python tools/i18n-wrap.py --gen-lang)")
 
+    # C6（beta.9，测试台）：UI 文案不得写死 F10 —— 实体机按键是运行时值
+    # （BootMenuKeyHint），VMware 分支也不引用该串；需要按键的地方用 %ls 占位。
+    for k, v in sorted(lang.items(), key=lambda kv: kv[0].encode("utf-8")):
+        for s in (k, v):
+            if "F10" in s:
+                errs.append("C6 F10 literal in UI string "
+                            "(use %ls placeholder): "
+                            + wrap.lang_escape(k)[:60])
+
     if errs:
         print(f"check-i18n: FAIL ({len(errs)})")
         for e in errs:

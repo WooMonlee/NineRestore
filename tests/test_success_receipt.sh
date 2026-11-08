@@ -51,15 +51,16 @@ BB_HOME="$WORK/home2"; mkdir -p "$BB_HOME"
 : > "$OUT"
 write_success_receipt
 [ -f "$WORK/home2/ZJRESTORE-status.txt" ] || fail "case2: bb-home status missing"
-grep -q 'WARN: status receipt NOT written' "$OUT" && fail "case2: WARN despite bb-home success"
-ok "bb-home only"
+# beta.9：规格要"两处回执"，只有兜底一处属于部分成功 → 必须报 1/2（不再算全员通过）
+grep -q 'WARN: status receipt 1/2 written' "$OUT" || fail "case2: missing partial WARN"
+ok "bb-home only (partial 1/2)"
 
 # ③ 两处都不可用 → 必须响亮 WARN（不能静默）
 SOFT_MNT=""
 BB_HOME=""
 : > "$OUT"
 write_success_receipt || fail "case3: helper returned non-zero"
-grep -q 'WARN: status receipt NOT written' "$OUT" || fail "case3: missing WARN"
+grep -q 'WARN: status receipt 0/2 written' "$OUT" || fail "case3: missing WARN"
 ok "all-failed WARN"
 
 # ④ 静态断言：returnold 成功块（RETURN-OLD DONE 之后）必须先写回执再 exit 0

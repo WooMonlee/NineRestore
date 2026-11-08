@@ -892,7 +892,7 @@ EN = {
     '安装时间 ': 'Install time ',
     '，之后没有新的救援回执。\n': ', no new rescue receipt afterwards.\n',
     '可能原因：选了 SysRecover 但固件跳过了该启动项（BootOrder 前面有失效条目时常见），或救援层没有启动。\n': 'Possible cause: SysRecover was picked but the firmware skipped that entry (common when stale entries sit ahead in BootOrder), or the rescue layer never started.\n',
-    '正确操作：开机时按 F10（该机型也可能是 F12/Esc）→ 选 SysRecover。\n': 'Correct steps: at boot press F10 (on some machines it is F12/Esc), then pick SysRecover.\n',
+    '正确操作：开机时按 %ls（该机型也可能是 F12/Esc）→ 选 SysRecover。\n': 'Correct steps: at boot press %ls (on some machines it is F12/Esc), then pick SysRecover.\n',
     '若按该键无反应：重启进入固件设置（Windows 设置→恢复→高级启动→立即重启→疑难解答→UEFI 固件设置），在启动项里直接选 SysRecover。\n': 'If the key does nothing: restart into firmware settings (Windows Settings > Recovery > Advanced startup > Restart now > Troubleshoot > UEFI Firmware Settings) and pick SysRecover from the boot list.\n',
     '若确认已选仍回到 Windows，请把 logs\\collected 发给技术支持；启动项丢失时重新运行本程序安装菜单。': 'If you did pick SysRecover and still landed in Windows, send logs\\collected to support; if the entry is missing, run this program again to reinstall the menu.',
     '正确操作：关机，然后用「电源 → 打开电源时进入固件」选 SysRecover。\n': 'Correct steps: shut down, then use "Power -> Power On to Firmware" and choose SysRecover.\n',
